@@ -1,0 +1,13 @@
+# Authentication material and generated operational data
+profiles/*
+backup/*
+logs/*
+state/*
+auth.json
+
+# Defense in depth: never track credential containers or write intermediates
+*.auth.dpapi
+*.identity.dpapi
+*.tmp
+*.bak*
+**/.selftest-*
