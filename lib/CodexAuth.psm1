@@ -1072,6 +1072,136 @@ function Test-CodexProcessesStopped {
     }
 }
 
+function Request-CodexDesktopClose {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [object[]]$ProcessData,
+
+        [Parameter()]
+        [scriptblock]$CloseMainWindowAction
+    )
+
+    $useProvidedProcessData = $PSBoundParameters.ContainsKey('ProcessData')
+    if ($useProvidedProcessData) {
+        $snapshot = @($ProcessData)
+    }
+    else {
+        try {
+            $snapshot = @(Get-ProcessInspectionSnapshot)
+        }
+        catch {
+            return [pscustomobject]@{
+                Result = 'CODEX_PROCESS_STATE_UNKNOWN'
+                CloseRequested = $false
+                RequestedCount = 0
+            }
+        }
+    }
+
+    $processState = Test-CodexProcessesStopped -ProcessData $snapshot
+    if ($processState.ReasonCode -ceq 'CODEX_PROCESSES_STOPPED') {
+        return [pscustomobject]@{
+            Result = 'CODEX_ALREADY_STOPPED'
+            CloseRequested = $false
+            RequestedCount = 0
+        }
+    }
+    if ($processState.ReasonCode -cne 'CODEX_PROCESS_RUNNING') {
+        return [pscustomobject]@{
+            Result = 'CODEX_PROCESS_STATE_UNKNOWN'
+            CloseRequested = $false
+            RequestedCount = 0
+        }
+    }
+
+    $blockingIds = @{}
+    foreach ($blockingProcess in @($processState.BlockingProcesses)) {
+        $pidProperty = $blockingProcess.PSObject.Properties['PID']
+        if ($null -ne $pidProperty) {
+            $blockingIds[[string][int]$pidProperty.Value] = $true
+        }
+    }
+
+    $requestedCount = 0
+    foreach ($item in $snapshot) {
+        if ($null -eq $item) {
+            continue
+        }
+        $nameProperty = $item.PSObject.Properties['ProcessName']
+        $idProperty = $item.PSObject.Properties['Id']
+        $pathProperty = $item.PSObject.Properties['ExecutablePath']
+        $pathStatusProperty = $item.PSObject.Properties['PathReadStatus']
+        if ($null -eq $nameProperty -or $null -eq $idProperty -or
+            $null -eq $pathProperty -or $null -eq $pathStatusProperty) {
+            continue
+        }
+
+        $processId = [int]$idProperty.Value
+        if (-not $blockingIds.ContainsKey([string]$processId) -or
+            (Get-NormalizedProcessName -Name ([string]$nameProperty.Value)) `
+                -ine 'ChatGPT' -or
+            [string]$pathStatusProperty.Value -cne 'Readable' -or
+            -not (Test-NativeCodexChatGptPath `
+                -Path ([string]$pathProperty.Value))) {
+            continue
+        }
+
+        if ($useProvidedProcessData) {
+            $handleProperty = $item.PSObject.Properties['MainWindowHandle']
+            if ($null -eq $handleProperty -or
+                [int64]$handleProperty.Value -eq 0 -or
+                $null -eq $CloseMainWindowAction) {
+                continue
+            }
+            try {
+                if ([bool](& $CloseMainWindowAction $item)) {
+                    $requestedCount++
+                }
+            }
+            catch {
+                # A failed normal-close request is not escalated to termination.
+            }
+            continue
+        }
+
+        $liveProcess = $null
+        try {
+            $liveProcess = Get-Process -Id $processId -ErrorAction Stop
+            $livePath = [string]$liveProcess.Path
+            if (-not (Test-NativeCodexChatGptPath -Path $livePath) -or
+                [int64]$liveProcess.MainWindowHandle -eq 0) {
+                continue
+            }
+            if ([bool]$liveProcess.CloseMainWindow()) {
+                $requestedCount++
+            }
+        }
+        catch {
+            # Do not expose process details and never fall back to force-kill.
+        }
+        finally {
+            if ($null -ne $liveProcess) {
+                $liveProcess.Dispose()
+            }
+        }
+    }
+
+    if ($requestedCount -gt 0) {
+        return [pscustomobject]@{
+            Result = 'CODEX_CLOSE_REQUESTED'
+            CloseRequested = $true
+            RequestedCount = $requestedCount
+        }
+    }
+    return [pscustomobject]@{
+        Result = 'CODEX_MAIN_WINDOW_NOT_FOUND'
+        CloseRequested = $false
+        RequestedCount = 0
+    }
+}
+
 function Assert-CodexNotRunning {
     param(
         [object[]]$ProcessData,
@@ -2796,6 +2926,7 @@ Export-ModuleMember -Function @(
     'Protect-CodexAuthBytes',
     'Unprotect-CodexAuthBytes',
     'Test-CodexProcessesStopped',
+    'Request-CodexDesktopClose',
     'Save-CodexAccountSlot',
     'Get-CodexAccountSlot',
     'Add-CodexProfile',

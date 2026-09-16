@@ -84,9 +84,39 @@ try {
     $webChatGPTText = Get-RequiredControl -Window $window -Name 'WebChatGPTText'
     $refreshStatusText = Get-RequiredControl -Window $window -Name 'RefreshStatusText'
     $refreshButton = Get-RequiredControl -Window $window -Name 'RefreshButton'
+    $verifyButton = Get-RequiredControl -Window $window -Name 'VerifyButton'
+    $exitCodexButton = Get-RequiredControl -Window $window -Name 'ExitCodexButton'
     $themeComboBox = Get-RequiredControl -Window $window -Name 'ThemeComboBox'
     $backgroundImage = Get-RequiredControl -Window $window -Name 'BackgroundImage'
     $backgroundOverlay = Get-RequiredControl -Window $window -Name 'BackgroundOverlay'
+    $script:guiCurrentCodexStatus = '未知'
+    $script:guiExitInProgress = $false
+    $script:guiExitTimer = $null
+    $script:guiVerificationStates = @{}
+
+    function Update-QiehaoActionButtons {
+        $hasSelection = $null -ne $profilesGrid.SelectedItem
+        $verifyButton.IsEnabled = -not $script:guiExitInProgress -and
+            $hasSelection -and
+            $script:guiCurrentCodexStatus -ceq '已退出'
+        $exitCodexButton.IsEnabled = -not $script:guiExitInProgress -and
+            $script:guiCurrentCodexStatus -ceq '运行中'
+        $refreshButton.IsEnabled = -not $script:guiExitInProgress
+    }
+
+    function Show-QiehaoSafeMessage {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$Message
+        )
+
+        [void][System.Windows.MessageBox]::Show(
+            $Message,
+            'Codex 账号管理器',
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        )
+    }
 
     function Set-QiehaoTheme {
         param(
@@ -143,8 +173,27 @@ try {
             [object]$Snapshot
         )
 
+        $selectedName = if ($null -eq $profilesGrid.SelectedItem) {
+            $null
+        }
+        else {
+            [string]$profilesGrid.SelectedItem.Name
+        }
         $rows = @($Snapshot.Profiles)
+        foreach ($row in $rows) {
+            if ($script:guiVerificationStates.ContainsKey([string]$row.Name)) {
+                $row.Verification = [string]$script:guiVerificationStates[[string]$row.Name]
+            }
+        }
         $profilesGrid.ItemsSource = $rows
+        if (-not [string]::IsNullOrWhiteSpace($selectedName)) {
+            $matchingRow = @($rows | Where-Object {
+                [string]$_.Name -ceq $selectedName
+            } | Select-Object -First 1)
+            if ($matchingRow.Count -eq 1) {
+                $profilesGrid.SelectedItem = $matchingRow[0]
+            }
+        }
         $profileCountText.Text = if ($rows.Count -eq 1) {
             '1 个账号'
         }
@@ -152,6 +201,7 @@ try {
             [string]$rows.Count + ' 个账号'
         }
         $codexStatusText.Text = [string]$Snapshot.CodexDesktop
+        $script:guiCurrentCodexStatus = [string]$Snapshot.CodexDesktop
         $activeProfileText.Text = [string]$Snapshot.ActiveProfile
         $identityStatusText.Text = [string]$Snapshot.IdentityStatus
         $webChatGPTText.Text = [string]$Snapshot.WebChatGPT
@@ -168,6 +218,7 @@ try {
         else {
             '部分只读状态暂不可用'
         }
+        Update-QiehaoActionButtons
     }
 
     function Invoke-QiehaoReadOnlyRefresh {
@@ -185,8 +236,124 @@ try {
             $identityStatusText.Text = '未知'
         }
         finally {
-            $refreshButton.IsEnabled = $true
+            Update-QiehaoActionButtons
         }
+    }
+
+    function Invoke-QiehaoVerifySelectedProfile {
+        $selectedProfile = if ($null -eq $profilesGrid.SelectedItem) {
+            $null
+        }
+        else {
+            [string]$profilesGrid.SelectedItem.Name
+        }
+
+        $liveCodexStatus = '未知'
+        try {
+            $liveCodexStatus = ConvertTo-QiehaoCodexStatus `
+                -ProcessState (Test-CodexProcessesStopped)
+        }
+        catch {
+            $liveCodexStatus = '未知'
+        }
+
+        $verifyResult = Invoke-QiehaoVerifyRequest `
+            -SelectedProfile $selectedProfile `
+            -CodexStatus $liveCodexStatus `
+            -VerifyProvider {
+                param($ProfileName)
+                Test-CodexProfile -Name $ProfileName
+            }
+
+        if ($verifyResult.CoreCalled -and
+            -not [string]::IsNullOrWhiteSpace($selectedProfile)) {
+            $script:guiVerificationStates[$selectedProfile] = `
+                [string]$verifyResult.VerificationStatus
+        }
+
+        $displayMessage = [string]$verifyResult.Message
+        if ($verifyResult.ResultCode -ceq 'PROFILE_VERIFY_SUCCESS') {
+            $displayMessage = "账号：$selectedProfile`n状态：已验证"
+        }
+        Show-QiehaoSafeMessage -Message $displayMessage
+
+        if ($verifyResult.CoreCalled) {
+            Invoke-QiehaoReadOnlyRefresh
+        }
+        else {
+            Update-QiehaoActionButtons
+        }
+    }
+
+    function Complete-QiehaoExitWait {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$Message
+        )
+
+        if ($null -ne $script:guiExitTimer) {
+            $script:guiExitTimer.Stop()
+            $script:guiExitTimer = $null
+        }
+        $script:guiExitInProgress = $false
+        Show-QiehaoSafeMessage -Message $Message
+        Invoke-QiehaoReadOnlyRefresh
+    }
+
+    function Start-QiehaoExitWait {
+        $startedAt = [DateTime]::UtcNow
+        $script:guiExitInProgress = $true
+        Update-QiehaoActionButtons
+        $refreshStatusText.Text = '正在等待 Codex 正常退出…'
+        $script:guiExitTimer = New-Object `
+            System.Windows.Threading.DispatcherTimer
+        $script:guiExitTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+        $script:guiExitTimer.Add_Tick({
+            $status = '未知'
+            try {
+                $status = ConvertTo-QiehaoCodexStatus `
+                    -ProcessState (Test-CodexProcessesStopped)
+            }
+            catch {
+                $status = '未知'
+            }
+
+            if ($status -ceq '已退出') {
+                Complete-QiehaoExitWait -Message 'Codex 已正常退出。'
+                return
+            }
+            if ($status -ceq '未知') {
+                Complete-QiehaoExitWait `
+                    -Message '无法确认 Codex 是否完全退出，请勿执行账号切换。'
+                return
+            }
+            if (([DateTime]::UtcNow - $startedAt).TotalSeconds -ge 10) {
+                Complete-QiehaoExitWait `
+                    -Message 'Codex 仍有后台进程，请在系统托盘中选择退出，然后点击“刷新”。'
+            }
+        })
+        $script:guiExitTimer.Start()
+    }
+
+    function Invoke-QiehaoSafeCodexExit {
+        $result = $null
+        try {
+            $result = Request-CodexDesktopClose
+        }
+        catch {
+            Show-QiehaoSafeMessage `
+                -Message '无法安全确认 Codex 进程，请手动退出后重新检测。'
+            Invoke-QiehaoReadOnlyRefresh
+            return
+        }
+
+        if ($result.Result -ceq 'CODEX_CLOSE_REQUESTED') {
+            Start-QiehaoExitWait
+            return
+        }
+        Show-QiehaoSafeMessage `
+            -Message (ConvertTo-QiehaoExitMessage -ResultCode $result.Result)
+        Invoke-QiehaoReadOnlyRefresh
     }
 
     $themes = @(Get-QiehaoBackgroundThemes)
@@ -261,8 +428,17 @@ try {
         return
     }
 
+    $profilesGrid.Add_SelectionChanged({ Update-QiehaoActionButtons })
     $refreshButton.Add_Click({ Invoke-QiehaoReadOnlyRefresh })
+    $verifyButton.Add_Click({ Invoke-QiehaoVerifySelectedProfile })
+    $exitCodexButton.Add_Click({ Invoke-QiehaoSafeCodexExit })
     $window.Add_Loaded({ Invoke-QiehaoReadOnlyRefresh })
+    $window.Add_Closed({
+        if ($null -ne $script:guiExitTimer) {
+            $script:guiExitTimer.Stop()
+            $script:guiExitTimer = $null
+        }
+    })
     [void]$window.ShowDialog()
 }
 finally {

@@ -171,6 +171,7 @@
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" MinWidth="105" Width="*" />
                             <DataGridTextColumn Header="当前" Binding="{Binding Active}" Width="60" />
+                            <DataGridTextColumn Header="验证状态" Binding="{Binding Verification}" Width="82" />
                             <DataGridTextColumn Header="状态" Binding="{Binding Health}" MinWidth="105" Width="Auto">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">

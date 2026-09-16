@@ -135,6 +135,7 @@ function ConvertTo-QiehaoGuiProfileRows {
         $rows += [pscustomobject]@{
             Name = $name
             Active = $activeText
+            Verification = '未验证'
             Health = ConvertTo-QiehaoProfileDisplayValue -Category 'Health' `
                 -Value (Get-ObjectPropertyValue -InputObject $item `
                     -Name 'Health' -DefaultValue 'UNKNOWN')
@@ -151,6 +152,123 @@ function ConvertTo-QiehaoGuiProfileRows {
         }
     }
     return @($rows)
+}
+
+function ConvertTo-QiehaoVerifyMessage {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$ResultCode
+    )
+
+    switch ($ResultCode) {
+        'PROFILE_VERIFY_SUCCESS' { return '账号验证成功' }
+        'PROFILE_INCOMPLETE' { return '账号资料不完整' }
+        'PROFILE_IDENTITY_MISMATCH' { return '账号身份标记不匹配' }
+        'PROFILE_IDENTITY_MARKER_MISSING' { return '身份标记缺失' }
+        'PROFILE_METADATA_INVALID' { return '元数据异常' }
+        'CODEX_PROCESS_RUNNING' { return 'Codex 正在运行' }
+        'CODEX_PROCESS_STATE_UNKNOWN' { return '无法确认 Codex 进程状态' }
+        'OPERATION_BUSY' { return '另一个操作正在执行' }
+        'PROFILE_SELECTION_REQUIRED' { return '请先选择一个账号。' }
+        default { return '验证失败，请查看安全状态信息' }
+    }
+}
+
+function Invoke-QiehaoVerifyRequest {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$SelectedProfile,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('运行中', '已退出', '未知')]
+        [string]$CodexStatus,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$VerifyProvider
+    )
+
+    if ([string]::IsNullOrWhiteSpace($SelectedProfile)) {
+        return [pscustomobject]@{
+            CoreCalled = $false
+            ResultCode = 'PROFILE_SELECTION_REQUIRED'
+            Message = '请先选择一个账号。'
+            VerificationStatus = '未验证'
+        }
+    }
+    if ($CodexStatus -ceq '运行中') {
+        return [pscustomobject]@{
+            CoreCalled = $false
+            ResultCode = 'CODEX_PROCESS_RUNNING'
+            Message = '请先正常退出 Codex，再验证账号。'
+            VerificationStatus = '未验证'
+        }
+    }
+    if ($CodexStatus -cne '已退出') {
+        return [pscustomobject]@{
+            CoreCalled = $false
+            ResultCode = 'CODEX_PROCESS_STATE_UNKNOWN'
+            Message = '无法确认 Codex 进程状态，请重新检测。'
+            VerificationStatus = '未验证'
+        }
+    }
+
+    $resultCode = 'VERIFY_UNKNOWN'
+    try {
+        $result = & $VerifyProvider $SelectedProfile
+        $resultProperty = if ($null -eq $result) {
+            $null
+        }
+        else {
+            $result.PSObject.Properties['Result']
+        }
+        if ($null -ne $resultProperty) {
+            $resultCode = [string]$resultProperty.Value
+        }
+    }
+    catch {
+        $safeCodes = @(
+            'PROFILE_INCOMPLETE',
+            'PROFILE_IDENTITY_MISMATCH',
+            'PROFILE_IDENTITY_MARKER_MISSING',
+            'PROFILE_METADATA_INVALID',
+            'CODEX_PROCESS_RUNNING',
+            'CODEX_PROCESS_STATE_UNKNOWN',
+            'OPERATION_BUSY'
+        )
+        if ($safeCodes -ccontains [string]$_.Exception.Message) {
+            $resultCode = [string]$_.Exception.Message
+        }
+    }
+
+    $success = $resultCode -ceq 'PROFILE_VERIFY_SUCCESS'
+    return [pscustomobject]@{
+        CoreCalled = $true
+        ResultCode = $resultCode
+        Message = ConvertTo-QiehaoVerifyMessage -ResultCode $resultCode
+        VerificationStatus = if ($success) { '已验证' } else { '验证失败' }
+    }
+}
+
+function ConvertTo-QiehaoExitMessage {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$ResultCode
+    )
+
+    switch ($ResultCode) {
+        'CODEX_ALREADY_STOPPED' { return 'Codex 已经退出。' }
+        'CODEX_PROCESS_STATE_UNKNOWN' {
+            return '无法安全确认 Codex 进程，请手动退出后重新检测。'
+        }
+        'CODEX_CLOSE_REQUESTED' { return '已发送正常关闭请求，正在等待 Codex 退出。' }
+        'CODEX_MAIN_WINDOW_NOT_FOUND' {
+            return '未找到可安全关闭的 Codex 主窗口，请在系统托盘中选择退出，然后点击“刷新”。'
+        }
+        default { return '无法安全请求 Codex 退出，请手动退出后重新检测。' }
+    }
 }
 
 function ConvertTo-QiehaoCodexStatus {
@@ -539,6 +657,9 @@ function Exit-QiehaoGuiSingleInstance {
 Export-ModuleMember -Function @(
     'ConvertTo-QiehaoGuiProfileRows',
     'ConvertTo-QiehaoCodexStatus',
+    'ConvertTo-QiehaoVerifyMessage',
+    'Invoke-QiehaoVerifyRequest',
+    'ConvertTo-QiehaoExitMessage',
     'Get-QiehaoGuiSnapshot',
     'Get-QiehaoBackgroundThemes',
     'Get-QiehaoBackgroundTheme',

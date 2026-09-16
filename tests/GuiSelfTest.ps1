@@ -366,6 +366,174 @@ Assert-GuiTest -Condition (
     $edgeState.ReasonCode -ceq 'CODEX_PROCESSES_STOPPED'
 ) -Code 'GUI_BROWSER_EXTENSION_ISOLATION_FAILED'
 
+$verifyCalls = [pscustomobject]@{ Count=0 }
+$noSelectionVerify = Invoke-QiehaoVerifyRequest -SelectedProfile $null `
+    -CodexStatus '已退出' -VerifyProvider ({
+        param($Name)
+        $verifyCalls.Count++
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    -not $noSelectionVerify.CoreCalled -and
+    $noSelectionVerify.Message -ceq '请先选择一个账号。' -and
+    $verifyCalls.Count -eq 0
+) -Code 'GUI_VERIFY_WITHOUT_SELECTION_EXECUTED'
+
+$runningVerify = Invoke-QiehaoVerifyRequest -SelectedProfile 'A' `
+    -CodexStatus '运行中' -VerifyProvider ({
+        param($Name)
+        $verifyCalls.Count++
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    -not $runningVerify.CoreCalled -and
+    $runningVerify.Message -ceq '请先正常退出 Codex，再验证账号。' -and
+    $verifyCalls.Count -eq 0
+) -Code 'GUI_VERIFY_RUNNING_NOT_REJECTED'
+
+$unknownVerify = Invoke-QiehaoVerifyRequest -SelectedProfile 'A' `
+    -CodexStatus '未知' -VerifyProvider ({
+        param($Name)
+        $verifyCalls.Count++
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    -not $unknownVerify.CoreCalled -and
+    $unknownVerify.Message -ceq '无法确认 Codex 进程状态，请重新检测。' -and
+    $verifyCalls.Count -eq 0
+) -Code 'GUI_VERIFY_UNKNOWN_NOT_REJECTED'
+
+$successVerify = Invoke-QiehaoVerifyRequest -SelectedProfile 'A' `
+    -CodexStatus '已退出' -VerifyProvider ({
+        param($Name)
+        $verifyCalls.Count++
+        [pscustomobject]@{ Result='PROFILE_VERIFY_SUCCESS'; Profile=$Name }
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    $successVerify.CoreCalled -and
+    $successVerify.Message -ceq '账号验证成功' -and
+    $successVerify.VerificationStatus -ceq '已验证' -and
+    $verifyCalls.Count -eq 1
+) -Code 'GUI_VERIFY_SUCCESS_FAILED'
+
+$identityMismatchVerify = Invoke-QiehaoVerifyRequest -SelectedProfile 'A' `
+    -CodexStatus '已退出' -VerifyProvider { throw 'PROFILE_IDENTITY_MISMATCH' }
+Assert-GuiTest -Condition (
+    $identityMismatchVerify.Message -ceq '账号身份标记不匹配' -and
+    $identityMismatchVerify.VerificationStatus -ceq '验证失败'
+) -Code 'GUI_VERIFY_IDENTITY_MISMATCH_MESSAGE_FAILED'
+
+$incompleteVerify = Invoke-QiehaoVerifyRequest -SelectedProfile 'A' `
+    -CodexStatus '已退出' -VerifyProvider { throw 'PROFILE_INCOMPLETE' }
+Assert-GuiTest -Condition (
+    $incompleteVerify.Message -ceq '账号资料不完整' -and
+    $incompleteVerify.VerificationStatus -ceq '验证失败'
+) -Code 'GUI_VERIFY_INCOMPLETE_MESSAGE_FAILED'
+
+$sensitiveFailureVerify = Invoke-QiehaoVerifyRequest -SelectedProfile 'A' `
+    -CodexStatus '已退出' -VerifyProvider {
+        throw 'SECRET access_token account_id user@example.invalid'
+    }
+Assert-GuiTest -Condition (
+    $sensitiveFailureVerify.Message -ceq '验证失败，请查看安全状态信息' -and
+    $sensitiveFailureVerify.Message -notmatch '(?i)access_token|account_id|@'
+) -Code 'GUI_VERIFY_SENSITIVE_EXCEPTION_EXPOSED'
+
+$refreshAfterVerifyCalls = 0
+if ($successVerify.CoreCalled) { $refreshAfterVerifyCalls++ }
+Assert-GuiTest -Condition (
+    $refreshAfterVerifyCalls -eq 1
+) -Code 'GUI_VERIFY_REFRESH_NOT_REQUESTED'
+
+$alreadyStoppedExit = Request-CodexDesktopClose -ProcessData @()
+Assert-GuiTest -Condition (
+    $alreadyStoppedExit.Result -ceq 'CODEX_ALREADY_STOPPED' -and
+    -not $alreadyStoppedExit.CloseRequested -and
+    (ConvertTo-QiehaoExitMessage -ResultCode $alreadyStoppedExit.Result) `
+        -ceq 'Codex 已经退出。'
+) -Code 'GUI_EXIT_ALREADY_STOPPED_FAILED'
+
+$nativeCodexPath = 'C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__8wekyb3d8bbwe\app\ChatGPT.exe'
+$runningCodexSnapshot = @(
+    [pscustomobject]@{
+        ProcessName='ChatGPT.exe'; Id=9101
+        ExecutablePath=$nativeCodexPath; PathReadStatus='Readable'
+        ParentProcessId=0; ParentReadStatus='Readable'
+        MainWindowHandle=12345
+    }
+)
+$closeCapture = [pscustomobject]@{ Count=0; LastPid=0 }
+$closeRequested = Request-CodexDesktopClose `
+    -ProcessData $runningCodexSnapshot -CloseMainWindowAction ({
+        param($ProcessItem)
+        $closeCapture.Count++
+        $closeCapture.LastPid = [int]$ProcessItem.Id
+        return $true
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    $closeRequested.Result -ceq 'CODEX_CLOSE_REQUESTED' -and
+    $closeRequested.CloseRequested -and
+    $closeCapture.Count -eq 1 -and
+    $closeCapture.LastPid -eq 9101
+) -Code 'GUI_NORMAL_CLOSE_REQUEST_FAILED'
+
+$postCloseStopped = Test-CodexProcessesStopped -ProcessData @()
+Assert-GuiTest -Condition (
+    $postCloseStopped.ReasonCode -ceq 'CODEX_PROCESSES_STOPPED'
+) -Code 'GUI_EXIT_POST_CLOSE_STOPPED_FAILED'
+
+$stillRunningAfterClose = Test-CodexProcessesStopped `
+    -ProcessData $runningCodexSnapshot
+Assert-GuiTest -Condition (
+    $stillRunningAfterClose.ReasonCode -ceq 'CODEX_PROCESS_RUNNING'
+) -Code 'GUI_EXIT_STILL_RUNNING_NOT_REPORTED'
+
+$unknownCloseCalls = [pscustomobject]@{ Count=0 }
+$unknownExit = Request-CodexDesktopClose -ProcessData @(
+    [pscustomobject]@{
+        ProcessName='ChatGPT.exe'; Id=9201
+        ExecutablePath=$null; PathReadStatus='Unavailable'
+        ParentProcessId=$null; ParentReadStatus='Unavailable'
+        MainWindowHandle=23456
+    }
+) -CloseMainWindowAction ({
+    param($ProcessItem)
+    $unknownCloseCalls.Count++
+    return $true
+}.GetNewClosure())
+Assert-GuiTest -Condition (
+    $unknownExit.Result -ceq 'CODEX_PROCESS_STATE_UNKNOWN' -and
+    -not $unknownExit.CloseRequested -and
+    $unknownCloseCalls.Count -eq 0
+) -Code 'GUI_EXIT_UNKNOWN_SENT_CLOSE_REQUEST'
+
+$browserCloseCalls = [pscustomobject]@{ Count=0 }
+$browserOnlyExit = Request-CodexDesktopClose -ProcessData @(
+    [pscustomobject]@{
+        ProcessName='extension-host.exe'; Id=9301
+        ExecutablePath=$extensionHostPath; PathReadStatus='Readable'
+        ParentProcessId=9302; ParentReadStatus='Readable'
+        MainWindowHandle=34567
+    },
+    [pscustomobject]@{
+        ProcessName='cmd.exe'; Id=9302
+        ExecutablePath='C:\Windows\System32\cmd.exe'; PathReadStatus='Readable'
+        ParentProcessId=9303; ParentReadStatus='Readable'
+        MainWindowHandle=0
+    },
+    [pscustomobject]@{
+        ProcessName='chrome.exe'; Id=9303
+        ExecutablePath='C:\Program Files\Google\Chrome\Application\chrome.exe'
+        PathReadStatus='Readable'; ParentProcessId=0; ParentReadStatus='Readable'
+        MainWindowHandle=45678
+    }
+) -CloseMainWindowAction ({
+    param($ProcessItem)
+    $browserCloseCalls.Count++
+    return $true
+}.GetNewClosure())
+Assert-GuiTest -Condition (
+    $browserOnlyExit.Result -ceq 'CODEX_ALREADY_STOPPED' -and
+    $browserCloseCalls.Count -eq 0
+) -Code 'GUI_EXIT_BROWSER_PROCESS_TARGETED'
+
 $providerCalls = [pscustomobject]@{ List=0; Active=0; Process=0 }
 $null = Get-QiehaoGuiSnapshot `
     -ListProvider ({ $providerCalls.List++; @() }.GetNewClosure()) `
@@ -390,7 +558,6 @@ foreach ($dangerousCommand in @(
     'Add-CodexProfile',
     'Remove-CodexProfile',
     'Rename-CodexProfile',
-    'Test-CodexProfile',
     'Initialize-CodexProfileIdentityMarker',
     'Initialize-CodexActiveProfile'
 )) {
@@ -429,11 +596,9 @@ Assert-GuiTest -Condition (
 ) -Code 'GUI_BACKGROUND_RESIZE_MODE_INVALID'
 foreach ($buttonName in @(
     'SwitchButton',
-    'VerifyButton',
     'AddButton',
     'RenameButton',
-    'DeleteButton',
-    'ExitCodexButton'
+    'DeleteButton'
 )) {
     $buttonNode = $xamlDocument.SelectSingleNode(
         "//*[@x:Name='$buttonName']",
@@ -452,6 +617,28 @@ Assert-GuiTest -Condition (
     $null -ne $refreshNode -and
     $refreshNode.GetAttribute('IsEnabled') -cne 'False'
 ) -Code 'GUI_REFRESH_BUTTON_DISABLED'
+
+foreach ($phaseTwoButtonName in @('VerifyButton', 'ExitCodexButton')) {
+    $phaseTwoNode = $xamlDocument.SelectSingleNode(
+        "//*[@x:Name='$phaseTwoButtonName']",
+        $namespaceManager
+    )
+    Assert-GuiTest -Condition (
+        $null -ne $phaseTwoNode -and
+        $phaseTwoNode.GetAttribute('IsEnabled') -ceq 'False'
+    ) -Code ('GUI_PHASE_TWO_BUTTON_INITIAL_STATE_INVALID_' + $phaseTwoButtonName)
+}
+
+$coreAndGuiSource = $guiSource + [System.IO.File]::ReadAllText($coreModulePath)
+Assert-GuiTest -Condition (
+    $coreAndGuiSource -notmatch '(?i)Stop-Process\b|taskkill\b|TerminateProcess\b|\.Kill\s*\('
+) -Code 'GUI_FORCE_TERMINATION_API_PRESENT'
+Assert-GuiTest -Condition (
+    $guiSource -match 'Test-CodexProfile' -and
+    $guiSource -match 'Request-CodexDesktopClose' -and
+    $guiSource -match 'DispatcherTimer' -and
+    $guiSource -match 'Invoke-QiehaoReadOnlyRefresh'
+) -Code 'GUI_PHASE_TWO_WIRING_MISSING'
 
 $mutexName = 'Qiehaoqu.CodexAccountSwitcher.Gui.v1.SelfTest.' + `
     [Guid]::NewGuid().ToString('N')
@@ -508,6 +695,20 @@ finally {
     CodexStopped = 'PASS'
     CodexUnknown = 'PASS'
     BrowserExtensionIsolation = 'PASS'
+    VerifyNoSelectionRejected = 'PASS'
+    VerifyRunningRejected = 'PASS'
+    VerifyUnknownRejected = 'PASS'
+    VerifySuccess = 'PASS'
+    VerifyIdentityMismatchSafe = 'PASS'
+    VerifyIncompleteSafe = 'PASS'
+    VerifySensitiveFailureSafe = 'PASS'
+    VerifyRefresh = 'PASS'
+    ExitAlreadyStopped = 'PASS'
+    ExitCloseMainWindowRequested = 'PASS'
+    ExitPostCloseStopped = 'PASS'
+    ExitStillRunningNoForce = 'PASS'
+    ExitUnknownNoRequest = 'PASS'
+    ExitBrowserIsolation = 'PASS'
     RefreshReadOnly = 'PASS'
     DangerousButtonsDisabled = 'PASS'
     SecondInstanceBlocked = 'PASS'
