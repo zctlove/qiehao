@@ -1,4 +1,4 @@
-Set-StrictMode -Version 2.0
+﻿Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 function Get-ObjectPropertyValue {
@@ -42,6 +42,44 @@ function Get-AllowlistedDisplayValue {
     return $Fallback
 }
 
+function ConvertTo-QiehaoProfileDisplayValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Health', 'Artifact', 'Metadata')]
+        [string]$Category,
+
+        [AllowNull()]
+        [object]$Value
+    )
+
+    $candidate = [string]$Value
+    switch ($Category) {
+        'Health' {
+            switch ($candidate) {
+                'READY' { return '正常' }
+                'INCOMPLETE_PROFILE' { return '不完整' }
+                'INVALID_METADATA' { return '元数据异常' }
+                default { return '未知' }
+            }
+        }
+        'Artifact' {
+            switch ($candidate) {
+                'PRESENT' { return '存在' }
+                'MISSING' { return '缺失' }
+                default { return '未知' }
+            }
+        }
+        'Metadata' {
+            switch ($candidate) {
+                'VALID' { return '有效' }
+                'MISSING' { return '缺失' }
+                'INVALID' { return '异常' }
+                default { return '未知' }
+            }
+        }
+    }
+}
+
 function ConvertTo-QiehaoGuiProfileRows {
     [CmdletBinding()]
     param(
@@ -71,16 +109,16 @@ function ConvertTo-QiehaoGuiProfileRows {
             $activeText = if ($name.Equals(
                 $ActiveProfile,
                 [StringComparison]::OrdinalIgnoreCase
-            )) { 'Yes' } else { 'No' }
+            )) { '是' } else { '否' }
         }
         else {
             $activeValue = Get-ObjectPropertyValue -InputObject $item `
                 -Name 'Active' -DefaultValue $null
             if ($activeValue -is [bool]) {
-                $activeText = if ([bool]$activeValue) { 'Yes' } else { 'No' }
+                $activeText = if ([bool]$activeValue) { '是' } else { '否' }
             }
             else {
-                $activeText = 'Unknown'
+                $activeText = '未知'
             }
         }
 
@@ -89,34 +127,26 @@ function ConvertTo-QiehaoGuiProfileRows {
         if ([string]::IsNullOrWhiteSpace($updated)) {
             $updated = '<UNAVAILABLE>'
         }
+        switch ($updated) {
+            '<UNAVAILABLE>' { $updated = '不可用' }
+            '<INVALID_METADATA>' { $updated = '元数据异常' }
+        }
 
         $rows += [pscustomobject]@{
             Name = $name
             Active = $activeText
-            Health = Get-AllowlistedDisplayValue `
+            Health = ConvertTo-QiehaoProfileDisplayValue -Category 'Health' `
                 -Value (Get-ObjectPropertyValue -InputObject $item `
-                    -Name 'Health' -DefaultValue 'UNKNOWN') `
-                -AllowedValues @(
-                    'READY',
-                    'INCOMPLETE_PROFILE',
-                    'INVALID_METADATA',
-                    'UNKNOWN'
-                ) -Fallback 'UNKNOWN'
-            Auth = Get-AllowlistedDisplayValue `
+                    -Name 'Health' -DefaultValue 'UNKNOWN')
+            Auth = ConvertTo-QiehaoProfileDisplayValue -Category 'Artifact' `
                 -Value (Get-ObjectPropertyValue -InputObject $item `
-                    -Name 'AuthFile' -DefaultValue 'UNKNOWN') `
-                -AllowedValues @('PRESENT', 'MISSING', 'UNKNOWN') `
-                -Fallback 'UNKNOWN'
-            Identity = Get-AllowlistedDisplayValue `
+                    -Name 'AuthFile' -DefaultValue 'UNKNOWN')
+            Identity = ConvertTo-QiehaoProfileDisplayValue -Category 'Artifact' `
                 -Value (Get-ObjectPropertyValue -InputObject $item `
-                    -Name 'IdentityMarker' -DefaultValue 'UNKNOWN') `
-                -AllowedValues @('PRESENT', 'MISSING', 'UNKNOWN') `
-                -Fallback 'UNKNOWN'
-            Metadata = Get-AllowlistedDisplayValue `
+                    -Name 'IdentityMarker' -DefaultValue 'UNKNOWN')
+            Metadata = ConvertTo-QiehaoProfileDisplayValue -Category 'Metadata' `
                 -Value (Get-ObjectPropertyValue -InputObject $item `
-                    -Name 'Metadata' -DefaultValue 'UNKNOWN') `
-                -AllowedValues @('VALID', 'MISSING', 'INVALID', 'UNKNOWN') `
-                -Fallback 'UNKNOWN'
+                    -Name 'Metadata' -DefaultValue 'UNKNOWN')
             Updated = $updated
         }
     }
@@ -133,10 +163,10 @@ function ConvertTo-QiehaoCodexStatus {
     $reasonCode = [string](Get-ObjectPropertyValue -InputObject $ProcessState `
         -Name 'ReasonCode' -DefaultValue 'CODEX_PROCESS_STATE_UNKNOWN')
     switch ($reasonCode) {
-        'CODEX_PROCESSES_STOPPED' { return 'Stopped' }
-        'CODEX_PROCESS_RUNNING' { return 'Running' }
-        'CODEX_PROCESS_STATE_UNKNOWN' { return 'Unknown' }
-        default { return 'Unknown' }
+        'CODEX_PROCESSES_STOPPED' { return '已退出' }
+        'CODEX_PROCESS_RUNNING' { return '运行中' }
+        'CODEX_PROCESS_STATE_UNKNOWN' { return '未知' }
+        default { return '未知' }
     }
 }
 
@@ -163,7 +193,7 @@ function Get-QiehaoGuiSnapshot {
         $rawProfiles = @()
     }
 
-    $activeProfile = 'Not initialized'
+    $activeProfile = '未初始化'
     $activeProfileKnown = $false
     try {
         $activeState = & $ActiveProvider
@@ -178,7 +208,7 @@ function Get-QiehaoGuiSnapshot {
         $errors += 'ACTIVE_PROFILE_UNAVAILABLE'
     }
 
-    $codexStatus = 'Unknown'
+    $codexStatus = '未知'
     try {
         $codexStatus = ConvertTo-QiehaoCodexStatus -ProcessState (& $ProcessProvider)
     }
@@ -192,10 +222,262 @@ function Get-QiehaoGuiSnapshot {
     return [pscustomobject]@{
         CodexDesktop = $codexStatus
         ActiveProfile = $activeProfile
-        IdentityStatus = 'Not checked'
-        WebChatGPT = 'Unaffected'
+        IdentityStatus = '未检查'
+        WebChatGPT = '不受影响'
         Profiles = @($rows)
         ReadOnlyErrors = @($errors)
+    }
+}
+
+function Get-QiehaoBackgroundThemes {
+    [CmdletBinding()]
+    param()
+
+    return @(
+        [pscustomobject]@{
+            Id = '01-blue-glass'
+            Name = '科技蓝'
+            FileName = '01-blue-glass.png'
+            OverlayMode = 'Dark'
+        },
+        [pscustomobject]@{
+            Id = '02-navy-gold'
+            Name = '深蓝鎏金'
+            FileName = '02-navy-gold.png'
+            OverlayMode = 'Dark'
+        },
+        [pscustomobject]@{
+            Id = '03-ice-glass'
+            Name = '冰蓝玻璃'
+            FileName = '03-ice-glass.png'
+            OverlayMode = 'Light'
+        },
+        [pscustomobject]@{
+            Id = '04-purple-tech'
+            Name = '紫蓝星河'
+            FileName = '04-purple-tech.png'
+            OverlayMode = 'Dark'
+        },
+        [pscustomobject]@{
+            Id = '05-light-flow'
+            Name = '清透流光'
+            FileName = '05-light-flow.png'
+            OverlayMode = 'Light'
+        }
+    )
+}
+
+function Get-QiehaoBackgroundTheme {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$Id
+    )
+
+    foreach ($theme in @(Get-QiehaoBackgroundThemes)) {
+        if ($theme.Id -ceq $Id) {
+            return $theme
+        }
+    }
+    return $null
+}
+
+function Read-QiehaoUiPreferences {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$StateDirectory
+    )
+
+    $defaultBackground = '01-blue-glass'
+    $preferencePath = Join-Path -Path $StateDirectory `
+        -ChildPath 'ui-preferences.json'
+    if (-not [System.IO.File]::Exists($preferencePath)) {
+        return [pscustomobject]@{
+            Background = $defaultBackground
+            IsValid = $true
+            UsedDefault = $true
+        }
+    }
+
+    $text = $null
+    try {
+        $length = ([System.IO.FileInfo]$preferencePath).Length
+        if ($length -le 0 -or $length -gt 8192) {
+            throw 'UI_PREFERENCES_INVALID'
+        }
+        $text = [System.IO.File]::ReadAllText($preferencePath)
+        $data = ConvertFrom-Json -InputObject $text -ErrorAction Stop
+        if ($null -eq $data -or -not ($data -is [pscustomobject])) {
+            throw 'UI_PREFERENCES_INVALID'
+        }
+        $keys = @($data.PSObject.Properties | ForEach-Object { $_.Name })
+        if ($keys.Count -ne 2 -or
+            -not ($keys -ccontains 'schema_version') -or
+            -not ($keys -ccontains 'background') -or
+            [int]$data.schema_version -ne 1 -or
+            $null -eq (Get-QiehaoBackgroundTheme -Id ([string]$data.background))) {
+            throw 'UI_PREFERENCES_INVALID'
+        }
+        return [pscustomobject]@{
+            Background = [string]$data.background
+            IsValid = $true
+            UsedDefault = $false
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Background = $defaultBackground
+            IsValid = $false
+            UsedDefault = $true
+        }
+    }
+    finally {
+        $text = $null
+        $data = $null
+    }
+}
+
+function Write-QiehaoUiPreferences {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$StateDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Background
+    )
+
+    if ($null -eq (Get-QiehaoBackgroundTheme -Id $Background)) {
+        throw 'UI_BACKGROUND_THEME_INVALID'
+    }
+    [System.IO.Directory]::CreateDirectory($StateDirectory) | Out-Null
+    $preferencePath = Join-Path -Path $StateDirectory `
+        -ChildPath 'ui-preferences.json'
+    $temporaryPath = Join-Path -Path $StateDirectory -ChildPath (
+        '.ui-preferences.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    )
+    $json = $null
+    $stream = $null
+    $writer = $null
+    try {
+        $json = [ordered]@{
+            schema_version = 1
+            background = $Background
+        } | ConvertTo-Json
+        $encoding = New-Object System.Text.UTF8Encoding($false)
+        $stream = New-Object System.IO.FileStream(
+            $temporaryPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+        $writer = New-Object System.IO.StreamWriter($stream, $encoding)
+        $writer.Write($json)
+        $writer.Flush()
+        $stream.Flush($true)
+        $writer.Dispose()
+        $writer = $null
+        $stream.Dispose()
+        $stream = $null
+
+        if ([System.IO.File]::Exists($preferencePath)) {
+            [System.IO.File]::Replace($temporaryPath, $preferencePath, $null)
+        }
+        else {
+            [System.IO.File]::Move($temporaryPath, $preferencePath)
+        }
+        return Read-QiehaoUiPreferences -StateDirectory $StateDirectory
+    }
+    finally {
+        if ($null -ne $writer) { $writer.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ([System.IO.File]::Exists($temporaryPath)) {
+            [System.IO.File]::Delete($temporaryPath)
+        }
+        $json = $null
+    }
+}
+
+function Get-QiehaoBackgroundImage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Theme,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BackgroundDirectory
+    )
+
+    $failureStage = 'VALIDATE'
+    $failureType = $null
+    $imageBytes = $null
+    $memoryStream = $null
+    try {
+        $knownTheme = Get-QiehaoBackgroundTheme -Id ([string]$Theme.Id)
+        if ($null -eq $knownTheme -or
+            $knownTheme.FileName -cne [string]$Theme.FileName) {
+            throw 'UI_BACKGROUND_THEME_INVALID'
+        }
+        $root = [System.IO.Path]::GetFullPath($BackgroundDirectory).TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        )
+        $path = [System.IO.Path]::GetFullPath(
+            (Join-Path -Path $root -ChildPath $knownTheme.FileName)
+        )
+        $parent = [System.IO.Path]::GetDirectoryName($path).TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        )
+        if (-not $parent.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
+            -not [System.IO.File]::Exists($path)) {
+            throw 'UI_BACKGROUND_IMAGE_UNAVAILABLE'
+        }
+
+        $failureStage = 'LOAD_ASSEMBLY'
+        Add-Type -AssemblyName PresentationCore -ErrorAction Stop
+        $failureStage = 'READ_BYTES'
+        $imageBytes = [System.IO.File]::ReadAllBytes($path)
+        $failureStage = 'CREATE_STREAM'
+        $memoryStream = [System.IO.MemoryStream]::new()
+        $memoryStream.Write($imageBytes, 0, $imageBytes.Length)
+        $memoryStream.Position = 0
+        $failureStage = 'DECODE_BITMAP_FRAME'
+        $bitmap = [System.Windows.Media.Imaging.BitmapFrame]::Create(
+            $memoryStream,
+            [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache,
+            [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        )
+        $failureStage = 'FREEZE_BITMAP'
+        $bitmap.Freeze()
+        return [pscustomobject]@{
+            Loaded = $true
+            ThemeId = $knownTheme.Id
+            ImageSource = $bitmap
+            UsedSolidFallback = $false
+            FailureStage = $null
+        }
+    }
+    catch {
+        $failureType = $_.Exception.GetType().Name
+        if ($null -ne $_.Exception.InnerException) {
+            $failureType += '_' + $_.Exception.InnerException.GetType().Name
+        }
+        return [pscustomobject]@{
+            Loaded = $false
+            ThemeId = [string]$Theme.Id
+            ImageSource = $null
+            UsedSolidFallback = $true
+            FailureStage = $failureStage
+            FailureType = $failureType
+        }
+    }
+    finally {
+        if ($null -ne $memoryStream) {
+            $memoryStream.Dispose()
+        }
+        $imageBytes = $null
     }
 }
 
@@ -258,6 +540,11 @@ Export-ModuleMember -Function @(
     'ConvertTo-QiehaoGuiProfileRows',
     'ConvertTo-QiehaoCodexStatus',
     'Get-QiehaoGuiSnapshot',
+    'Get-QiehaoBackgroundThemes',
+    'Get-QiehaoBackgroundTheme',
+    'Read-QiehaoUiPreferences',
+    'Write-QiehaoUiPreferences',
+    'Get-QiehaoBackgroundImage',
     'Enter-QiehaoGuiSingleInstance',
     'Exit-QiehaoGuiSingleInstance'
 )

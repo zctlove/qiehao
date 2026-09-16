@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$XamlOnly
 )
@@ -51,7 +51,7 @@ if ($XamlOnly) {
     $testWindow = Read-TestWindow
     try {
         Assert-GuiTest -Condition (
-            $testWindow.Title -ceq 'Codex Account Switcher'
+            $testWindow.Title -ceq 'Codex 账号管理器'
         ) -Code 'GUI_XAML_TITLE_MISMATCH'
         Assert-GuiTest -Condition (
             $null -ne $testWindow.FindName('ProfilesGrid')
@@ -168,6 +168,88 @@ Assert-GuiTest -Condition (
     $guiStartup.Output -ccontains 'GUI_SELFTEST_READY'
 ) -Code 'GUI_STARTUP_SELFTEST_FAILED'
 
+$themes = @(Get-QiehaoBackgroundThemes)
+Assert-GuiTest -Condition (
+    $themes.Count -eq 5 -and
+    (@($themes.Name) -join '|') -ceq
+    '科技蓝|深蓝鎏金|冰蓝玻璃|紫蓝星河|清透流光'
+) -Code 'GUI_THEME_CATALOG_INVALID'
+foreach ($theme in $themes) {
+    $loadResult = Get-QiehaoBackgroundImage -Theme $theme `
+        -BackgroundDirectory (Join-Path -Path $guiRoot `
+            -ChildPath 'assets\backgrounds')
+    Assert-GuiTest -Condition (
+        $loadResult.Loaded -and
+        -not $loadResult.UsedSolidFallback -and
+        $null -ne $loadResult.ImageSource
+    ) -Code ('GUI_THEME_LOAD_FAILED_' + $theme.Id)
+}
+
+$themeTestRoot = Join-Path -Path ([System.IO.Path]::GetTempPath()) `
+    -ChildPath ('qiehao-gui-theme-' + [Guid]::NewGuid().ToString('N'))
+$fakeBackgroundDirectory = Join-Path -Path $themeTestRoot -ChildPath 'backgrounds'
+$fakeStateDirectory = Join-Path -Path $themeTestRoot -ChildPath 'state'
+[System.IO.Directory]::CreateDirectory($fakeBackgroundDirectory) | Out-Null
+[System.IO.Directory]::CreateDirectory($fakeStateDirectory) | Out-Null
+try {
+    $defaultTheme = Get-QiehaoBackgroundTheme -Id '01-blue-glass'
+    $missingResult = Get-QiehaoBackgroundImage -Theme $defaultTheme `
+        -BackgroundDirectory $fakeBackgroundDirectory
+    Assert-GuiTest -Condition (
+        -not $missingResult.Loaded -and
+        $missingResult.UsedSolidFallback
+    ) -Code 'GUI_MISSING_THEME_DID_NOT_FALL_BACK'
+
+    $corruptImagePath = Join-Path -Path $fakeBackgroundDirectory `
+        -ChildPath $defaultTheme.FileName
+    [System.IO.File]::WriteAllText($corruptImagePath, 'NOT_A_PNG')
+    $corruptImageResult = Get-QiehaoBackgroundImage -Theme $defaultTheme `
+        -BackgroundDirectory $fakeBackgroundDirectory
+    Assert-GuiTest -Condition (
+        -not $corruptImageResult.Loaded -and
+        $corruptImageResult.UsedSolidFallback
+    ) -Code 'GUI_CORRUPT_THEME_DID_NOT_FALL_BACK'
+
+    $writtenPreference = Write-QiehaoUiPreferences `
+        -StateDirectory $fakeStateDirectory -Background '03-ice-glass'
+    $restoredPreference = Read-QiehaoUiPreferences `
+        -StateDirectory $fakeStateDirectory
+    Assert-GuiTest -Condition (
+        $writtenPreference.Background -ceq '03-ice-glass' -and
+        $restoredPreference.Background -ceq '03-ice-glass' -and
+        -not $restoredPreference.UsedDefault
+    ) -Code 'GUI_THEME_PREFERENCE_RESTORE_FAILED'
+
+    $preferencePath = Join-Path -Path $fakeStateDirectory `
+        -ChildPath 'ui-preferences.json'
+    [System.IO.File]::WriteAllText($preferencePath, '{BROKEN JSON')
+    $corruptPreference = Read-QiehaoUiPreferences `
+        -StateDirectory $fakeStateDirectory
+    Assert-GuiTest -Condition (
+        $corruptPreference.Background -ceq '01-blue-glass' -and
+        -not $corruptPreference.IsValid -and
+        $corruptPreference.UsedDefault
+    ) -Code 'GUI_CORRUPT_PREFERENCE_DID_NOT_FALL_BACK'
+}
+finally {
+    if ([System.IO.Directory]::Exists($themeTestRoot)) {
+        [System.IO.Directory]::Delete($themeTestRoot, $true)
+    }
+}
+
+$themeOne = Get-QiehaoBackgroundImage `
+    -Theme (Get-QiehaoBackgroundTheme -Id '01-blue-glass') `
+    -BackgroundDirectory (Join-Path $guiRoot 'assets\backgrounds')
+$themeThree = Get-QiehaoBackgroundImage `
+    -Theme (Get-QiehaoBackgroundTheme -Id '03-ice-glass') `
+    -BackgroundDirectory (Join-Path $guiRoot 'assets\backgrounds')
+Assert-GuiTest -Condition (
+    $themeOne.Loaded -and $themeThree.Loaded -and
+    $themeOne.ThemeId -cne $themeThree.ThemeId -and
+    $null -ne $themeOne.ImageSource -and
+    $null -ne $themeThree.ImageSource
+) -Code 'GUI_IMMEDIATE_THEME_SWITCH_FAILED'
+
 $plusTeam = New-FakeSnapshot -Profiles @(
     (New-FakeProfileRow -Name 'Plus'),
     (New-FakeProfileRow -Name 'Team')
@@ -208,11 +290,11 @@ $healthSnapshot = New-FakeSnapshot -Profiles @(
 ) -Active 'Ready'
 Assert-GuiTest -Condition (
     (@($healthSnapshot.Profiles.Health | Sort-Object) -join '|') -ceq
-    ((@('READY','INCOMPLETE_PROFILE','INVALID_METADATA','UNKNOWN') |
+    ((@('正常','不完整','元数据异常','未知') |
         Sort-Object) -join '|')
 ) -Code 'GUI_HEALTH_DISPLAY_FAILED'
 
-$activeRows = @($tenSnapshot.Profiles | Where-Object { $_.Active -ceq 'Yes' })
+$activeRows = @($tenSnapshot.Profiles | Where-Object { $_.Active -ceq '是' })
 Assert-GuiTest -Condition (
     $tenSnapshot.ActiveProfile -ceq 'Account7' -and
     $activeRows.Count -eq 1 -and
@@ -226,14 +308,18 @@ $stoppedSnapshot = New-FakeSnapshot -Profiles @() `
 $unknownSnapshot = New-FakeSnapshot -Profiles @() `
     -Active 'A' -ReasonCode 'CODEX_PROCESS_STATE_UNKNOWN'
 Assert-GuiTest -Condition (
-    $runningSnapshot.CodexDesktop -ceq 'Running'
+    $runningSnapshot.CodexDesktop -ceq '运行中'
 ) -Code 'GUI_CODEX_RUNNING_MAP_FAILED'
 Assert-GuiTest -Condition (
-    $stoppedSnapshot.CodexDesktop -ceq 'Stopped'
+    $stoppedSnapshot.CodexDesktop -ceq '已退出'
 ) -Code 'GUI_CODEX_STOPPED_MAP_FAILED'
 Assert-GuiTest -Condition (
-    $unknownSnapshot.CodexDesktop -ceq 'Unknown'
+    $unknownSnapshot.CodexDesktop -ceq '未知'
 ) -Code 'GUI_CODEX_UNKNOWN_MAP_FAILED'
+Assert-GuiTest -Condition (
+    $stoppedSnapshot.WebChatGPT -ceq '不受影响' -and
+    $stoppedSnapshot.IdentityStatus -ceq '未检查'
+) -Code 'GUI_CHINESE_WEB_OR_IDENTITY_STATUS_FAILED'
 
 $extensionHostPath = 'C:\Users\Fake\.codex\plugins\cache\openai-bundled\chrome\latest\extension-host\windows\x64\extension-host.exe'
 $chromeState = Test-CodexProcessesStopped -ProcessData @(
@@ -314,8 +400,33 @@ foreach ($dangerousCommand in @(
 }
 
 [xml]$xamlDocument = [System.IO.File]::ReadAllText($xamlPath)
+$xamlTextForEncoding = [System.IO.File]::ReadAllText($xamlPath)
+foreach ($requiredChineseText in @(
+    'Codex 账号管理器',
+    'Codex 客户端',
+    '当前账号',
+    '网页 ChatGPT',
+    '不受影响',
+    '已保存账号',
+    '切换账号',
+    '正常退出 Codex'
+)) {
+    Assert-GuiTest -Condition (
+        $xamlTextForEncoding.Contains($requiredChineseText) -and
+        -not $xamlTextForEncoding.Contains([char]0xFFFD)
+    ) -Code 'GUI_CHINESE_TEXT_ENCODING_FAILED'
+}
 $namespaceManager = New-Object System.Xml.XmlNamespaceManager($xamlDocument.NameTable)
 $namespaceManager.AddNamespace('x', 'http://schemas.microsoft.com/winfx/2006/xaml')
+$backgroundImageNode = $xamlDocument.SelectSingleNode(
+    "//*[@x:Name='BackgroundImage']",
+    $namespaceManager
+)
+Assert-GuiTest -Condition (
+    $null -ne $backgroundImageNode -and
+    $backgroundImageNode.GetAttribute('Stretch') -ceq 'UniformToFill' -and
+    -not $backgroundImageNode.HasAttribute('TileMode')
+) -Code 'GUI_BACKGROUND_RESIZE_MODE_INVALID'
 foreach ($buttonName in @(
     'SwitchButton',
     'VerifyButton',
@@ -380,6 +491,14 @@ finally {
     GuiStartup = 'PASS'
     PowerShell51XamlParse = 'PASS'
     PowerShell7XamlParse = 'PASS'
+    FiveThemesLoad = 'PASS'
+    MissingThemeFallback = 'PASS'
+    CorruptThemeFallback = 'PASS'
+    BackgroundUniformToFill = 'PASS'
+    ImmediateThemeSwitch = 'PASS'
+    ThemePreferenceRestore = 'PASS'
+    CorruptPreferenceFallback = 'PASS'
+    ChineseTextEncoding = 'PASS'
     DynamicPlusTeam = 'PASS'
     FakeThreeProfiles = 'PASS'
     FakeTenProfiles = 'PASS'

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$SelfTest
 )
@@ -11,6 +11,9 @@ $projectRoot = Split-Path -Parent $guiRoot
 $coreModulePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 $helperModulePath = Join-Path -Path $guiRoot -ChildPath 'GuiHelpers.psm1'
 $xamlPath = Join-Path -Path $guiRoot -ChildPath 'MainWindow.xaml'
+$stateDirectory = Join-Path -Path $projectRoot -ChildPath 'state'
+$backgroundDirectory = Join-Path -Path $guiRoot `
+    -ChildPath 'assets\backgrounds'
 $guiMutexName = 'Qiehaoqu.CodexAccountSwitcher.Gui.v1'
 
 Add-Type -AssemblyName PresentationCore -ErrorAction Stop
@@ -63,8 +66,8 @@ try {
         $lease = Enter-QiehaoGuiSingleInstance -MutexName $guiMutexName
         if (-not $lease.Acquired) {
             [void][System.Windows.MessageBox]::Show(
-                'Codex Account Switcher is already running.',
-                'Codex Account Switcher',
+                'Codex 账号管理器已在运行。',
+                'Codex 账号管理器',
                 [System.Windows.MessageBoxButton]::OK,
                 [System.Windows.MessageBoxImage]::Information
             )
@@ -81,6 +84,58 @@ try {
     $webChatGPTText = Get-RequiredControl -Window $window -Name 'WebChatGPTText'
     $refreshStatusText = Get-RequiredControl -Window $window -Name 'RefreshStatusText'
     $refreshButton = Get-RequiredControl -Window $window -Name 'RefreshButton'
+    $themeComboBox = Get-RequiredControl -Window $window -Name 'ThemeComboBox'
+    $backgroundImage = Get-RequiredControl -Window $window -Name 'BackgroundImage'
+    $backgroundOverlay = Get-RequiredControl -Window $window -Name 'BackgroundOverlay'
+
+    function Set-QiehaoTheme {
+        param(
+            [Parameter(Mandatory = $true)]
+            [object]$Theme,
+
+            [switch]$Persist
+        )
+
+        $imageResult = Get-QiehaoBackgroundImage -Theme $Theme `
+            -BackgroundDirectory $backgroundDirectory
+        if ($imageResult.Loaded) {
+            $backgroundImage.Source = $imageResult.ImageSource
+        }
+        else {
+            $backgroundImage.Source = $null
+            $window.Background = '#FFF4F6F8'
+        }
+
+        $overlayColor = if ([string]$Theme.OverlayMode -ceq 'Dark') {
+            '#A6212B3A'
+        }
+        else {
+            '#BFFFFFFF'
+        }
+        $backgroundOverlay.Background = $overlayColor
+
+        if ($Persist) {
+            try {
+                $null = Write-QiehaoUiPreferences `
+                    -StateDirectory $stateDirectory -Background $Theme.Id
+                $refreshStatusText.Text = if ($imageResult.Loaded) {
+                    '皮肤已切换并保存'
+                }
+                else {
+                    '背景图片不可用，已使用默认纯色并保存选择'
+                }
+            }
+            catch {
+                $refreshStatusText.Text = if ($imageResult.Loaded) {
+                    '皮肤已切换，但偏好保存失败'
+                }
+                else {
+                    '背景图片不可用，已使用默认纯色'
+                }
+            }
+        }
+        return $imageResult
+    }
 
     function Set-QiehaoSnapshot {
         param(
@@ -91,10 +146,10 @@ try {
         $rows = @($Snapshot.Profiles)
         $profilesGrid.ItemsSource = $rows
         $profileCountText.Text = if ($rows.Count -eq 1) {
-            '1 profile'
+            '1 个账号'
         }
         else {
-            [string]$rows.Count + ' profiles'
+            [string]$rows.Count + ' 个账号'
         }
         $codexStatusText.Text = [string]$Snapshot.CodexDesktop
         $activeProfileText.Text = [string]$Snapshot.ActiveProfile
@@ -102,16 +157,16 @@ try {
         $webChatGPTText.Text = [string]$Snapshot.WebChatGPT
 
         switch ([string]$Snapshot.CodexDesktop) {
-            'Running' { $codexStatusText.Foreground = '#FFB42318' }
-            'Stopped' { $codexStatusText.Foreground = '#FF167A45' }
+            '运行中' { $codexStatusText.Foreground = '#FFB42318' }
+            '已退出' { $codexStatusText.Foreground = '#FF167A45' }
             default { $codexStatusText.Foreground = '#FF5B6472' }
         }
 
         $refreshStatusText.Text = if (@($Snapshot.ReadOnlyErrors).Count -eq 0) {
-            'Read-only status refreshed'
+            '只读状态已刷新'
         }
         else {
-            'Some read-only status is unavailable'
+            '部分只读状态暂不可用'
         }
     }
 
@@ -125,14 +180,39 @@ try {
             Set-QiehaoSnapshot -Snapshot $snapshot
         }
         catch {
-            $refreshStatusText.Text = 'Read-only refresh failed'
-            $codexStatusText.Text = 'Unknown'
-            $identityStatusText.Text = 'Unknown'
+            $refreshStatusText.Text = '只读刷新失败'
+            $codexStatusText.Text = '未知'
+            $identityStatusText.Text = '未知'
         }
         finally {
             $refreshButton.IsEnabled = $true
         }
     }
+
+    $themes = @(Get-QiehaoBackgroundThemes)
+    $themeComboBox.ItemsSource = $themes
+    $preference = if ($SelfTest) {
+        [pscustomobject]@{
+            Background = '01-blue-glass'
+            IsValid = $true
+            UsedDefault = $true
+        }
+    }
+    else {
+        Read-QiehaoUiPreferences -StateDirectory $stateDirectory
+    }
+    $startupTheme = Get-QiehaoBackgroundTheme -Id $preference.Background
+    if ($null -eq $startupTheme) {
+        $startupTheme = Get-QiehaoBackgroundTheme -Id '01-blue-glass'
+    }
+    $themeComboBox.SelectedValue = $startupTheme.Id
+    $startupImageResult = Set-QiehaoTheme -Theme $startupTheme
+    $themeComboBox.Add_SelectionChanged({
+        $selectedTheme = $themeComboBox.SelectedItem
+        if ($null -ne $selectedTheme) {
+            $null = Set-QiehaoTheme -Theme $selectedTheme -Persist
+        }
+    })
 
     if ($SelfTest) {
         $fakeProfiles = @(
@@ -154,10 +234,28 @@ try {
                 [pscustomobject]@{ ReasonCode = 'CODEX_PROCESSES_STOPPED' }
             }
         Set-QiehaoSnapshot -Snapshot $snapshot
-        if (@($profilesGrid.ItemsSource).Count -ne 2 -or
-            $codexStatusText.Text -cne 'Stopped' -or
-            $activeProfileText.Text -cne 'Plus') {
-            throw 'GUI_SELFTEST_BINDING_FAILED'
+        if (@($profilesGrid.ItemsSource).Count -ne 2) {
+            throw 'GUI_SELFTEST_PROFILE_BINDING_FAILED'
+        }
+        if ($codexStatusText.Text -cne '已退出') {
+            throw 'GUI_SELFTEST_CODEX_STATUS_FAILED'
+        }
+        if ($activeProfileText.Text -cne 'Plus') {
+            throw 'GUI_SELFTEST_ACTIVE_PROFILE_FAILED'
+        }
+        if ($themes.Count -ne 5) {
+            throw 'GUI_SELFTEST_THEME_COUNT_FAILED'
+        }
+        if (-not $startupImageResult.Loaded) {
+            throw ('GUI_SELFTEST_THEME_LOAD_FAILED_' + `
+                [string]$startupImageResult.FailureStage + '_' + `
+                [string]$startupImageResult.FailureType)
+        }
+        $alternateTheme = Get-QiehaoBackgroundTheme -Id '03-ice-glass'
+        $alternateImageResult = Set-QiehaoTheme -Theme $alternateTheme
+        if (-not $alternateImageResult.Loaded -or
+            $alternateImageResult.ThemeId -cne '03-ice-glass') {
+            throw 'GUI_SELFTEST_THEME_SWITCH_FAILED'
         }
         Write-Output 'GUI_SELFTEST_READY'
         return

@@ -2,27 +2,37 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     x:Name="MainWindow"
-    Title="Codex Account Switcher"
+    Title="Codex 账号管理器"
     Width="760"
     Height="560"
     MinWidth="680"
     MinHeight="500"
     WindowStartupLocation="CenterScreen"
     Background="#FFF4F6F8"
-    FontFamily="Segoe UI"
+    FontFamily="Microsoft YaHei UI, Segoe UI"
     FontSize="13"
     UseLayoutRounding="True"
     SnapsToDevicePixels="True">
     <Window.Resources>
-        <SolidColorBrush x:Key="PanelBrush" Color="#FFFFFFFF" />
-        <SolidColorBrush x:Key="BorderBrush" Color="#FFD8DEE6" />
+        <SolidColorBrush x:Key="PanelBrush" Color="#EFFFFFFF" />
+        <SolidColorBrush x:Key="BorderBrush" Color="#BFD8DEE6" />
         <SolidColorBrush x:Key="PrimaryBrush" Color="#FF2563EB" />
         <Style x:Key="PanelStyle" TargetType="Border">
             <Setter Property="Background" Value="{StaticResource PanelBrush}" />
             <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="CornerRadius" Value="9" />
             <Setter Property="Padding" Value="12" />
+            <Setter Property="Effect">
+                <Setter.Value>
+                    <DropShadowEffect
+                        BlurRadius="12"
+                        Direction="270"
+                        Opacity="0.14"
+                        ShadowDepth="2"
+                        Color="#FF1F2937" />
+                </Setter.Value>
+            </Setter>
         </Style>
         <Style TargetType="Button">
             <Setter Property="MinHeight" Value="34" />
@@ -42,134 +52,185 @@
         </Style>
     </Window.Resources>
 
-    <Grid Margin="18">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="12" />
-            <RowDefinition Height="*" />
-            <RowDefinition Height="12" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="12" />
-            <RowDefinition Height="Auto" />
-        </Grid.RowDefinitions>
+    <Grid>
+        <Image
+            x:Name="BackgroundImage"
+            Stretch="UniformToFill"
+            HorizontalAlignment="Stretch"
+            VerticalAlignment="Stretch" />
+        <Border x:Name="BackgroundOverlay" Background="#BFFFFFFF" />
 
-        <Border Grid.Row="0" Style="{StaticResource PanelStyle}">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <StackPanel Grid.Column="0" Margin="0,0,12,0">
-                    <TextBlock Foreground="#FF5B6472" Text="Codex Desktop" />
-                    <TextBlock x:Name="CodexStatusText" Style="{StaticResource StatusValueStyle}" Text="Unknown" />
-                </StackPanel>
-                <StackPanel Grid.Column="1" Margin="0,0,12,0">
-                    <TextBlock Foreground="#FF5B6472" Text="Tool Active Profile" />
-                    <TextBlock x:Name="ActiveProfileText" Style="{StaticResource StatusValueStyle}" Text="Not initialized" TextTrimming="CharacterEllipsis" />
-                </StackPanel>
-                <StackPanel Grid.Column="2" Margin="0,0,12,0">
-                    <TextBlock Foreground="#FF5B6472" Text="Identity Status" />
-                    <TextBlock x:Name="IdentityStatusText" Style="{StaticResource StatusValueStyle}" Text="Not checked" />
-                </StackPanel>
-                <StackPanel Grid.Column="3">
-                    <TextBlock Foreground="#FF5B6472" Text="Web ChatGPT" />
-                    <TextBlock x:Name="WebChatGPTText" Style="{StaticResource StatusValueStyle}" Text="Unaffected" />
-                    <TextBlock Margin="0,3,0,0" FontSize="11" Foreground="#FF6B7280" TextWrapping="Wrap" Text="Browser / PWA sessions are not managed by this tool." />
-                </StackPanel>
-            </Grid>
-        </Border>
+        <Grid Margin="18">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="12" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="12" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="12" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
 
-        <Border Grid.Row="2" Style="{StaticResource PanelStyle}">
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="8" />
-                    <RowDefinition Height="*" />
-                </Grid.RowDefinitions>
-                <DockPanel Grid.Row="0">
-                    <TextBlock FontSize="17" FontWeight="SemiBold" Text="Saved accounts" />
-                    <TextBlock x:Name="ProfileCountText" DockPanel.Dock="Right" Foreground="#FF6B7280" VerticalAlignment="Center" Text="0 profiles" />
-                </DockPanel>
-                <DataGrid
-                    x:Name="ProfilesGrid"
-                    Grid.Row="2"
-                    AutoGenerateColumns="False"
-                    CanUserAddRows="False"
-                    CanUserDeleteRows="False"
-                    CanUserReorderColumns="True"
-                    IsReadOnly="True"
-                    HeadersVisibility="Column"
-                    GridLinesVisibility="Horizontal"
-                    BorderBrush="#FFE2E7EE"
-                    BorderThickness="1"
-                    RowHeaderWidth="0"
-                    SelectionMode="Single"
-                    VerticalScrollBarVisibility="Auto"
-                    HorizontalScrollBarVisibility="Auto">
-                    <DataGrid.Columns>
-                        <DataGridTextColumn Header="Name" Binding="{Binding Name}" MinWidth="105" Width="*" />
-                        <DataGridTextColumn Header="Active" Binding="{Binding Active}" Width="65" />
-                        <DataGridTextColumn Header="Health" Binding="{Binding Health}" MinWidth="140" Width="Auto">
-                            <DataGridTextColumn.ElementStyle>
-                                <Style TargetType="TextBlock">
-                                    <Setter Property="Padding" Value="6,2" />
-                                    <Setter Property="FontWeight" Value="SemiBold" />
-                                    <Setter Property="Foreground" Value="#FF4B5563" />
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding Health}" Value="READY">
-                                            <Setter Property="Foreground" Value="#FF167A45" />
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding Health}" Value="INCOMPLETE_PROFILE">
-                                            <Setter Property="Foreground" Value="#FF9A6700" />
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding Health}" Value="INVALID_METADATA">
-                                            <Setter Property="Foreground" Value="#FFB42318" />
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </DataGridTextColumn.ElementStyle>
-                        </DataGridTextColumn>
-                        <DataGridTextColumn Header="Auth" Binding="{Binding Auth}" Width="82" />
-                        <DataGridTextColumn Header="Identity" Binding="{Binding Identity}" Width="86" />
-                        <DataGridTextColumn Header="Metadata" Binding="{Binding Metadata}" Width="86" />
-                        <DataGridTextColumn Header="Updated" Binding="{Binding Updated}" MinWidth="170" Width="Auto" />
-                    </DataGrid.Columns>
-                </DataGrid>
-            </Grid>
-        </Border>
-
-        <Border Grid.Row="4" Style="{StaticResource PanelStyle}">
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="10" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-                <WrapPanel Grid.Row="0">
-                    <Button x:Name="SwitchButton" Content="Switch Account" IsEnabled="False" />
-                    <Button x:Name="VerifyButton" Content="Verify" IsEnabled="False" />
-                    <Button x:Name="RefreshButton" Content="Refresh" Style="{StaticResource PrimaryButtonStyle}" IsDefault="True" />
-                </WrapPanel>
-                <Grid Grid.Row="2">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <WrapPanel Grid.Column="0">
-                        <Button x:Name="AddButton" Content="Add Account" IsEnabled="False" />
-                        <Button x:Name="RenameButton" Content="Rename" IsEnabled="False" />
-                        <Button x:Name="DeleteButton" Content="Delete" IsEnabled="False" />
-                    </WrapPanel>
-                    <Button x:Name="ExitCodexButton" Grid.Column="1" Content="Exit Codex Safely" IsEnabled="False" Margin="8,0,0,0" />
+            <Border Grid.Row="0" Style="{StaticResource PanelStyle}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="12" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid Grid.Row="0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock
+                            Grid.Column="0"
+                            FontSize="20"
+                            FontWeight="SemiBold"
+                            VerticalAlignment="Center"
+                            Text="Codex 账号管理器" />
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock Margin="0,0,8,0" VerticalAlignment="Center" Text="皮肤：" />
+                            <ComboBox
+                                x:Name="ThemeComboBox"
+                                Width="132"
+                                MinHeight="30"
+                                DisplayMemberPath="Name"
+                                SelectedValuePath="Id" />
+                        </StackPanel>
+                    </Grid>
+                    <Grid Grid.Row="2">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Margin="0,0,12,0">
+                            <TextBlock Foreground="#FF5B6472" Text="Codex 客户端" />
+                            <TextBlock x:Name="CodexStatusText" Style="{StaticResource StatusValueStyle}" Text="未知" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Margin="0,0,12,0">
+                            <TextBlock Foreground="#FF5B6472" Text="当前账号" />
+                            <TextBlock x:Name="ActiveProfileText" Style="{StaticResource StatusValueStyle}" Text="未初始化" TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Margin="0,0,12,0">
+                            <TextBlock Foreground="#FF5B6472" Text="身份状态" />
+                            <TextBlock x:Name="IdentityStatusText" Style="{StaticResource StatusValueStyle}" Text="未检查" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="3">
+                            <TextBlock Foreground="#FF5B6472" Text="网页 ChatGPT" />
+                            <TextBlock x:Name="WebChatGPTText" Style="{StaticResource StatusValueStyle}" Text="不受影响" />
+                            <TextBlock Margin="0,3,0,0" FontSize="11" Foreground="#FF6B7280" TextWrapping="Wrap" Text="浏览器 / PWA 登录状态不会被本工具修改" />
+                        </StackPanel>
+                    </Grid>
                 </Grid>
-            </Grid>
-        </Border>
+            </Border>
 
-        <DockPanel Grid.Row="6">
-            <TextBlock x:Name="RefreshStatusText" Foreground="#FF5B6472" Text="Read-only GUI phase 1" />
-            <TextBlock DockPanel.Dock="Right" Foreground="#FF6B7280" Text="No browser or web session access" />
-        </DockPanel>
+            <Border Grid.Row="2" Style="{StaticResource PanelStyle}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="8" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <DockPanel Grid.Row="0">
+                        <TextBlock FontSize="17" FontWeight="SemiBold" Text="已保存账号" />
+                        <TextBlock x:Name="ProfileCountText" DockPanel.Dock="Right" Foreground="#FF6B7280" VerticalAlignment="Center" Text="0 个账号" />
+                    </DockPanel>
+                    <DataGrid
+                        x:Name="ProfilesGrid"
+                        Grid.Row="2"
+                        AutoGenerateColumns="False"
+                        CanUserAddRows="False"
+                        CanUserDeleteRows="False"
+                        CanUserReorderColumns="True"
+                        IsReadOnly="True"
+                        HeadersVisibility="Column"
+                        GridLinesVisibility="Horizontal"
+                        Background="#F2FFFFFF"
+                        RowBackground="#EFFFFFFF"
+                        AlternatingRowBackground="#E6F7F9FC"
+                        BorderBrush="#FFE2E7EE"
+                        BorderThickness="1"
+                        RowHeaderWidth="0"
+                        SelectionMode="Single"
+                        VerticalScrollBarVisibility="Auto"
+                        HorizontalScrollBarVisibility="Auto">
+                        <DataGrid.RowStyle>
+                            <Style TargetType="DataGridRow">
+                                <Setter Property="Foreground" Value="#FF202733" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding Active}" Value="是">
+                                        <Setter Property="Background" Value="#FFDCEBFF" />
+                                        <Setter Property="FontWeight" Value="SemiBold" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </DataGrid.RowStyle>
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" MinWidth="105" Width="*" />
+                            <DataGridTextColumn Header="当前" Binding="{Binding Active}" Width="60" />
+                            <DataGridTextColumn Header="状态" Binding="{Binding Health}" MinWidth="105" Width="Auto">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Padding" Value="6,2" />
+                                        <Setter Property="FontWeight" Value="SemiBold" />
+                                        <Setter Property="Foreground" Value="#FF4B5563" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Health}" Value="正常">
+                                                <Setter Property="Foreground" Value="#FF167A45" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding Health}" Value="不完整">
+                                                <Setter Property="Foreground" Value="#FF9A6700" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding Health}" Value="元数据异常">
+                                                <Setter Property="Foreground" Value="#FFB42318" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="凭证" Binding="{Binding Auth}" Width="72" />
+                            <DataGridTextColumn Header="身份标记" Binding="{Binding Identity}" Width="82" />
+                            <DataGridTextColumn Header="元数据" Binding="{Binding Metadata}" Width="72" />
+                            <DataGridTextColumn Header="更新时间" Binding="{Binding Updated}" MinWidth="170" Width="Auto" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </Border>
+
+            <Border Grid.Row="4" Style="{StaticResource PanelStyle}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="10" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <WrapPanel Grid.Row="0">
+                        <Button x:Name="SwitchButton" Content="切换账号" IsEnabled="False" />
+                        <Button x:Name="VerifyButton" Content="验证账号" IsEnabled="False" />
+                        <Button x:Name="RefreshButton" Content="刷新" Style="{StaticResource PrimaryButtonStyle}" IsDefault="True" />
+                    </WrapPanel>
+                    <Grid Grid.Row="2">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <WrapPanel Grid.Column="0">
+                            <Button x:Name="AddButton" Content="添加账号" IsEnabled="False" />
+                            <Button x:Name="RenameButton" Content="重命名" IsEnabled="False" />
+                            <Button x:Name="DeleteButton" Content="删除账号" IsEnabled="False" />
+                        </WrapPanel>
+                        <Button x:Name="ExitCodexButton" Grid.Column="1" Content="正常退出 Codex" IsEnabled="False" Margin="8,0,0,0" />
+                    </Grid>
+                </Grid>
+            </Border>
+
+            <DockPanel Grid.Row="6">
+                <TextBlock x:Name="RefreshStatusText" Foreground="#FF374151" FontWeight="SemiBold" Text="只读界面阶段" />
+                <TextBlock DockPanel.Dock="Right" Foreground="#FF4B5563" Text="不访问浏览器或网页登录状态" />
+            </DockPanel>
+        </Grid>
     </Grid>
 </Window>
