@@ -3,62 +3,125 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     x:Name="MainWindow"
     Title="Codex 账号管理器"
-    Width="760"
-    Height="640"
-    MinWidth="680"
-    MinHeight="500"
+    Width="900"
+    Height="690"
+    MinWidth="780"
+    MinHeight="560"
     WindowStartupLocation="CenterScreen"
-    Background="#FFF4F6F8"
+    Background="#FF172436"
+    Foreground="{DynamicResource TextPrimaryBrush}"
     FontFamily="Microsoft YaHei UI, Segoe UI"
     FontSize="13"
     UseLayoutRounding="True"
     SnapsToDevicePixels="True">
     <Window.Resources>
-        <SolidColorBrush x:Key="PanelBrush" Color="#EFFFFFFF" />
-        <SolidColorBrush x:Key="BorderBrush" Color="#BFD8DEE6" />
-        <SolidColorBrush x:Key="PrimaryBrush" Color="#FF2563EB" />
+        <LinearGradientBrush x:Key="PanelBrush" StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Color="#96394E66" Offset="0" />
+            <GradientStop Color="#8A1D3046" Offset="1" />
+        </LinearGradientBrush>
+        <SolidColorBrush x:Key="PanelBorderBrush" Color="#88A7C9E8" />
+        <SolidColorBrush x:Key="TextPrimaryBrush" Color="#FFF4F8FC" />
+        <SolidColorBrush x:Key="TextSecondaryBrush" Color="#FFD0DCE8" />
+        <LinearGradientBrush x:Key="ButtonFaceBrush" StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Color="#E04F769E" Offset="0" />
+            <GradientStop Color="#E02B4E73" Offset="1" />
+        </LinearGradientBrush>
+        <SolidColorBrush x:Key="ButtonHoverBrush" Color="#F06087B1" />
+        <SolidColorBrush x:Key="ButtonPressedBrush" Color="#E023405F" />
+        <SolidColorBrush x:Key="ButtonDisabledBrush" Color="#705B6472" />
+        <LinearGradientBrush x:Key="DangerButtonBrush" StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Color="#E08F5D68" Offset="0" />
+            <GradientStop Color="#E06F3F4A" Offset="1" />
+        </LinearGradientBrush>
+        <SolidColorBrush x:Key="ActiveRowBrush" Color="#B83B7F5C" />
+        <SolidColorBrush x:Key="ActiveSelectedRowBrush" Color="#D445956A" />
+        <SolidColorBrush x:Key="SelectedRowBrush" Color="#C54A69A0" />
+        <SolidColorBrush x:Key="AccentBrush" Color="#FF5CC58A" />
+        <SolidColorBrush x:Key="GridBackgroundBrush" Color="#4AFFFFFF" />
+        <SolidColorBrush x:Key="GridRowBrush" Color="#34FFFFFF" />
+        <SolidColorBrush x:Key="GridAltRowBrush" Color="#22FFFFFF" />
+
         <Style x:Key="PanelStyle" TargetType="Border">
-            <Setter Property="Background" Value="{StaticResource PanelBrush}" />
-            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <Setter Property="Background" Value="{DynamicResource PanelBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource PanelBorderBrush}" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="CornerRadius" Value="9" />
-            <Setter Property="Padding" Value="12" />
+            <Setter Property="CornerRadius" Value="12" />
+            <Setter Property="Padding" Value="14" />
             <Setter Property="Effect">
                 <Setter.Value>
-                    <DropShadowEffect
-                        BlurRadius="12"
-                        Direction="270"
-                        Opacity="0.14"
-                        ShadowDepth="2"
-                        Color="#FF1F2937" />
+                    <DropShadowEffect BlurRadius="18" Direction="270" Opacity="0.24" ShadowDepth="4" Color="#FF07111E" />
                 </Setter.Value>
             </Setter>
         </Style>
+
         <Style TargetType="Button">
-            <Setter Property="MinHeight" Value="34" />
-            <Setter Property="Padding" Value="14,6" />
+            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="Padding" Value="15,6" />
             <Setter Property="Margin" Value="0,0,8,0" />
             <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+            <Setter Property="Background" Value="{DynamicResource ButtonFaceBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource PanelBorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border
+                            x:Name="ButtonShell"
+                            Padding="{TemplateBinding Padding}"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="8">
+                            <Border.Effect>
+                                <DropShadowEffect BlurRadius="8" Direction="270" Opacity="0.25" ShadowDepth="2" Color="#FF08111D" />
+                            </Border.Effect>
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ButtonShell" Property="Background" Value="{DynamicResource ButtonHoverBrush}" />
+                                <Setter TargetName="ButtonShell" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="ButtonShell" Property="Background" Value="{DynamicResource ButtonPressedBrush}" />
+                                <Setter TargetName="ButtonShell" Property="RenderTransform">
+                                    <Setter.Value><TranslateTransform Y="1" /></Setter.Value>
+                                </Setter>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+                                <Setter TargetName="ButtonShell" Property="Background" Value="{DynamicResource ButtonDisabledBrush}" />
+                                <Setter TargetName="ButtonShell" Property="Opacity" Value="0.58" />
+                                <Setter Property="Cursor" Value="Arrow" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
         <Style x:Key="PrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-            <Setter Property="Background" Value="{StaticResource PrimaryBrush}" />
-            <Setter Property="Foreground" Value="White" />
-            <Setter Property="BorderBrush" Value="{StaticResource PrimaryBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+        <Style x:Key="DangerButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="{DynamicResource DangerButtonBrush}" />
         </Style>
         <Style x:Key="StatusValueStyle" TargetType="TextBlock">
             <Setter Property="FontSize" Value="15" />
             <Setter Property="FontWeight" Value="SemiBold" />
             <Setter Property="Margin" Value="0,4,0,0" />
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+        </Style>
+        <Style x:Key="SecondaryTextStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
         </Style>
     </Window.Resources>
 
     <Grid>
-        <Image
-            x:Name="BackgroundImage"
-            Stretch="UniformToFill"
-            HorizontalAlignment="Stretch"
-            VerticalAlignment="Stretch" />
-        <Border x:Name="BackgroundOverlay" Background="#BFFFFFFF" />
+        <Image x:Name="BackgroundImage" Stretch="UniformToFill" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" />
+        <Border x:Name="BackgroundOverlay" Background="#66101D2B" />
 
         <Grid Margin="18">
             <Grid.RowDefinitions>
@@ -79,49 +142,34 @@
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
                     <Grid Grid.Row="0">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <TextBlock
-                            Grid.Column="0"
-                            FontSize="20"
-                            FontWeight="SemiBold"
-                            VerticalAlignment="Center"
-                            Text="Codex 账号管理器" />
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" Text="Codex 账号管理器" />
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock Margin="0,0,8,0" VerticalAlignment="Center" Text="皮肤：" />
-                            <ComboBox
-                                x:Name="ThemeComboBox"
-                                Width="132"
-                                MinHeight="30"
-                                DisplayMemberPath="Name"
-                                SelectedValuePath="Id" />
+                            <TextBlock Margin="0,0,8,0" VerticalAlignment="Center" Style="{StaticResource SecondaryTextStyle}" Text="皮肤：" />
+                            <ComboBox x:Name="ThemeComboBox" Width="132" MinHeight="30" DisplayMemberPath="Name" SelectedValuePath="Id" />
                         </StackPanel>
                     </Grid>
                     <Grid Grid.Row="2">
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Margin="0,0,12,0">
-                            <TextBlock Foreground="#FF5B6472" Text="Codex 客户端" />
+                            <TextBlock Style="{StaticResource SecondaryTextStyle}" Text="Codex 客户端" />
                             <TextBlock x:Name="CodexStatusText" Style="{StaticResource StatusValueStyle}" Text="未知" />
                         </StackPanel>
                         <StackPanel Grid.Column="1" Margin="0,0,12,0">
-                            <TextBlock Foreground="#FF5B6472" Text="当前账号" />
+                            <TextBlock Style="{StaticResource SecondaryTextStyle}" Text="当前账号" />
                             <TextBlock x:Name="ActiveProfileText" Style="{StaticResource StatusValueStyle}" Text="未初始化" TextTrimming="CharacterEllipsis" />
                         </StackPanel>
                         <StackPanel Grid.Column="2" Margin="0,0,12,0">
-                            <TextBlock Foreground="#FF5B6472" Text="身份状态" />
-                            <TextBlock x:Name="IdentityStatusText" Style="{StaticResource StatusValueStyle}" Text="未检查" />
+                            <TextBlock Style="{StaticResource SecondaryTextStyle}" Text="当前身份确认" />
+                            <TextBlock x:Name="IdentityStatusText" Style="{StaticResource StatusValueStyle}" Text="无法确认" />
                         </StackPanel>
                         <StackPanel Grid.Column="3">
-                            <TextBlock Foreground="#FF5B6472" Text="网页 ChatGPT" />
+                            <TextBlock Style="{StaticResource SecondaryTextStyle}" Text="网页 ChatGPT" />
                             <TextBlock x:Name="WebChatGPTText" Style="{StaticResource StatusValueStyle}" Text="不受影响" />
-                            <TextBlock Margin="0,3,0,0" FontSize="11" Foreground="#FF6B7280" TextWrapping="Wrap" Text="浏览器 / PWA 登录状态不会被本工具修改" />
+                            <TextBlock Margin="0,3,0,0" FontSize="11" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Text="浏览器 / PWA 登录状态不会被本工具修改" />
                         </StackPanel>
                     </Grid>
                 </Grid>
@@ -130,54 +178,29 @@
             <Border Grid.Row="2" Style="{StaticResource PanelStyle}">
                 <Grid>
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="8" />
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="8" />
-                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" /><RowDefinition Height="8" />
+                        <RowDefinition Height="Auto" /><RowDefinition Height="8" /><RowDefinition Height="*" />
                     </Grid.RowDefinitions>
                     <DockPanel Grid.Row="0">
                         <TextBlock FontSize="17" FontWeight="SemiBold" Text="已保存账号" />
-                        <TextBlock x:Name="ProfileCountText" DockPanel.Dock="Right" Foreground="#FF6B7280" VerticalAlignment="Center" Text="0 个账号" />
+                        <TextBlock x:Name="ProfileCountText" DockPanel.Dock="Right" Style="{StaticResource SecondaryTextStyle}" VerticalAlignment="Center" Text="0 个账号" />
                     </DockPanel>
                     <Grid Grid.Row="2">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto" />
-                            <ColumnDefinition Width="260" />
-                            <ColumnDefinition Width="*" />
-                        </Grid.ColumnDefinitions>
-                        <TextBlock
-                            Grid.Column="0"
-                            Margin="0,0,8,0"
-                            VerticalAlignment="Center"
-                            Text="搜索账号：" />
-                        <TextBox
-                            x:Name="ProfileSearchTextBox"
-                            Grid.Column="1"
-                            MinHeight="30"
-                            Padding="7,4"
-                            ToolTip="仅按本地 Profile 名称搜索，不访问凭证或身份内容" />
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="260" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Margin="0,0,8,0" VerticalAlignment="Center" Text="搜索账号：" />
+                        <TextBox x:Name="ProfileSearchTextBox" Grid.Column="1" MinHeight="30" Padding="7,4" ToolTip="仅按本地 Profile 名称搜索，不访问凭证或身份内容" />
                     </Grid>
                     <DataGrid
-                        x:Name="ProfilesGrid"
-                        Grid.Row="4"
-                        AutoGenerateColumns="False"
-                        CanUserAddRows="False"
-                        CanUserDeleteRows="False"
-                        CanUserReorderColumns="True"
-                        IsReadOnly="True"
-                        HeadersVisibility="Column"
-                        GridLinesVisibility="Horizontal"
-                        Background="#F2FFFFFF"
-                        RowBackground="#EFFFFFFF"
-                        AlternatingRowBackground="#E6F7F9FC"
-                        BorderBrush="#FFE2E7EE"
-                        BorderThickness="1"
-                        RowHeaderWidth="0"
-                        SelectionMode="Single"
-                        SelectionUnit="FullRow"
-                        VerticalScrollBarVisibility="Auto"
-                        HorizontalScrollBarVisibility="Auto">
+                        x:Name="ProfilesGrid" Grid.Row="4" AutoGenerateColumns="False"
+                        CanUserAddRows="False" CanUserDeleteRows="False" CanUserReorderColumns="True"
+                        IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                        Background="{DynamicResource GridBackgroundBrush}"
+                        RowBackground="{DynamicResource GridRowBrush}"
+                        AlternatingRowBackground="{DynamicResource GridAltRowBrush}"
+                        Foreground="{DynamicResource TextPrimaryBrush}"
+                        BorderBrush="{DynamicResource PanelBorderBrush}" BorderThickness="1"
+                        RowHeaderWidth="0" SelectionMode="Single" SelectionUnit="FullRow"
+                        VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
                         <DataGrid.ContextMenu>
                             <ContextMenu x:Name="ProfileContextMenu">
                                 <MenuItem x:Name="ContextSwitchMenuItem" Header="切换到此账号" />
@@ -189,35 +212,42 @@
                         </DataGrid.ContextMenu>
                         <DataGrid.RowStyle>
                             <Style TargetType="DataGridRow">
-                                <Setter Property="Foreground" Value="#FF202733" />
+                                <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
+                                <Setter Property="BorderBrush" Value="Transparent" />
+                                <Setter Property="BorderThickness" Value="1,0,1,0" />
                                 <Style.Triggers>
+                                    <Trigger Property="IsSelected" Value="True">
+                                        <Setter Property="Background" Value="{DynamicResource SelectedRowBrush}" />
+                                    </Trigger>
                                     <DataTrigger Binding="{Binding Active}" Value="是">
-                                        <Setter Property="Background" Value="#FFDCEBFF" />
+                                        <Setter Property="Background" Value="{DynamicResource ActiveRowBrush}" />
+                                        <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                                        <Setter Property="BorderThickness" Value="4,0,1,0" />
                                         <Setter Property="FontWeight" Value="SemiBold" />
                                     </DataTrigger>
+                                    <MultiDataTrigger>
+                                        <MultiDataTrigger.Conditions>
+                                            <Condition Binding="{Binding Active}" Value="是" />
+                                            <Condition Binding="{Binding RelativeSource={RelativeSource Self}, Path=IsSelected}" Value="True" />
+                                        </MultiDataTrigger.Conditions>
+                                        <Setter Property="Background" Value="{DynamicResource ActiveSelectedRowBrush}" />
+                                    </MultiDataTrigger>
                                 </Style.Triggers>
                             </Style>
                         </DataGrid.RowStyle>
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" MinWidth="105" Width="*" />
                             <DataGridTextColumn Header="当前" Binding="{Binding Active}" Width="60" />
-                            <DataGridTextColumn Header="验证状态" Binding="{Binding Verification}" Width="82" />
+                            <DataGridTextColumn Header="槽位验证" Binding="{Binding Verification}" Width="82" />
                             <DataGridTextColumn Header="状态" Binding="{Binding Health}" MinWidth="105" Width="Auto">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
-                                        <Setter Property="Padding" Value="6,2" />
-                                        <Setter Property="FontWeight" Value="SemiBold" />
-                                        <Setter Property="Foreground" Value="#FF4B5563" />
+                                        <Setter Property="Padding" Value="6,2" /><Setter Property="FontWeight" Value="SemiBold" />
+                                        <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
                                         <Style.Triggers>
-                                            <DataTrigger Binding="{Binding Health}" Value="正常">
-                                                <Setter Property="Foreground" Value="#FF167A45" />
-                                            </DataTrigger>
-                                            <DataTrigger Binding="{Binding Health}" Value="不完整">
-                                                <Setter Property="Foreground" Value="#FF9A6700" />
-                                            </DataTrigger>
-                                            <DataTrigger Binding="{Binding Health}" Value="元数据异常">
-                                                <Setter Property="Foreground" Value="#FFB42318" />
-                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding Health}" Value="正常"><Setter Property="Foreground" Value="#FF59D48B" /></DataTrigger>
+                                            <DataTrigger Binding="{Binding Health}" Value="不完整"><Setter Property="Foreground" Value="#FFFFC857" /></DataTrigger>
+                                            <DataTrigger Binding="{Binding Health}" Value="元数据异常"><Setter Property="Foreground" Value="#FFFF7B72" /></DataTrigger>
                                         </Style.Triggers>
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
@@ -234,8 +264,8 @@
             <Border Grid.Row="4" Style="{StaticResource PanelStyle}">
                 <Grid>
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="10" />
+                        <RowDefinition Height="Auto" /><RowDefinition Height="10" />
+                        <RowDefinition Height="Auto" /><RowDefinition Height="10" />
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
                     <WrapPanel Grid.Row="0">
@@ -244,23 +274,28 @@
                         <Button x:Name="RefreshButton" Content="刷新" Style="{StaticResource PrimaryButtonStyle}" IsDefault="True" />
                     </WrapPanel>
                     <Grid Grid.Row="2">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                         <WrapPanel Grid.Column="0">
                             <Button x:Name="AddButton" Content="添加账号" IsEnabled="False" />
                             <Button x:Name="RenameButton" Content="重命名" IsEnabled="False" />
-                            <Button x:Name="DeleteButton" Content="删除账号" IsEnabled="False" />
+                            <Button x:Name="DeleteButton" Content="删除账号" Style="{StaticResource DangerButtonStyle}" IsEnabled="False" />
                         </WrapPanel>
-                        <Button x:Name="ExitCodexButton" Grid.Column="1" Content="正常退出 Codex" IsEnabled="False" Margin="8,0,0,0" />
+                        <WrapPanel Grid.Column="1">
+                            <Button x:Name="LaunchCodexButton" Content="启动 Codex" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="False" />
+                            <Button x:Name="ExitCodexButton" Content="正常退出 Codex" IsEnabled="False" Margin="0" />
+                        </WrapPanel>
+                    </Grid>
+                    <Grid Grid.Row="4">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <TextBlock x:Name="LaunchTargetText" Grid.Column="0" VerticalAlignment="Center" Style="{StaticResource SecondaryTextStyle}" Text="Codex 启动目标：检测中" TextTrimming="CharacterEllipsis" />
+                        <Button x:Name="LaunchSettingsButton" Grid.Column="1" Content="启动设置" MinHeight="30" Padding="12,4" Margin="8,0,0,0" />
                     </Grid>
                 </Grid>
             </Border>
 
             <DockPanel Grid.Row="6">
-                <TextBlock x:Name="RefreshStatusText" Foreground="#FF374151" FontWeight="SemiBold" Text="准备就绪" />
-                <TextBlock DockPanel.Dock="Right" Foreground="#FF4B5563" Text="不访问浏览器或网页登录状态" />
+                <TextBlock x:Name="RefreshStatusText" Foreground="{DynamicResource TextPrimaryBrush}" FontWeight="SemiBold" Text="准备就绪" />
+                <TextBlock DockPanel.Dock="Right" Foreground="{DynamicResource TextSecondaryBrush}" Text="不访问浏览器或网页登录状态" />
             </DockPanel>
         </Grid>
     </Grid>

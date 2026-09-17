@@ -518,7 +518,9 @@ function Get-QiehaoActionState {
 
         [switch]$IsWriteOperationBusy,
 
-        [switch]$ExitInProgress
+        [switch]$ExitInProgress,
+
+        [bool]$LaunchTargetAvailable = $true
     )
 
     $hasSelection = -not [string]::IsNullOrWhiteSpace($SelectedProfile)
@@ -540,6 +542,8 @@ function Get-QiehaoActionState {
             $CodexStatus -ceq '已退出'
         ContextRename = $available -and $hasSelection
         ContextDelete = $available -and $hasSelection -and -not $isActive
+        LaunchCodex = $available -and $LaunchTargetAvailable -and
+            $CodexStatus -ceq '已退出'
         IsSelectedProfileActive = $isActive
     }
 }
@@ -680,6 +684,29 @@ function ConvertTo-QiehaoCodexStatus {
     }
 }
 
+function ConvertTo-QiehaoActiveIdentityStatus {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$ResultCode
+    )
+
+    switch ($ResultCode) {
+        'ACTIVE_IDENTITY_CONFIRMED' { return '已确认' }
+        'ACTIVE_PROFILE_IDENTITY_MISMATCH' { return '不匹配' }
+        'ACTIVE_PROFILE_NOT_INITIALIZED' { return '尚未初始化' }
+        'CODEX_PROCESS_RUNNING' { return '待退出后确认' }
+        'PROFILE_IDENTITY_MARKER_MISSING' { return '无法确认' }
+        'PROFILE_IDENTITY_MARKER_INVALID' { return '无法确认' }
+        'AUTH_IDENTITY_SCHEMA_UNRECOGNIZED' { return '无法确认' }
+        'PROFILE_IDENTITY_SCHEMA_UNRECOGNIZED' { return '无法确认' }
+        'CODEX_PROCESS_STATE_UNKNOWN' { return '无法确认' }
+        'ACTIVE_IDENTITY_CHECK_FAILED' { return '无法确认' }
+        'OPERATION_BUSY' { return '无法确认' }
+        default { return '无法确认' }
+    }
+}
+
 function Get-QiehaoGuiSnapshot {
     [CmdletBinding()]
     param(
@@ -690,7 +717,10 @@ function Get-QiehaoGuiSnapshot {
         [scriptblock]$ActiveProvider,
 
         [Parameter(Mandatory = $true)]
-        [scriptblock]$ProcessProvider
+        [scriptblock]$ProcessProvider,
+
+        [AllowNull()]
+        [scriptblock]$ActiveIdentityProvider
     )
 
     $errors = @()
@@ -729,10 +759,43 @@ function Get-QiehaoGuiSnapshot {
     $rows = ConvertTo-QiehaoGuiProfileRows -ProfileData $rawProfiles `
         -ActiveProfile $activeProfile -ActiveProfileKnown:$activeProfileKnown
 
+    $identityStatus = '无法确认'
+    if ($codexStatus -ceq '运行中') {
+        $identityStatus = '待退出后确认'
+    }
+    elseif ($codexStatus -ceq '已退出') {
+        if (-not $activeProfileKnown) {
+            $identityStatus = '尚未初始化'
+        }
+        elseif ($null -ne $ActiveIdentityProvider) {
+            try {
+                $identityResult = & $ActiveIdentityProvider
+                $resultProperty = if ($null -eq $identityResult) {
+                    $null
+                }
+                else {
+                    $identityResult.PSObject.Properties['Result']
+                }
+                $identityCode = if ($null -eq $resultProperty) {
+                    'ACTIVE_IDENTITY_CHECK_FAILED'
+                }
+                else {
+                    [string]$resultProperty.Value
+                }
+                $identityStatus = ConvertTo-QiehaoActiveIdentityStatus `
+                    -ResultCode $identityCode
+            }
+            catch {
+                $identityStatus = '无法确认'
+                $errors += 'ACTIVE_IDENTITY_UNAVAILABLE'
+            }
+        }
+    }
+
     return [pscustomobject]@{
         CodexDesktop = $codexStatus
         ActiveProfile = $activeProfile
-        IdentityStatus = '未检查'
+        IdentityStatus = $identityStatus
         WebChatGPT = '不受影响'
         Profiles = @($rows)
         ReadOnlyErrors = @($errors)
@@ -749,30 +812,110 @@ function Get-QiehaoBackgroundThemes {
             Name = '科技蓝'
             FileName = '01-blue-glass.png'
             OverlayMode = 'Dark'
+            OverlayColor = '#66101D2B'
+            CardTop = '#96394E66'
+            CardBottom = '#8A1D3046'
+            BorderTint = '#88A7C9E8'
+            TextPrimary = '#FFF4F8FC'
+            TextSecondary = '#FFD0DCE8'
+            ButtonTop = '#E04F769E'
+            ButtonBottom = '#E02B4E73'
+            ButtonHover = '#F06087B1'
+            ButtonPressed = '#E023405F'
+            ActiveRowTint = '#B83B7F5C'
+            ActiveSelectedRowTint = '#D445956A'
+            SelectedRowTint = '#C54A69A0'
+            AccentTint = '#FF5CC58A'
+            DangerTop = '#E08F5D68'
+            DangerBottom = '#E06F3F4A'
         },
         [pscustomobject]@{
             Id = '02-navy-gold'
             Name = '深蓝鎏金'
             FileName = '02-navy-gold.png'
             OverlayMode = 'Dark'
+            OverlayColor = '#70100F18'
+            CardTop = '#962A3041'
+            CardBottom = '#88151B2A'
+            BorderTint = '#8CBDAA72'
+            TextPrimary = '#FFFFF9EB'
+            TextSecondary = '#FFE0D6BC'
+            ButtonTop = '#E06C675A'
+            ButtonBottom = '#E0464350'
+            ButtonHover = '#F0837960'
+            ButtonPressed = '#E0353442'
+            ActiveRowTint = '#B8467654'
+            ActiveSelectedRowTint = '#D4538B61'
+            SelectedRowTint = '#C56E624B'
+            AccentTint = '#FFD2B86E'
+            DangerTop = '#E0945F63'
+            DangerBottom = '#E0713D45'
         },
         [pscustomobject]@{
             Id = '03-ice-glass'
             Name = '冰蓝玻璃'
             FileName = '03-ice-glass.png'
             OverlayMode = 'Light'
+            OverlayColor = '#55EAF5FA'
+            CardTop = '#AEEAF7FC'
+            CardBottom = '#A0DCECF4'
+            BorderTint = '#A8FFFFFF'
+            TextPrimary = '#FF173047'
+            TextSecondary = '#FF50687A'
+            ButtonTop = '#E8EAF7FC'
+            ButtonBottom = '#E8BFD9E7'
+            ButtonHover = '#F4F5FCFF'
+            ButtonPressed = '#E8ABCBD9'
+            ActiveRowTint = '#B8BFE8D1'
+            ActiveSelectedRowTint = '#D49DD9BA'
+            SelectedRowTint = '#C5BAD9EE'
+            AccentTint = '#FF27845A'
+            DangerTop = '#E8F2D4D8'
+            DangerBottom = '#E8DDAEB5'
         },
         [pscustomobject]@{
             Id = '04-purple-tech'
             Name = '紫蓝星河'
             FileName = '04-purple-tech.png'
             OverlayMode = 'Dark'
+            OverlayColor = '#6821163A'
+            CardTop = '#963F3562'
+            CardBottom = '#88251E45'
+            BorderTint = '#88C2A9F0'
+            TextPrimary = '#FFF8F3FF'
+            TextSecondary = '#FFDCCFEB'
+            ButtonTop = '#E06E5A9B'
+            ButtonBottom = '#E0473B75'
+            ButtonHover = '#F0846DB4'
+            ButtonPressed = '#E0382E5E'
+            ActiveRowTint = '#B8407B60'
+            ActiveSelectedRowTint = '#D44E9270'
+            SelectedRowTint = '#C5675798'
+            AccentTint = '#FF70D09B'
+            DangerTop = '#E095627C'
+            DangerBottom = '#E070405D'
         },
         [pscustomobject]@{
             Id = '05-light-flow'
             Name = '清透流光'
             FileName = '05-light-flow.png'
             OverlayMode = 'Light'
+            OverlayColor = '#4DECF2F6'
+            CardTop = '#ADF7FAFC'
+            CardBottom = '#9FE3EBF0'
+            BorderTint = '#B0FFFFFF'
+            TextPrimary = '#FF1F2E3A'
+            TextSecondary = '#FF586A78'
+            ButtonTop = '#EAF8FBFC'
+            ButtonBottom = '#EACBD9E1'
+            ButtonHover = '#F8FFFFFF'
+            ButtonPressed = '#EAB7C9D3'
+            ActiveRowTint = '#B8C4E8D3'
+            ActiveSelectedRowTint = '#D4A5DDBD'
+            SelectedRowTint = '#C5C1D7E5'
+            AccentTint = '#FF2F865E'
+            DangerTop = '#EAF2D9DC'
+            DangerBottom = '#EADDB5BB'
         }
     )
 }
@@ -906,6 +1049,268 @@ function Write-QiehaoUiPreferences {
             [System.IO.File]::Delete($temporaryPath)
         }
         $json = $null
+    }
+}
+
+function Test-QiehaoCustomLaunchPath {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or
+        -not [System.IO.Path]::IsPathRooted($Path)) {
+        return [pscustomobject]@{ IsValid = $false; FullPath = $null }
+    }
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($Path.Trim())
+        if (-not [System.IO.File]::Exists($fullPath) -or
+            [System.IO.Path]::GetExtension($fullPath) -ine '.exe') {
+            return [pscustomobject]@{ IsValid = $false; FullPath = $null }
+        }
+        $fileInfo = [System.IO.FileInfo]$fullPath
+        if (($fileInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return [pscustomobject]@{ IsValid = $false; FullPath = $null }
+        }
+        return [pscustomobject]@{ IsValid = $true; FullPath = $fullPath }
+    }
+    catch {
+        return [pscustomobject]@{ IsValid = $false; FullPath = $null }
+    }
+}
+
+function Read-QiehaoLaunchSettings {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$StateDirectory
+    )
+
+    $default = [pscustomobject]@{
+        Mode = 'Auto'
+        CustomPath = ''
+        IsValid = $true
+        UsedDefault = $true
+    }
+    $settingsPath = Join-Path -Path $StateDirectory `
+        -ChildPath 'codex-launch-settings.json'
+    if (-not [System.IO.File]::Exists($settingsPath)) { return $default }
+
+    $text = $null
+    $data = $null
+    try {
+        $length = ([System.IO.FileInfo]$settingsPath).Length
+        if ($length -le 0 -or $length -gt 16384) { throw 'LAUNCH_SETTINGS_INVALID' }
+        $text = [System.IO.File]::ReadAllText($settingsPath)
+        $data = ConvertFrom-Json -InputObject $text -ErrorAction Stop
+        $keys = @($data.PSObject.Properties | ForEach-Object { $_.Name })
+        if ($keys.Count -ne 3 -or
+            -not ($keys -ccontains 'schema_version') -or
+            -not ($keys -ccontains 'mode') -or
+            -not ($keys -ccontains 'custom_path') -or
+            [int]$data.schema_version -ne 1 -or
+            @('Auto', 'Custom') -cnotcontains [string]$data.mode) {
+            throw 'LAUNCH_SETTINGS_INVALID'
+        }
+        $customPath = [string]$data.custom_path
+        if ([string]$data.mode -ceq 'Custom') {
+            $validation = Test-QiehaoCustomLaunchPath -Path $customPath
+            if (-not $validation.IsValid) { throw 'LAUNCH_SETTINGS_INVALID' }
+            $customPath = [string]$validation.FullPath
+        }
+        else {
+            $customPath = ''
+        }
+        return [pscustomobject]@{
+            Mode = [string]$data.mode
+            CustomPath = $customPath
+            IsValid = $true
+            UsedDefault = $false
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Mode = 'Auto'
+            CustomPath = ''
+            IsValid = $false
+            UsedDefault = $true
+        }
+    }
+    finally {
+        $text = $null
+        $data = $null
+    }
+}
+
+function Write-QiehaoLaunchSettings {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$StateDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Auto', 'Custom')]
+        [string]$Mode,
+
+        [AllowNull()]
+        [string]$CustomPath = ''
+    )
+
+    $safePath = ''
+    if ($Mode -ceq 'Custom') {
+        $validation = Test-QiehaoCustomLaunchPath -Path $CustomPath
+        if (-not $validation.IsValid) { throw 'CODEX_CUSTOM_PATH_INVALID' }
+        $safePath = [string]$validation.FullPath
+    }
+    [System.IO.Directory]::CreateDirectory($StateDirectory) | Out-Null
+    $settingsPath = Join-Path -Path $StateDirectory `
+        -ChildPath 'codex-launch-settings.json'
+    $temporaryPath = Join-Path -Path $StateDirectory -ChildPath (
+        '.codex-launch-settings.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    )
+    $stream = $null
+    $writer = $null
+    $json = $null
+    try {
+        $json = [ordered]@{
+            schema_version = 1
+            mode = $Mode
+            custom_path = $safePath
+        } | ConvertTo-Json
+        $encoding = New-Object System.Text.UTF8Encoding($false)
+        $stream = New-Object System.IO.FileStream(
+            $temporaryPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+        $writer = New-Object System.IO.StreamWriter($stream, $encoding)
+        $writer.Write($json)
+        $writer.Flush()
+        $stream.Flush($true)
+        $writer.Dispose(); $writer = $null
+        $stream.Dispose(); $stream = $null
+        if ([System.IO.File]::Exists($settingsPath)) {
+            [System.IO.File]::Replace($temporaryPath, $settingsPath, $null)
+        }
+        else {
+            [System.IO.File]::Move($temporaryPath, $settingsPath)
+        }
+        return Read-QiehaoLaunchSettings -StateDirectory $StateDirectory
+    }
+    finally {
+        if ($null -ne $writer) { $writer.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ([System.IO.File]::Exists($temporaryPath)) {
+            [System.IO.File]::Delete($temporaryPath)
+        }
+        $json = $null
+    }
+}
+
+function Find-QiehaoCodexLaunchTarget {
+    [CmdletBinding()]
+    param(
+        [ValidateSet('Auto', 'Custom')]
+        [string]$Mode = 'Auto',
+
+        [AllowNull()]
+        [string]$CustomPath = '',
+
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$AppxApplications = @(),
+
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$StartApps = @()
+    )
+
+    if ($Mode -ceq 'Custom') {
+        $validation = Test-QiehaoCustomLaunchPath -Path $CustomPath
+        if (-not $validation.IsValid) {
+            return [pscustomobject]@{
+                Available = $false; Type = 'CustomExecutable'
+                AppUserModelId = $null; ExecutablePath = $null
+                DisplayStatus = '自定义路径无效'; Source = 'Custom'
+            }
+        }
+        return [pscustomobject]@{
+            Available = $true; Type = 'CustomExecutable'
+            AppUserModelId = $null; ExecutablePath = [string]$validation.FullPath
+            DisplayStatus = '已使用自定义文件'; Source = 'Custom'
+        }
+    }
+
+    foreach ($application in @($AppxApplications)) {
+        if ($null -eq $application) { continue }
+        $familyProperty = $application.PSObject.Properties['PackageFamilyName']
+        $idProperty = $application.PSObject.Properties['ApplicationId']
+        if ($null -eq $familyProperty -or $null -eq $idProperty) { continue }
+        $family = [string]$familyProperty.Value
+        $applicationId = [string]$idProperty.Value
+        $aumid = $family + '!' + $applicationId
+        if ($family -match '^(?i:OpenAI\.Codex_[A-Za-z0-9]+)$' -and
+            $applicationId -match '^[A-Za-z0-9._-]+$' -and
+            $aumid -match '^[A-Za-z0-9._-]+![A-Za-z0-9._-]+$') {
+            return [pscustomobject]@{
+                Available = $true; Type = 'AppUserModelId'
+                AppUserModelId = $aumid; ExecutablePath = $null
+                DisplayStatus = '已自动检测'; Source = 'AppxManifest'
+            }
+        }
+    }
+
+    foreach ($startApp in @($StartApps)) {
+        if ($null -eq $startApp) { continue }
+        $appIdProperty = $startApp.PSObject.Properties['AppID']
+        if ($null -eq $appIdProperty) { continue }
+        $aumid = [string]$appIdProperty.Value
+        if ($aumid -match '^(?i:OpenAI\.Codex_[A-Za-z0-9]+![A-Za-z0-9._-]+)$') {
+            return [pscustomobject]@{
+                Available = $true; Type = 'AppUserModelId'
+                AppUserModelId = $aumid; ExecutablePath = $null
+                DisplayStatus = '已自动检测'; Source = 'StartApps'
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Available = $false; Type = 'Unavailable'
+        AppUserModelId = $null; ExecutablePath = $null
+        DisplayStatus = '未检测到'; Source = 'None'
+    }
+}
+
+function Invoke-QiehaoCodexLaunchRequest {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$Target,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$LaunchProvider,
+
+        [switch]$IsBusy
+    )
+
+    if ($IsBusy) {
+        return [pscustomobject]@{ Result='OPERATION_BUSY'; LaunchCalled=$false }
+    }
+    if ($null -eq $Target -or -not [bool]$Target.Available -or
+        @('AppUserModelId', 'CustomExecutable') -cnotcontains [string]$Target.Type) {
+        return [pscustomobject]@{ Result='CODEX_LAUNCH_TARGET_UNAVAILABLE'; LaunchCalled=$false }
+    }
+    try {
+        $launched = [bool](& $LaunchProvider $Target)
+        return [pscustomobject]@{
+            Result = if ($launched) { 'CODEX_LAUNCH_REQUESTED' } else { 'CODEX_LAUNCH_FAILED' }
+            LaunchCalled = $true
+        }
+    }
+    catch {
+        return [pscustomobject]@{ Result='CODEX_LAUNCH_FAILED'; LaunchCalled=$true }
     }
 }
 
@@ -1049,6 +1454,7 @@ function Exit-QiehaoGuiSingleInstance {
 Export-ModuleMember -Function @(
     'ConvertTo-QiehaoGuiProfileRows',
     'ConvertTo-QiehaoCodexStatus',
+    'ConvertTo-QiehaoActiveIdentityStatus',
     'ConvertTo-QiehaoVerifyMessage',
     'Invoke-QiehaoVerifyRequest',
     'ConvertTo-QiehaoOperationResult',
@@ -1062,6 +1468,11 @@ Export-ModuleMember -Function @(
     'Get-QiehaoBackgroundTheme',
     'Read-QiehaoUiPreferences',
     'Write-QiehaoUiPreferences',
+    'Test-QiehaoCustomLaunchPath',
+    'Read-QiehaoLaunchSettings',
+    'Write-QiehaoLaunchSettings',
+    'Find-QiehaoCodexLaunchTarget',
+    'Invoke-QiehaoCodexLaunchRequest',
     'Get-QiehaoBackgroundImage',
     'Enter-QiehaoGuiSingleInstance',
     'Exit-QiehaoGuiSingleInstance'

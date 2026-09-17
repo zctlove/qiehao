@@ -25,6 +25,17 @@ function Test-ByteArrayEqual {
     return $true
 }
 
+function Get-FakeTreeStamp {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+    return (@(Get-ChildItem -LiteralPath $Root -File -Recurse | Sort-Object FullName | ForEach-Object {
+        $relative = $_.FullName.Substring($rootFull.Length)
+        $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+        $relative + '|' + [string]$_.Length + '|' +
+            [string]$_.LastWriteTimeUtc.Ticks + '|' + $hash
+    }) -join "`n")
+}
+
 function New-FakeAuthBytes {
     param(
         [Parameter(Mandatory = $true)]
@@ -718,6 +729,73 @@ try {
         [Array]::Clear($identitySchemaAuthAfter, 0, $identitySchemaAuthAfter.Length)
     }
 
+    # Active-identity confirmation is a read-only operation. Process gating
+    # happens before any fake auth read, and all branches return allowlisted
+    # status codes instead of identity data.
+    $fixtureActiveIdentity = New-SwitchFixture `
+        -Root (Join-Path $workDirectoryFull 'active-identity-confirm') `
+        -Module $module -ActiveBytes $fakeAInitial -TargetBytes $fakeB
+    $treeBeforeIdentityCheck = Get-FakeTreeStamp -Root (
+        Split-Path -Parent $fixtureActiveIdentity.CodexHome
+    )
+    $activeIdentityConfirmed = & $module {
+        param($Fixture)
+        Invoke-TestCodexActiveIdentity -CodexHome $Fixture.CodexHome `
+            -ProfilesDirectory $Fixture.Profiles -StateDirectory $Fixture.State `
+            -ProcessData @() -UseProvidedProcessData
+    } $fixtureActiveIdentity
+    $treeAfterIdentityCheck = Get-FakeTreeStamp -Root (
+        Split-Path -Parent $fixtureActiveIdentity.CodexHome
+    )
+    if ($activeIdentityConfirmed.Result -cne 'ACTIVE_IDENTITY_CONFIRMED' -or
+        $treeBeforeIdentityCheck -cne $treeAfterIdentityCheck -or
+        @($activeIdentityConfirmed.PSObject.Properties).Count -ne 1) {
+        throw 'SELFTEST_ACTIVE_IDENTITY_CONFIRM_READONLY_FAILED'
+    }
+
+    [System.IO.File]::WriteAllBytes($fixtureActiveIdentity.AuthPath, $fakeB)
+    $activeIdentityMismatch = & $module {
+        param($Fixture)
+        Invoke-TestCodexActiveIdentity -CodexHome $Fixture.CodexHome `
+            -ProfilesDirectory $Fixture.Profiles -StateDirectory $Fixture.State `
+            -ProcessData @() -UseProvidedProcessData
+    } $fixtureActiveIdentity
+    if ($activeIdentityMismatch.Result -cne 'ACTIVE_PROFILE_IDENTITY_MISMATCH') {
+        throw 'SELFTEST_ACTIVE_IDENTITY_MISMATCH_NOT_REPORTED'
+    }
+
+    $identityGateRoot = Join-Path $workDirectoryFull 'active-identity-process-gate'
+    $identityGateHome = Join-Path $identityGateRoot 'codex-home-without-auth'
+    $identityGateProfiles = Join-Path $identityGateRoot 'profiles'
+    $identityGateState = Join-Path $identityGateRoot 'state'
+    foreach ($directory in @($identityGateHome, $identityGateProfiles, $identityGateState)) {
+        [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+    }
+    $runningIdentityResult = & $module {
+        param($Home, $Profiles, $State)
+        Invoke-TestCodexActiveIdentity -CodexHome $Home `
+            -ProfilesDirectory $Profiles -StateDirectory $State `
+            -ProcessData @([pscustomobject]@{
+                ProcessName = 'ChatGPT.exe'; Id = 9101
+                ExecutablePath = 'C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__test\app\ChatGPT.exe'
+                PathReadStatus = 'Readable'
+            }) -UseProvidedProcessData
+    } $identityGateHome $identityGateProfiles $identityGateState
+    $unknownIdentityResult = & $module {
+        param($Home, $Profiles, $State)
+        Invoke-TestCodexActiveIdentity -CodexHome $Home `
+            -ProfilesDirectory $Profiles -StateDirectory $State `
+            -ProcessData @([pscustomobject]@{
+                ProcessName = 'ChatGPT.exe'; Id = 9102
+                ExecutablePath = $null; PathReadStatus = 'Unavailable'
+            }) -UseProvidedProcessData
+    } $identityGateHome $identityGateProfiles $identityGateState
+    if ($runningIdentityResult.Result -cne 'CODEX_PROCESS_RUNNING' -or
+        $unknownIdentityResult.Result -cne 'CODEX_PROCESS_STATE_UNKNOWN' -or
+        [System.IO.File]::Exists((Join-Path $identityGateHome 'auth.json'))) {
+        throw 'SELFTEST_ACTIVE_IDENTITY_PROCESS_GATE_FAILED'
+    }
+
     # Add-wizard safety: refresh the existing active slot only after the live
     # auth identity matches its protected marker. All paths are fake fixtures.
     $fixtureSaveActive = New-SwitchFixture `
@@ -1206,6 +1284,9 @@ try {
         MissingIdentityMarkerRejected = 'PASS'
         LegacyMarkerInitialization = 'PASS'
         UnknownIdentitySchemaRejected = 'PASS'
+        ActiveIdentityConfirmedReadOnly = 'PASS'
+        ActiveIdentityMismatchReported = 'PASS'
+        ActiveIdentityProcessGate = 'PASS'
         SaveActiveRefresh = 'PASS'
         SaveActiveIdentityDriftRejected = 'PASS'
         RenamedProfileMarkerAssociated = 'PASS'

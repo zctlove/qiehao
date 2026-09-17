@@ -8,7 +8,7 @@
 - 不把 token、API key、cookie、OAuth credential、账号 ID、邮箱或认证 JSON 写入日志和 metadata。
 - 不打印、截断或打码展示任何认证值。
 - 不修改 `CODEX_HOME`、User/Machine 环境变量或注册表。
-- 不自动登录、登出、强制终止或重启 Codex/ChatGPT；GUI 只在用户明确确认后向已验证的 Codex 主窗口发送正常关闭请求，10 秒内未退出即停止，不强杀。
+- 不自动登录、登出、强制终止或后台重启 Codex/ChatGPT；GUI 只在用户明确点击后启动 Codex，或向已验证的 Codex 主窗口发送正常关闭请求。启动/退出都只等待 10 秒确认进程状态，超时即停止，不强杀。
 - `save` 只按明确的 Codex 进程名或已确认属于 Codex 的可执行路径拦截，无关 `node`/`pwsh`/`ChatGPT` 不会被名称误伤；关键路径不可读时返回 `CODEX_PROCESS_STATE_UNKNOWN`，且始终在读取真实 `auth.json` **之前**停止，不会自动关闭进程。
 - 同名槽位默认拒绝覆盖；只有显式 `-Force` 才允许原子替换目标文件。
 - `switch` 只在进程闸返回 `CODEX_PROCESSES_STOPPED` 后运行；它先确认当前 `auth.json` 的稳定身份与 active profile marker 一致，再回存当前最新认证、验证目标、原子替换、读回逐字节验证，最后才更新 active profile。
@@ -165,7 +165,7 @@ To: Team
 
 替换后的验证或最终状态提交失败时，工具会从刚更新的原 active 槽位重新解密、恢复并验证 `auth.json`。恢复成功返回 `SWITCH_FAILED_ROLLED_BACK`，active 状态保持原值；恢复失败返回 `SWITCH_ROLLBACK_FAILED` 和 `DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED`，且不更新 active 状态。
 
-CLI 不会自动关闭或启动 Codex，也不会登录或登出账号。GUI 仅提供用户明确确认后的正常关闭请求，不提供强制终止或自动启动。
+CLI 不会自动关闭或启动 Codex，也不会登录或登出账号。GUI 提供用户明确点击后的受约束启动和正常关闭请求；启动时不附加账号、token 或浏览器参数，不提权，不修改环境变量或 Codex 配置；关闭时不提供强制终止。
 
 ## 中文 GUI
 
@@ -177,6 +177,10 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\gui\QiehaoGui.ps1
 
 GUI 提供统一的手动账号管理流程：
 
+- 顶部“当前身份确认”与列表“槽位验证”是两个不同概念。手动“刷新”在 Codex 已退出时调用只读 `Test-CodexActiveIdentity`，仅显示“已确认 / 不匹配 / 尚未初始化 / 无法确认”；Codex 运行中显示“待退出后确认”，不会读取当前 auth。
+- GUI 每 2 秒只检测一次 Codex 进程状态，用于及时更新“启动 Codex / 正常退出 Codex”按钮；这个计时器不读取 auth、identity marker、profile 列表或 active 状态。完整资料刷新只在启动、正常退出完成或用户点击“刷新”时执行。
+- “启动 Codex”默认从 AppX manifest 或 Windows Start Apps 自动检测官方 AUMID；特殊安装可在“启动设置”中选择现有的本地 `.exe`。自定义路径拒绝不存在文件、非 `.exe` 和 reparse point；启动不附加任意参数、不提权、不更改配置或环境变量。
+- “启动 Codex”只在进程闸确认“已退出”且启动目标有效时可用；“正常退出 Codex”只在确认“运行中”时可用。点击时还会即时复核，状态未知时两者都不会继续。
 - “切换账号”按钮、账号整行双击和右键“切换到此账号”共用同一个 Switch handler；当前账号不会调用后端。
 - Codex 正在运行时，只有用户选择“正常退出并切换”后才调用安全关闭链；10 秒仍运行或状态未知时不会切换，也不存在强杀。
 - 右键账号行会先选中该行；当前账号的 Switch/Delete 禁用，Rename 仍允许。
@@ -323,7 +327,7 @@ mutex 名称包含当前 Windows 用户 SID，使同一用户在不同桌面/RDP
 - `init-active` 逐字节不一致时拒绝标记；
 - 删除测试产生的临时文件和目录。
 
-GUI 自测试在 Windows PowerShell 5.1 与 PowerShell 7 中解析 XAML，并通过 dependency injection 覆盖 Switch、正常退出后切换、回滚结果映射、Add/Rename/Delete、整行双击、右键、F2、搜索、Busy 门禁、五主题、中文编码以及 Chrome/Edge extension-host 隔离。它不会显示真实 GUI，也不会调用真实账号后端。
+GUI 自测试在 Windows PowerShell 5.1 与 PowerShell 7 中解析 XAML，并通过 dependency injection 覆盖 Switch、正常退出后切换、受约束启动目标、刷新身份语义、进程计时器隔离、回滚结果映射、Add/Rename/Delete、整行双击、右键、F2、搜索、Busy 门禁、五套玻璃主题、活动账号行、中文编码以及 Chrome/Edge extension-host 隔离。它不会显示真实 GUI，不会启动或关闭真实 Codex，也不会调用真实账号后端。
 
 自测试不会调用 `Get-CodexHome`，不会读取真实 `.codex/auth.json`，不会写入正式 `profiles`，也不会改变 `CODEX_HOME`。
 
@@ -351,7 +355,7 @@ GUI 自测试在 Windows PowerShell 5.1 与 PowerShell 7 中解析 XAML，并通
 - named mutex 单写保护；
 - 在 Codex Desktop 完全退出后执行“回存当前 → 验证目标 → 原子替换 → 读回验证 → 提交 active 状态”的本地切换；
 - 替换后失败时从刚更新的原 active 槽位回滚；
-- 中文 WPF GUI 的手动 Switch/Add/Rename/Delete、整行双击、右键、F2、名称搜索和写操作 Busy 门禁；
+- 中文 WPF GUI 的手动 Switch/Add/Rename/Delete、受约束启动/正常退出、当前身份只读确认、进程状态计时器、五套玻璃主题、整行双击、右键、F2、名称搜索和写操作 Busy 门禁；
 - 用户明确确认后的 Codex 主窗口正常关闭请求与 10 秒 fail-closed 等待；
 - 完全虚构数据自测试。
 

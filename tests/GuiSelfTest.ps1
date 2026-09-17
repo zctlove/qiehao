@@ -100,12 +100,19 @@ function New-FakeSnapshot {
 
         [string]$Active = 'Plus',
 
-        [string]$ReasonCode = 'CODEX_PROCESSES_STOPPED'
+        [string]$ReasonCode = 'CODEX_PROCESSES_STOPPED',
+
+        [string]$IdentityResultCode = 'ACTIVE_IDENTITY_CONFIRMED',
+
+        [AllowNull()]
+        [object]$IdentityCallCounter
     )
 
     $listData = @($Profiles)
     $activeName = $Active
     $processReason = $ReasonCode
+    $identityCode = $IdentityResultCode
+    $identityCounter = $IdentityCallCounter
     return Get-QiehaoGuiSnapshot `
         -ListProvider ({ $listData }.GetNewClosure()) `
         -ActiveProvider ({
@@ -113,6 +120,10 @@ function New-FakeSnapshot {
         }.GetNewClosure()) `
         -ProcessProvider ({
             [pscustomobject]@{ ReasonCode = $processReason }
+        }.GetNewClosure()) `
+        -ActiveIdentityProvider ({
+            if ($null -ne $identityCounter) { $identityCounter.Count++ }
+            [pscustomobject]@{ Result = $identityCode }
         }.GetNewClosure())
 }
 
@@ -161,12 +172,18 @@ Assert-GuiTest -Condition (
     $ps7Xaml.Output -ccontains 'XAML_PARSE_PASS'
 ) -Code 'GUI_POWERSHELL_7_XAML_PARSE_FAILED'
 
-$guiStartup = Invoke-PowerShellFileTest -HostPath $ps51Command.Source `
+$guiStartup51 = Invoke-PowerShellFileTest -HostPath $ps51Command.Source `
     -ScriptPath $guiScriptPath -AdditionalArguments @('-SelfTest')
 Assert-GuiTest -Condition (
-    $guiStartup.ExitCode -eq 0 -and
-    $guiStartup.Output -ccontains 'GUI_SELFTEST_READY'
-) -Code 'GUI_STARTUP_SELFTEST_FAILED'
+    $guiStartup51.ExitCode -eq 0 -and
+    $guiStartup51.Output -ccontains 'GUI_SELFTEST_READY'
+) -Code 'GUI_STARTUP_SELFTEST_PS51_FAILED'
+$guiStartup7 = Invoke-PowerShellFileTest -HostPath $ps7Command.Source `
+    -ScriptPath $guiScriptPath -AdditionalArguments @('-SelfTest')
+Assert-GuiTest -Condition (
+    $guiStartup7.ExitCode -eq 0 -and
+    $guiStartup7.Output -ccontains 'GUI_SELFTEST_READY'
+) -Code 'GUI_STARTUP_SELFTEST_PS7_FAILED'
 
 $themes = @(Get-QiehaoBackgroundThemes)
 Assert-GuiTest -Condition (
@@ -175,6 +192,18 @@ Assert-GuiTest -Condition (
     '科技蓝|深蓝鎏金|冰蓝玻璃|紫蓝星河|清透流光'
 ) -Code 'GUI_THEME_CATALOG_INVALID'
 foreach ($theme in $themes) {
+    foreach ($requiredThemeProperty in @(
+        'OverlayColor','CardTop','CardBottom','BorderTint','TextPrimary',
+        'TextSecondary','ButtonTop','ButtonBottom','ButtonHover','ButtonPressed',
+        'ActiveRowTint','ActiveSelectedRowTint','SelectedRowTint','AccentTint',
+        'DangerTop','DangerBottom'
+    )) {
+        Assert-GuiTest -Condition (
+            $null -ne $theme.PSObject.Properties[$requiredThemeProperty] -and
+            -not [string]::IsNullOrWhiteSpace([string]$theme.$requiredThemeProperty)
+        ) -Code ('GUI_THEME_GLASS_PROPERTY_MISSING_' + $theme.Id + '_' +
+            $requiredThemeProperty)
+    }
     $loadResult = Get-QiehaoBackgroundImage -Theme $theme `
         -BackgroundDirectory (Join-Path -Path $guiRoot `
             -ChildPath 'assets\backgrounds')
@@ -318,8 +347,30 @@ Assert-GuiTest -Condition (
 ) -Code 'GUI_CODEX_UNKNOWN_MAP_FAILED'
 Assert-GuiTest -Condition (
     $stoppedSnapshot.WebChatGPT -ceq '不受影响' -and
-    $stoppedSnapshot.IdentityStatus -ceq '未检查'
+    $stoppedSnapshot.IdentityStatus -ceq '已确认'
 ) -Code 'GUI_CHINESE_WEB_OR_IDENTITY_STATUS_FAILED'
+
+$stoppedIdentityCalls = [pscustomobject]@{ Count=0 }
+$runningIdentityCalls = [pscustomobject]@{ Count=0 }
+$unknownIdentityCalls = [pscustomobject]@{ Count=0 }
+$stoppedMismatchSnapshot = New-FakeSnapshot -Profiles @() -Active 'A' `
+    -ReasonCode 'CODEX_PROCESSES_STOPPED' `
+    -IdentityResultCode 'ACTIVE_PROFILE_IDENTITY_MISMATCH' `
+    -IdentityCallCounter $stoppedIdentityCalls
+$runningIdentitySnapshot = New-FakeSnapshot -Profiles @() -Active 'A' `
+    -ReasonCode 'CODEX_PROCESS_RUNNING' `
+    -IdentityCallCounter $runningIdentityCalls
+$unknownIdentitySnapshot = New-FakeSnapshot -Profiles @() -Active 'A' `
+    -ReasonCode 'CODEX_PROCESS_STATE_UNKNOWN' `
+    -IdentityCallCounter $unknownIdentityCalls
+Assert-GuiTest -Condition (
+    $stoppedMismatchSnapshot.IdentityStatus -ceq '不匹配' -and
+    $stoppedIdentityCalls.Count -eq 1 -and
+    $runningIdentitySnapshot.IdentityStatus -ceq '待退出后确认' -and
+    $runningIdentityCalls.Count -eq 0 -and
+    $unknownIdentitySnapshot.IdentityStatus -ceq '无法确认' -and
+    $unknownIdentityCalls.Count -eq 0
+) -Code 'GUI_ACTIVE_IDENTITY_REFRESH_SEMANTICS_FAILED'
 
 $extensionHostPath = 'C:\Users\Fake\.codex\plugins\cache\openai-bundled\chrome\latest\extension-host\windows\x64\extension-host.exe'
 $chromeState = Test-CodexProcessesStopped -ProcessData @(
@@ -489,19 +540,89 @@ $otherRunningActions = Get-QiehaoActionState -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' -CodexStatus '运行中'
 $busyActions = Get-QiehaoActionState -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' -CodexStatus '已退出' -IsWriteOperationBusy
+$unavailableLaunchActions = Get-QiehaoActionState -SelectedProfile 'Team' `
+    -ActiveProfile 'Plus' -CodexStatus '已退出' -LaunchTargetAvailable:$false
 Assert-GuiTest -Condition (
     -not $activeStoppedActions.Switch -and
     -not $activeStoppedActions.ContextSwitch -and
     -not $activeStoppedActions.Delete -and
     -not $activeStoppedActions.ContextDelete -and
     $activeStoppedActions.Rename -and
+    $activeStoppedActions.LaunchCodex -and
+    -not $activeStoppedActions.ExitCodex -and
     $otherRunningActions.Switch -and
     -not $otherRunningActions.Verify -and
+    -not $otherRunningActions.LaunchCodex -and
+    $otherRunningActions.ExitCodex -and
     $busyActions.Refresh -and
     -not $busyActions.Switch -and -not $busyActions.Add -and
     -not $busyActions.Rename -and -not $busyActions.Delete -and
-    -not $busyActions.ContextSwitch -and -not $busyActions.ContextRename
+    -not $busyActions.LaunchCodex -and -not $busyActions.ExitCodex -and
+    -not $busyActions.ContextSwitch -and -not $busyActions.ContextRename -and
+    -not $unavailableLaunchActions.LaunchCodex
 ) -Code 'GUI_ACTION_ENABLE_RULES_FAILED'
+
+$appxLaunchTarget = Find-QiehaoCodexLaunchTarget -Mode Auto `
+    -AppxApplications @([pscustomobject]@{
+        PackageFamilyName='OpenAI.Codex_8wekyb3d8bbwe'; ApplicationId='App'
+    }) -StartApps @([pscustomobject]@{ Name='Codex'; AppID='ignored' })
+$startAppsLaunchTarget = Find-QiehaoCodexLaunchTarget -Mode Auto `
+    -AppxApplications @() -StartApps @([pscustomobject]@{
+        Name='Codex'; AppID='OpenAI.Codex_8wekyb3d8bbwe!App'
+    })
+Assert-GuiTest -Condition (
+    $appxLaunchTarget.Available -and
+    $appxLaunchTarget.Type -ceq 'AppUserModelId' -and
+    $appxLaunchTarget.Source -ceq 'AppxManifest' -and
+    $startAppsLaunchTarget.Available -and
+    $startAppsLaunchTarget.Source -ceq 'StartApps'
+) -Code 'GUI_CODEX_LAUNCH_AUTO_DETECTION_FAILED'
+
+$launchTestRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
+    ('qiehao-launch-' + [Guid]::NewGuid().ToString('N'))
+[System.IO.Directory]::CreateDirectory($launchTestRoot) | Out-Null
+try {
+    $fakeExePath = Join-Path $launchTestRoot 'Codex-Fake.exe'
+    [System.IO.File]::WriteAllBytes($fakeExePath, [byte[]](77,90,0,0))
+    $validCustomTarget = Find-QiehaoCodexLaunchTarget -Mode Custom `
+        -CustomPath $fakeExePath
+    $invalidCustomTarget = Find-QiehaoCodexLaunchTarget -Mode Custom `
+        -CustomPath (Join-Path $launchTestRoot 'missing.exe')
+    $writtenLaunchSettings = Write-QiehaoLaunchSettings `
+        -StateDirectory $launchTestRoot -Mode Custom -CustomPath $fakeExePath
+    $restoredLaunchSettings = Read-QiehaoLaunchSettings -StateDirectory $launchTestRoot
+    Assert-GuiTest -Condition (
+        $validCustomTarget.Available -and
+        -not $invalidCustomTarget.Available -and
+        $writtenLaunchSettings.Mode -ceq 'Custom' -and
+        $restoredLaunchSettings.CustomPath -ceq $validCustomTarget.ExecutablePath
+    ) -Code 'GUI_CODEX_CUSTOM_LAUNCH_SETTINGS_FAILED'
+
+    $launchCalls = [pscustomobject]@{ Count=0; Type=''; PropertyCount=0 }
+    $launchRequest = Invoke-QiehaoCodexLaunchRequest -Target $validCustomTarget `
+        -LaunchProvider ({
+            param($Target)
+            $launchCalls.Count++
+            $launchCalls.Type = [string]$Target.Type
+            $launchCalls.PropertyCount = @($Target.PSObject.Properties).Count
+            return $true
+        }.GetNewClosure())
+    $busyLaunchRequest = Invoke-QiehaoCodexLaunchRequest `
+        -Target $validCustomTarget -LaunchProvider { throw 'MUST_NOT_RUN' } -IsBusy
+    Assert-GuiTest -Condition (
+        $launchRequest.Result -ceq 'CODEX_LAUNCH_REQUESTED' -and
+        $launchRequest.LaunchCalled -and $launchCalls.Count -eq 1 -and
+        $launchCalls.Type -ceq 'CustomExecutable' -and
+        $launchCalls.PropertyCount -eq 6 -and
+        $busyLaunchRequest.Result -ceq 'OPERATION_BUSY' -and
+        -not $busyLaunchRequest.LaunchCalled
+    ) -Code 'GUI_CODEX_LAUNCH_PROVIDER_CONTRACT_FAILED'
+}
+finally {
+    if ([System.IO.Directory]::Exists($launchTestRoot)) {
+        [System.IO.Directory]::Delete($launchTestRoot, $true)
+    }
+}
 
 $renameCalls = [pscustomobject]@{ Count=0; From=''; To='' }
 $renameSuccess = Invoke-QiehaoOperationProvider -Operation 'RENAME' `
@@ -735,7 +856,7 @@ Assert-GuiTest -Condition (
     $browserCloseCalls.Count -eq 0
 ) -Code 'GUI_EXIT_BROWSER_PROCESS_TARGETED'
 
-$providerCalls = [pscustomobject]@{ List=0; Active=0; Process=0 }
+$providerCalls = [pscustomobject]@{ List=0; Active=0; Process=0; Identity=0 }
 $null = Get-QiehaoGuiSnapshot `
     -ListProvider ({ $providerCalls.List++; @() }.GetNewClosure()) `
     -ActiveProvider ({
@@ -745,11 +866,16 @@ $null = Get-QiehaoGuiSnapshot `
     -ProcessProvider ({
         $providerCalls.Process++
         [pscustomobject]@{ ReasonCode='CODEX_PROCESSES_STOPPED' }
+    }.GetNewClosure()) `
+    -ActiveIdentityProvider ({
+        $providerCalls.Identity++
+        [pscustomobject]@{ Result='ACTIVE_IDENTITY_CONFIRMED' }
     }.GetNewClosure())
 Assert-GuiTest -Condition (
     $providerCalls.List -eq 1 -and
     $providerCalls.Active -eq 1 -and
-    $providerCalls.Process -eq 1
+    $providerCalls.Process -eq 1 -and
+    $providerCalls.Identity -eq 1
 ) -Code 'GUI_REFRESH_PROVIDER_COUNT_FAILED'
 
 $guiSource = [System.IO.File]::ReadAllText($guiScriptPath)
@@ -758,7 +884,8 @@ foreach ($requiredBackendCommand in @(
     'Switch-CodexAccountProfile',
     'Add-CodexProfile',
     'Remove-CodexProfile',
-    'Rename-CodexProfile'
+    'Rename-CodexProfile',
+    'Test-CodexActiveIdentity'
 )) {
     Assert-GuiTest -Condition (
         $guiSource -match ('(?i)\b' + [regex]::Escape($requiredBackendCommand) + '\b')
@@ -772,6 +899,9 @@ foreach ($requiredGuiHandler in @(
     'Invoke-QiehaoRenameSelectedProfile',
     'Invoke-QiehaoDeleteSelectedProfile',
     'Invoke-QiehaoAddAccount',
+    'Invoke-QiehaoLaunchCodex',
+    'Show-QiehaoLaunchSettingsDialog',
+    'Start-QiehaoProcessMonitor',
     'Add_MouseDoubleClick',
     'Add_PreviewMouseRightButtonDown',
     'Add_PreviewKeyDown',
@@ -798,11 +928,15 @@ foreach ($requiredChineseText in @(
     'Codex 账号管理器',
     'Codex 客户端',
     '当前账号',
+    '当前身份确认',
     '网页 ChatGPT',
     '不受影响',
     '已保存账号',
     '搜索账号',
+    '槽位验证',
     '切换账号',
+    '启动 Codex',
+    '启动设置',
     '正常退出 Codex'
 )) {
     Assert-GuiTest -Condition (
@@ -845,7 +979,9 @@ Assert-GuiTest -Condition (
     $refreshNode.GetAttribute('IsEnabled') -cne 'False'
 ) -Code 'GUI_REFRESH_BUTTON_DISABLED'
 
-foreach ($phaseTwoButtonName in @('VerifyButton', 'ExitCodexButton')) {
+foreach ($phaseTwoButtonName in @(
+    'VerifyButton', 'LaunchCodexButton', 'ExitCodexButton'
+)) {
     $phaseTwoNode = $xamlDocument.SelectSingleNode(
         "//*[@x:Name='$phaseTwoButtonName']",
         $namespaceManager
@@ -855,6 +991,23 @@ foreach ($phaseTwoButtonName in @('VerifyButton', 'ExitCodexButton')) {
         $phaseTwoNode.GetAttribute('IsEnabled') -ceq 'False'
     ) -Code ('GUI_PHASE_TWO_BUTTON_INITIAL_STATE_INVALID_' + $phaseTwoButtonName)
 }
+
+foreach ($launchInfoName in @('LaunchSettingsButton', 'LaunchTargetText')) {
+    Assert-GuiTest -Condition ($null -ne $xamlDocument.SelectSingleNode(
+        "//*[@x:Name='$launchInfoName']", $namespaceManager
+    )) -Code ('GUI_LAUNCH_CONTROL_MISSING_' + $launchInfoName)
+}
+Assert-GuiTest -Condition (
+    $xamlTextForEncoding -match 'LinearGradientBrush x:Key="PanelBrush"' -and
+    $xamlTextForEncoding -notmatch 'x:Key="PanelBrush"[^>]*#FFFFFFFF' -and
+    $xamlTextForEncoding -match 'ControlTemplate.Triggers' -and
+    $xamlTextForEncoding -match 'Property="IsMouseOver"' -and
+    $xamlTextForEncoding -match 'Property="IsPressed"' -and
+    $xamlTextForEncoding -match 'DynamicResource ActiveRowBrush' -and
+    $xamlTextForEncoding -match 'DynamicResource ActiveSelectedRowBrush' -and
+    $xamlTextForEncoding -match 'MultiDataTrigger' -and
+    $xamlTextForEncoding -match 'BorderThickness" Value="4,0,1,0"'
+) -Code 'GUI_GLASS_OR_ACTIVE_ROW_STYLE_MISSING'
 
 $coreAndGuiSource = $guiSource + [System.IO.File]::ReadAllText($coreModulePath)
 Assert-GuiTest -Condition (
@@ -867,6 +1020,28 @@ Assert-GuiTest -Condition (
     $guiSource -match 'Invoke-QiehaoReadOnlyRefresh' -and
     $guiSource -match 'guiIsWriteOperationBusy'
 ) -Code 'GUI_OPERATION_WIRING_MISSING'
+
+$processMonitorSection = [regex]::Match(
+    $guiSource,
+    '(?s)function Update-QiehaoProcessOnlyStatus\s*\{.*?function Get-QiehaoInstalledCodexApplications'
+).Value
+Assert-GuiTest -Condition (
+    -not [string]::IsNullOrWhiteSpace($processMonitorSection) -and
+    $processMonitorSection -match 'Get-QiehaoLiveCodexStatus' -and
+    $processMonitorSection -match 'FromSeconds\(2\)' -and
+    $processMonitorSection -notmatch '(?i)auth|identity|Get-CodexActiveProfile|Get-CodexAccountSlot'
+) -Code 'GUI_PROCESS_MONITOR_NOT_READONLY_ISOLATED'
+
+$launchSection = [regex]::Match(
+    $guiSource,
+    '(?s)function Invoke-QiehaoLaunchCodex\s*\{.*?function Complete-QiehaoExitWait'
+).Value
+Assert-GuiTest -Condition (
+    -not [string]::IsNullOrWhiteSpace($launchSection) -and
+    $launchSection -match 'Start-Process' -and
+    $launchSection -match 'shell:AppsFolder' -and
+    $launchSection -notmatch '(?i)token|account_id|--profile|--user-data-dir|RunAs'
+) -Code 'GUI_LAUNCH_ARGUMENT_SAFETY_FAILED'
 
 $mutexName = 'Qiehaoqu.CodexAccountSwitcher.Gui.v1.SelfTest.' + `
     [Guid]::NewGuid().ToString('N')
@@ -903,10 +1078,12 @@ finally {
 
 [pscustomobject]@{
     Result = 'PASS'
-    GuiStartup = 'PASS'
+    GuiStartupPowerShell51 = 'PASS'
+    GuiStartupPowerShell7 = 'PASS'
     PowerShell51XamlParse = 'PASS'
     PowerShell7XamlParse = 'PASS'
     FiveThemesLoad = 'PASS'
+    FiveThemesGlassProperties = 'PASS'
     MissingThemeFallback = 'PASS'
     CorruptThemeFallback = 'PASS'
     BackgroundUniformToFill = 'PASS'
@@ -919,6 +1096,7 @@ finally {
     FakeTenProfiles = 'PASS'
     HealthStates = 'PASS'
     ActiveProfile = 'PASS'
+    ActiveIdentityRefreshSemantics = 'PASS'
     CodexRunning = 'PASS'
     CodexStopped = 'PASS'
     CodexUnknown = 'PASS'
@@ -937,6 +1115,13 @@ finally {
     ExitStillRunningNoForce = 'PASS'
     ExitUnknownNoRequest = 'PASS'
     ExitBrowserIsolation = 'PASS'
+    LaunchAutoDetection = 'PASS'
+    LaunchCustomSettings = 'PASS'
+    LaunchProviderContract = 'PASS'
+    LaunchExitButtonStates = 'PASS'
+    ProcessMonitorReadOnly = 'PASS'
+    GlassCardsAndButtons = 'PASS'
+    ActiveRowDistinct = 'PASS'
     RefreshReadOnly = 'PASS'
     ClickOnlySelects = 'PASS'
     DoubleClickStoppedSwitch = 'PASS'

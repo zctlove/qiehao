@@ -97,7 +97,10 @@ try {
     $addButton = Get-RequiredControl -Window $window -Name 'AddButton'
     $renameButton = Get-RequiredControl -Window $window -Name 'RenameButton'
     $deleteButton = Get-RequiredControl -Window $window -Name 'DeleteButton'
+    $launchCodexButton = Get-RequiredControl -Window $window -Name 'LaunchCodexButton'
     $exitCodexButton = Get-RequiredControl -Window $window -Name 'ExitCodexButton'
+    $launchSettingsButton = Get-RequiredControl -Window $window -Name 'LaunchSettingsButton'
+    $launchTargetText = Get-RequiredControl -Window $window -Name 'LaunchTargetText'
     $themeComboBox = Get-RequiredControl -Window $window -Name 'ThemeComboBox'
     $backgroundImage = Get-RequiredControl -Window $window -Name 'BackgroundImage'
     $backgroundOverlay = Get-RequiredControl -Window $window -Name 'BackgroundOverlay'
@@ -113,7 +116,11 @@ try {
     $script:guiIsWriteOperationBusy = $false
     $script:guiExitInProgress = $false
     $script:guiExitTimer = $null
+    $script:guiLaunchTimer = $null
+    $script:guiProcessTimer = $null
     $script:guiPendingAfterExit = $null
+    $script:guiLaunchTarget = $null
+    $script:guiLaunchSettings = $null
     $script:guiAllProfileRows = @()
     $script:guiVerificationStates = @{}
 
@@ -128,13 +135,16 @@ try {
             -ActiveProfile $script:guiCurrentActiveProfile `
             -CodexStatus $script:guiCurrentCodexStatus `
             -IsWriteOperationBusy:$script:guiIsWriteOperationBusy `
-            -ExitInProgress:$script:guiExitInProgress
+            -ExitInProgress:$script:guiExitInProgress `
+            -LaunchTargetAvailable:($null -ne $script:guiLaunchTarget -and
+                [bool]$script:guiLaunchTarget.Available)
         $refreshButton.IsEnabled = [bool]$state.Refresh
         $switchButton.IsEnabled = [bool]$state.Switch
         $verifyButton.IsEnabled = [bool]$state.Verify
         $addButton.IsEnabled = [bool]$state.Add
         $renameButton.IsEnabled = [bool]$state.Rename
         $deleteButton.IsEnabled = [bool]$state.Delete
+        $launchCodexButton.IsEnabled = [bool]$state.LaunchCodex
         $exitCodexButton.IsEnabled = [bool]$state.ExitCodex
         $contextSwitchMenuItem.IsEnabled = [bool]$state.ContextSwitch
         $contextVerifyMenuItem.IsEnabled = [bool]$state.ContextVerify
@@ -323,6 +333,75 @@ try {
         return $null
     }
 
+    function New-QiehaoSolidBrush {
+        param([Parameter(Mandatory = $true)][string]$Color)
+        $brush = New-Object System.Windows.Media.SolidColorBrush
+        $brush.Color = [System.Windows.Media.ColorConverter]::ConvertFromString($Color)
+        if ($brush.CanFreeze) { $brush.Freeze() }
+        return $brush
+    }
+
+    function New-QiehaoGradientBrush {
+        param(
+            [Parameter(Mandatory = $true)][string]$Top,
+            [Parameter(Mandatory = $true)][string]$Bottom
+        )
+        $brush = New-Object System.Windows.Media.LinearGradientBrush
+        $brush.StartPoint = New-Object System.Windows.Point(0, 0)
+        $brush.EndPoint = New-Object System.Windows.Point(0, 1)
+        $brush.GradientStops.Add((New-Object System.Windows.Media.GradientStop(
+            ([System.Windows.Media.ColorConverter]::ConvertFromString($Top)), 0
+        )))
+        $brush.GradientStops.Add((New-Object System.Windows.Media.GradientStop(
+            ([System.Windows.Media.ColorConverter]::ConvertFromString($Bottom)), 1
+        )))
+        if ($brush.CanFreeze) { $brush.Freeze() }
+        return $brush
+    }
+
+    function Set-QiehaoThemeResources {
+        param([Parameter(Mandatory = $true)][object]$Theme)
+        $values = [ordered]@{
+            PanelBrush = New-QiehaoGradientBrush -Top ([string]$Theme.CardTop) `
+                -Bottom ([string]$Theme.CardBottom)
+            PanelBorderBrush = New-QiehaoSolidBrush -Color ([string]$Theme.BorderTint)
+            TextPrimaryBrush = New-QiehaoSolidBrush -Color ([string]$Theme.TextPrimary)
+            TextSecondaryBrush = New-QiehaoSolidBrush -Color ([string]$Theme.TextSecondary)
+            ButtonFaceBrush = New-QiehaoGradientBrush -Top ([string]$Theme.ButtonTop) `
+                -Bottom ([string]$Theme.ButtonBottom)
+            ButtonHoverBrush = New-QiehaoSolidBrush -Color ([string]$Theme.ButtonHover)
+            ButtonPressedBrush = New-QiehaoSolidBrush -Color ([string]$Theme.ButtonPressed)
+            DangerButtonBrush = New-QiehaoGradientBrush -Top ([string]$Theme.DangerTop) `
+                -Bottom ([string]$Theme.DangerBottom)
+            ActiveRowBrush = New-QiehaoSolidBrush -Color ([string]$Theme.ActiveRowTint)
+            ActiveSelectedRowBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.ActiveSelectedRowTint)
+            SelectedRowBrush = New-QiehaoSolidBrush -Color ([string]$Theme.SelectedRowTint)
+            AccentBrush = New-QiehaoSolidBrush -Color ([string]$Theme.AccentTint)
+            ButtonDisabledBrush = New-QiehaoSolidBrush -Color $(
+                if ([string]$Theme.OverlayMode -ceq 'Dark') { '#705B6472' }
+                else { '#70AAB5BE' }
+            )
+            GridBackgroundBrush = New-QiehaoSolidBrush -Color $(
+                if ([string]$Theme.OverlayMode -ceq 'Dark') { '#3AFFFFFF' }
+                else { '#68FFFFFF' }
+            )
+            GridRowBrush = New-QiehaoSolidBrush -Color $(
+                if ([string]$Theme.OverlayMode -ceq 'Dark') { '#25FFFFFF' }
+                else { '#50FFFFFF' }
+            )
+            GridAltRowBrush = New-QiehaoSolidBrush -Color $(
+                if ([string]$Theme.OverlayMode -ceq 'Dark') { '#16FFFFFF' }
+                else { '#36FFFFFF' }
+            )
+        }
+        foreach ($entry in $values.GetEnumerator()) {
+            $window.Resources[[string]$entry.Key] = $entry.Value.PSObject.BaseObject
+        }
+        $window.Background = $values.PanelBrush.PSObject.BaseObject
+        $window.Foreground = $values.TextPrimaryBrush.PSObject.BaseObject
+    }
+
     function Set-QiehaoTheme {
         param(
             [Parameter(Mandatory = $true)][object]$Theme,
@@ -330,11 +409,11 @@ try {
         )
         $imageResult = Get-QiehaoBackgroundImage -Theme $Theme `
             -BackgroundDirectory $backgroundDirectory
+        Set-QiehaoThemeResources -Theme $Theme
         if ($imageResult.Loaded) { $backgroundImage.Source = $imageResult.ImageSource }
-        else { $backgroundImage.Source = $null; $window.Background = '#FFF4F6F8' }
-        $backgroundOverlay.Background = if ([string]$Theme.OverlayMode -ceq 'Dark') {
-            '#A6212B3A'
-        } else { '#BFFFFFFF' }
+        else { $backgroundImage.Source = $null }
+        $overlayBrush = New-QiehaoSolidBrush -Color ([string]$Theme.OverlayColor)
+        $backgroundOverlay.Background = $overlayBrush.PSObject.BaseObject
         if ($Persist) {
             try {
                 $null = Write-QiehaoUiPreferences -StateDirectory $stateDirectory `
@@ -385,10 +464,12 @@ try {
         $script:guiCurrentActiveProfile = [string]$Snapshot.ActiveProfile
         $identityStatusText.Text = [string]$Snapshot.IdentityStatus
         $webChatGPTText.Text = [string]$Snapshot.WebChatGPT
-        switch ($script:guiCurrentCodexStatus) {
-            '运行中' { $codexStatusText.Foreground = '#FFB42318' }
-            '已退出' { $codexStatusText.Foreground = '#FF167A45' }
-            default { $codexStatusText.Foreground = '#FF5B6472' }
+        Set-QiehaoCodexStatusVisual -Status $script:guiCurrentCodexStatus
+        switch ([string]$Snapshot.IdentityStatus) {
+            '已确认' { $identityStatusText.Foreground = '#FF59D48B' }
+            '不匹配' { $identityStatusText.Foreground = '#FFFF7B72' }
+            '待退出后确认' { $identityStatusText.Foreground = '#FFFFC857' }
+            default { $identityStatusText.Foreground = $window.Resources['TextSecondaryBrush'] }
         }
         $refreshStatusText.Text = if (@($Snapshot.ReadOnlyErrors).Count -eq 0) {
             '状态已刷新'
@@ -401,15 +482,31 @@ try {
             $snapshot = Get-QiehaoGuiSnapshot `
                 -ListProvider { @(Get-CodexAccountSlot) } `
                 -ActiveProvider { Get-CodexActiveProfile } `
-                -ProcessProvider { Test-CodexProcessesStopped }
+                -ProcessProvider { Test-CodexProcessesStopped } `
+                -ActiveIdentityProvider { Test-CodexActiveIdentity }
             Set-QiehaoSnapshot -Snapshot $snapshot
         }
         catch {
             $refreshStatusText.Text = '只读刷新失败'
             $codexStatusText.Text = '未知'
             $script:guiCurrentCodexStatus = '未知'
-            $identityStatusText.Text = '未知'
+            $identityStatusText.Text = '无法确认'
             Update-QiehaoActionButtons
+        }
+    }
+
+    function Set-QiehaoCodexStatusVisual {
+        param(
+            [Parameter(Mandatory = $true)]
+            [ValidateSet('运行中', '已退出', '未知')]
+            [string]$Status
+        )
+        $script:guiCurrentCodexStatus = $Status
+        $codexStatusText.Text = $Status
+        switch ($Status) {
+            '运行中' { $codexStatusText.Foreground = '#FFFF7B72' }
+            '已退出' { $codexStatusText.Foreground = '#FF59D48B' }
+            default { $codexStatusText.Foreground = $window.Resources['TextSecondaryBrush'] }
         }
     }
 
@@ -418,6 +515,312 @@ try {
             return ConvertTo-QiehaoCodexStatus -ProcessState (Test-CodexProcessesStopped)
         }
         catch { return '未知' }
+    }
+
+    function Update-QiehaoProcessOnlyStatus {
+        $status = Get-QiehaoLiveCodexStatus
+        Set-QiehaoCodexStatusVisual -Status $status
+        Update-QiehaoActionButtons
+        return $status
+    }
+
+    function Start-QiehaoProcessMonitor {
+        if ($null -ne $script:guiProcessTimer) { return }
+        $script:guiProcessTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:guiProcessTimer.Interval = [TimeSpan]::FromSeconds(2)
+        $script:guiProcessTimer.Add_Tick({ $null = Update-QiehaoProcessOnlyStatus })
+        $script:guiProcessTimer.Start()
+    }
+
+    function Get-QiehaoInstalledCodexApplications {
+        $results = @()
+        if ($null -eq (Get-Command -Name Get-AppxPackage -ErrorAction SilentlyContinue) -or
+            $null -eq (Get-Command -Name Get-AppxPackageManifest -ErrorAction SilentlyContinue)) {
+            return @()
+        }
+        try {
+            foreach ($package in @(Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction Stop)) {
+                $family = [string]$package.PackageFamilyName
+                if ([string]::IsNullOrWhiteSpace($family)) { continue }
+                $manifest = Get-AppxPackageManifest -Package $package -ErrorAction Stop
+                foreach ($application in @($manifest.Package.Applications.Application)) {
+                    $applicationId = [string]$application.Id
+                    if (-not [string]::IsNullOrWhiteSpace($applicationId)) {
+                        $results += [pscustomobject]@{
+                            PackageFamilyName = $family
+                            ApplicationId = $applicationId
+                        }
+                    }
+                }
+            }
+        }
+        catch { return @() }
+        return @($results)
+    }
+
+    function Get-QiehaoStartApplications {
+        if ($null -eq (Get-Command -Name Get-StartApps -ErrorAction SilentlyContinue)) {
+            return @()
+        }
+        try { return @(Get-StartApps -ErrorAction Stop) }
+        catch { return @() }
+    }
+
+    function Resolve-QiehaoLaunchTarget {
+        if ($null -eq $script:guiLaunchSettings) {
+            $script:guiLaunchSettings = Read-QiehaoLaunchSettings `
+                -StateDirectory $stateDirectory
+        }
+        try {
+            if ([string]$script:guiLaunchSettings.Mode -ceq 'Custom') {
+                $script:guiLaunchTarget = Find-QiehaoCodexLaunchTarget `
+                    -Mode Custom -CustomPath ([string]$script:guiLaunchSettings.CustomPath)
+            }
+            else {
+                $script:guiLaunchTarget = Find-QiehaoCodexLaunchTarget -Mode Auto `
+                    -AppxApplications @(Get-QiehaoInstalledCodexApplications) `
+                    -StartApps @(Get-QiehaoStartApplications)
+            }
+        }
+        catch {
+            $script:guiLaunchTarget = [pscustomobject]@{
+                Available = $false; Type = 'Unavailable'
+                AppUserModelId = $null; ExecutablePath = $null
+                DisplayStatus = '检测失败'; Source = 'None'
+            }
+        }
+        $launchTargetText.Text = 'Codex 启动目标：' +
+            [string]$script:guiLaunchTarget.DisplayStatus
+        Update-QiehaoActionButtons
+        return $script:guiLaunchTarget
+    }
+
+    function Show-QiehaoLaunchSettingsDialog {
+        $dialog = New-Object System.Windows.Window
+        $dialog.Title = 'Codex 启动设置'
+        $dialog.Width = 600
+        $dialog.Height = 310
+        $dialog.MinWidth = 520
+        $dialog.MinHeight = 280
+        $dialog.WindowStartupLocation = 'CenterOwner'
+        $dialog.ResizeMode = 'NoResize'
+        $dialog.ShowInTaskbar = $false
+        $dialog.Owner = $window
+        $dialog.FontFamily = $window.FontFamily
+        $dialog.FontSize = $window.FontSize
+
+        $root = New-Object System.Windows.Controls.Grid
+        $root.Margin = 18
+        foreach ($height in @('Auto', 'Auto', 'Auto', '*', 'Auto')) {
+            $row = New-Object System.Windows.Controls.RowDefinition
+            $row.Height = $height
+            $root.RowDefinitions.Add($row)
+        }
+        $intro = New-Object System.Windows.Controls.TextBlock
+        $intro.Text = '推荐使用自动检测。仅在便携版或特殊安装位置时选择自定义 EXE。'
+        $intro.TextWrapping = 'Wrap'
+        [System.Windows.Controls.Grid]::SetRow($intro, 0)
+        $root.Children.Add($intro) | Out-Null
+
+        $modePanel = New-Object System.Windows.Controls.StackPanel
+        $modePanel.Orientation = 'Horizontal'
+        $modePanel.Margin = '0,14,0,10'
+        [System.Windows.Controls.Grid]::SetRow($modePanel, 1)
+        $autoRadio = New-Object System.Windows.Controls.RadioButton
+        $autoRadio.Content = '自动检测（推荐）'
+        $autoRadio.GroupName = 'LaunchMode'
+        $autoRadio.Margin = '0,0,18,0'
+        $customRadio = New-Object System.Windows.Controls.RadioButton
+        $customRadio.Content = '自定义 EXE'
+        $customRadio.GroupName = 'LaunchMode'
+        $modePanel.Children.Add($autoRadio) | Out-Null
+        $modePanel.Children.Add($customRadio) | Out-Null
+        $root.Children.Add($modePanel) | Out-Null
+
+        $pathGrid = New-Object System.Windows.Controls.Grid
+        $pathGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
+        $browseColumn = New-Object System.Windows.Controls.ColumnDefinition
+        $browseColumn.Width = 'Auto'
+        $pathGrid.ColumnDefinitions.Add($browseColumn)
+        [System.Windows.Controls.Grid]::SetRow($pathGrid, 2)
+        $pathBox = New-Object System.Windows.Controls.TextBox
+        $pathBox.MinHeight = 32
+        $pathBox.Padding = '7,4'
+        $pathBox.Text = [string]$script:guiLaunchSettings.CustomPath
+        $browseButton = New-Object System.Windows.Controls.Button
+        $browseButton.Content = '浏览…'
+        $browseButton.MinWidth = 82
+        $browseButton.Margin = '8,0,0,0'
+        [System.Windows.Controls.Grid]::SetColumn($browseButton, 1)
+        $pathGrid.Children.Add($pathBox) | Out-Null
+        $pathGrid.Children.Add($browseButton) | Out-Null
+        $root.Children.Add($pathGrid) | Out-Null
+
+        $hint = New-Object System.Windows.Controls.TextBlock
+        $hint.Margin = '0,12,0,0'
+        $hint.TextWrapping = 'Wrap'
+        $hint.Text = '不会附加命令行参数，不会更改环境变量、权限、Codex 配置或登录状态。'
+        [System.Windows.Controls.Grid]::SetRow($hint, 3)
+        $root.Children.Add($hint) | Out-Null
+
+        $buttons = New-Object System.Windows.Controls.StackPanel
+        $buttons.Orientation = 'Horizontal'
+        $buttons.HorizontalAlignment = 'Right'
+        [System.Windows.Controls.Grid]::SetRow($buttons, 4)
+        $detectButton = New-Object System.Windows.Controls.Button
+        $detectButton.Content = '重新检测'
+        $saveButton = New-Object System.Windows.Controls.Button
+        $saveButton.Content = '保存'
+        $saveButton.IsDefault = $true
+        $cancelButton = New-Object System.Windows.Controls.Button
+        $cancelButton.Content = '取消'
+        $cancelButton.IsCancel = $true
+        $cancelButton.Margin = '0'
+        $buttons.Children.Add($detectButton) | Out-Null
+        $buttons.Children.Add($saveButton) | Out-Null
+        $buttons.Children.Add($cancelButton) | Out-Null
+        $root.Children.Add($buttons) | Out-Null
+
+        $setPathAvailability = {
+            $pathBox.IsEnabled = [bool]$customRadio.IsChecked
+            $browseButton.IsEnabled = [bool]$customRadio.IsChecked
+        }
+        $autoRadio.IsChecked = ([string]$script:guiLaunchSettings.Mode -ceq 'Auto')
+        $customRadio.IsChecked = -not [bool]$autoRadio.IsChecked
+        $autoRadio.Add_Checked($setPathAvailability)
+        $customRadio.Add_Checked($setPathAvailability)
+        & $setPathAvailability
+        $browseButton.Add_Click({
+            $picker = New-Object Microsoft.Win32.OpenFileDialog
+            $picker.Title = '选择 Codex 可执行文件'
+            $picker.Filter = '可执行文件 (*.exe)|*.exe'
+            $picker.CheckFileExists = $true
+            $picker.Multiselect = $false
+            if ($picker.ShowDialog($dialog) -eq $true) { $pathBox.Text = $picker.FileName }
+        })
+        $detectButton.Add_Click({
+            $autoRadio.IsChecked = $true
+            $target = Find-QiehaoCodexLaunchTarget -Mode Auto `
+                -AppxApplications @(Get-QiehaoInstalledCodexApplications) `
+                -StartApps @(Get-QiehaoStartApplications)
+            $hint.Text = '检测结果：' + [string]$target.DisplayStatus
+        })
+        $saveButton.Add_Click({
+            $mode = if ([bool]$customRadio.IsChecked) { 'Custom' } else { 'Auto' }
+            try {
+                $script:guiLaunchSettings = Write-QiehaoLaunchSettings `
+                    -StateDirectory $stateDirectory -Mode $mode `
+                    -CustomPath ([string]$pathBox.Text)
+                $null = Resolve-QiehaoLaunchTarget
+                $dialog.DialogResult = $true
+            }
+            catch {
+                [void][System.Windows.MessageBox]::Show(
+                    $dialog,
+                    '自定义路径必须是现有的本地 .exe 文件，且不能是重解析链接。',
+                    'Codex 启动设置',
+                    [System.Windows.MessageBoxButton]::OK,
+                    [System.Windows.MessageBoxImage]::Warning
+                )
+            }
+        })
+        $dialog.Content = $root
+        $null = $dialog.ShowDialog()
+    }
+
+    function Complete-QiehaoLaunchWait {
+        param(
+            [Parameter(Mandatory = $true)]
+            [ValidateSet('Running', 'Stopped', 'Unknown')]
+            [string]$FinalState
+        )
+        if ($null -ne $script:guiLaunchTimer) {
+            $script:guiLaunchTimer.Stop()
+            $script:guiLaunchTimer = $null
+        }
+        Set-QiehaoWriteBusy -Value $false
+        if ($FinalState -ceq 'Running') {
+            $refreshStatusText.Text = 'Codex 已启动'
+            Invoke-QiehaoReadOnlyRefresh
+            return
+        }
+        if ($FinalState -ceq 'Unknown') {
+            Show-QiehaoSafeMessage -Message '已请求启动，但无法确认 Codex 进程状态。' `
+                -Severity Warning
+        }
+        else {
+            Show-QiehaoSafeMessage -Message '已请求启动，但 10 秒内未检测到 Codex 运行。' `
+                -Severity Warning
+        }
+        $null = Update-QiehaoProcessOnlyStatus
+    }
+
+    function Start-QiehaoLaunchWait {
+        $startedAt = [DateTime]::UtcNow
+        $script:guiLaunchTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:guiLaunchTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+        $script:guiLaunchTimer.Add_Tick({
+            $status = Get-QiehaoLiveCodexStatus
+            if ($status -ceq '运行中') {
+                Complete-QiehaoLaunchWait -FinalState 'Running'; return
+            }
+            if ($status -ceq '未知') {
+                Complete-QiehaoLaunchWait -FinalState 'Unknown'; return
+            }
+            if (([DateTime]::UtcNow - $startedAt).TotalSeconds -ge 10) {
+                Complete-QiehaoLaunchWait -FinalState 'Stopped'
+            }
+        })
+        $script:guiLaunchTimer.Start()
+    }
+
+    function Invoke-QiehaoLaunchCodex {
+        if ($script:guiIsWriteOperationBusy) { return }
+        $liveStatus = Get-QiehaoLiveCodexStatus
+        Set-QiehaoCodexStatusVisual -Status $liveStatus
+        if ($liveStatus -ceq '运行中') {
+            Update-QiehaoActionButtons
+            Show-QiehaoSafeMessage -Message 'Codex 已在运行。'
+            return
+        }
+        if ($liveStatus -cne '已退出') {
+            Update-QiehaoActionButtons
+            Show-QiehaoSafeMessage -Message '无法安全确认 Codex 是否已退出，本次未启动。' `
+                -Severity Warning
+            return
+        }
+        if ($null -eq $script:guiLaunchTarget -or
+            -not [bool]$script:guiLaunchTarget.Available) {
+            $null = Resolve-QiehaoLaunchTarget
+        }
+        Set-QiehaoWriteBusy -Value $true -StatusText '正在请求启动 Codex…'
+        $result = Invoke-QiehaoCodexLaunchRequest -Target $script:guiLaunchTarget `
+            -LaunchProvider {
+                param($Target)
+                if ([string]$Target.Type -ceq 'AppUserModelId') {
+                    $aumid = [string]$Target.AppUserModelId
+                    if ($aumid -notmatch '^[A-Za-z0-9._-]+![A-Za-z0-9._-]+$') {
+                        throw 'CODEX_LAUNCH_TARGET_INVALID'
+                    }
+                    Start-Process -FilePath 'explorer.exe' `
+                        -ArgumentList ('shell:AppsFolder\' + $aumid) `
+                        -WindowStyle Hidden -ErrorAction Stop
+                    return $true
+                }
+                $validation = Test-QiehaoCustomLaunchPath `
+                    -Path ([string]$Target.ExecutablePath)
+                if (-not $validation.IsValid) { throw 'CODEX_CUSTOM_PATH_INVALID' }
+                Start-Process -FilePath ([string]$validation.FullPath) -ErrorAction Stop
+                return $true
+            }
+        if ([string]$result.Result -ceq 'CODEX_LAUNCH_REQUESTED') {
+            Start-QiehaoLaunchWait
+            return
+        }
+        Set-QiehaoWriteBusy -Value $false
+        Show-QiehaoSafeMessage `
+            -Message '无法启动 Codex。请打开“启动设置”重新检测或选择正确的 EXE。' `
+            -Severity Warning
     }
 
     function Complete-QiehaoExitWait {
@@ -485,6 +888,31 @@ try {
 
     function Request-QiehaoNormalExit {
         param([AllowNull()][scriptblock]$OnStopped)
+        $liveStatus = Get-QiehaoLiveCodexStatus
+        Set-QiehaoCodexStatusVisual -Status $liveStatus
+        if ($liveStatus -ceq '已退出') {
+            Update-QiehaoActionButtons
+            if ($null -ne $OnStopped) {
+                try { & $OnStopped }
+                catch {
+                    Set-QiehaoWriteBusy -Value $false
+                    Show-QiehaoSafeMessage -Message '退出后的操作无法安全继续，已停止。' `
+                        -Severity Warning
+                }
+            }
+            else {
+                Show-QiehaoSafeMessage -Message 'Codex 已经退出。'
+                Invoke-QiehaoReadOnlyRefresh
+            }
+            return
+        }
+        if ($liveStatus -cne '运行中') {
+            Update-QiehaoActionButtons
+            Show-QiehaoSafeMessage `
+                -Message '无法确认 Codex 是否完全退出。请手动检查后点击“刷新”。' `
+                -Severity Warning
+            return
+        }
         Set-QiehaoWriteBusy -Value $true -StatusText '正在请求 Codex 正常退出…'
         try { $result = Request-CodexDesktopClose }
         catch {
@@ -499,13 +927,18 @@ try {
             Start-QiehaoExitWait -OnStopped $OnStopped
             return
         }
-        if ([string]$result.Result -ceq 'CODEX_ALREADY_STOPPED' -and
-            $null -ne $OnStopped) {
-            try { & $OnStopped }
-            catch {
-                Set-QiehaoWriteBusy -Value $false
-                Show-QiehaoSafeMessage -Message '操作无法安全继续，已停止。' `
-                    -Severity Warning
+        if ([string]$result.Result -ceq 'CODEX_ALREADY_STOPPED') {
+            Set-QiehaoWriteBusy -Value $false
+            if ($null -ne $OnStopped) {
+                try { & $OnStopped }
+                catch {
+                    Show-QiehaoSafeMessage -Message '操作无法安全继续，已停止。' `
+                        -Severity Warning
+                }
+            }
+            else {
+                Show-QiehaoSafeMessage -Message 'Codex 已经退出。'
+                Invoke-QiehaoReadOnlyRefresh
             }
             return
         }
@@ -755,6 +1188,24 @@ try {
     })
 
     if ($SelfTest) {
+        $script:guiLaunchSettings = [pscustomobject]@{
+            Mode = 'Auto'; CustomPath = ''; IsValid = $true; UsedDefault = $true
+        }
+        $script:guiLaunchTarget = Find-QiehaoCodexLaunchTarget -Mode Auto `
+            -AppxApplications @([pscustomobject]@{
+                PackageFamilyName = 'OpenAI.Codex_8wekyb3d8bbwe'
+                ApplicationId = 'App'
+            })
+        $launchTargetText.Text = 'Codex 启动目标：' +
+            [string]$script:guiLaunchTarget.DisplayStatus
+    }
+    else {
+        $script:guiLaunchSettings = Read-QiehaoLaunchSettings `
+            -StateDirectory $stateDirectory
+        $null = Resolve-QiehaoLaunchTarget
+    }
+
+    if ($SelfTest) {
         $fakeProfiles = @(
             [pscustomobject]@{
                 Profile = 'Plus'; Active = $true; Health = 'READY'
@@ -770,11 +1221,14 @@ try {
         $snapshot = Get-QiehaoGuiSnapshot `
             -ListProvider { $fakeProfiles }.GetNewClosure() `
             -ActiveProvider { [pscustomobject]@{ ActiveProfile = 'Plus' } } `
-            -ProcessProvider { [pscustomobject]@{ ReasonCode = 'CODEX_PROCESSES_STOPPED' } }
+            -ProcessProvider { [pscustomobject]@{ ReasonCode = 'CODEX_PROCESSES_STOPPED' } } `
+            -ActiveIdentityProvider { [pscustomobject]@{ Result = 'ACTIVE_IDENTITY_CONFIRMED' } }
         Set-QiehaoSnapshot -Snapshot $snapshot
         if (@($profilesGrid.ItemsSource).Count -ne 2 -or
             $codexStatusText.Text -cne '已退出' -or
             $activeProfileText.Text -cne 'Plus' -or
+            $identityStatusText.Text -cne '已确认' -or
+            -not [bool]$script:guiLaunchTarget.Available -or
             $themes.Count -ne 5 -or -not $startupImageResult.Loaded) {
             throw 'GUI_SELFTEST_BINDING_FAILED'
         }
@@ -799,6 +1253,8 @@ try {
     $addButton.Add_Click({ Invoke-QiehaoAddAccount })
     $renameButton.Add_Click({ Invoke-QiehaoRenameSelectedProfile })
     $deleteButton.Add_Click({ Invoke-QiehaoDeleteSelectedProfile })
+    $launchCodexButton.Add_Click({ Invoke-QiehaoLaunchCodex })
+    $launchSettingsButton.Add_Click({ Show-QiehaoLaunchSettingsDialog })
     $exitCodexButton.Add_Click({
         if (-not $script:guiIsWriteOperationBusy) { Request-QiehaoNormalExit }
     })
@@ -831,11 +1287,22 @@ try {
         }
     })
     $profileContextMenu.Add_Opened({ Update-QiehaoActionButtons })
-    $window.Add_Loaded({ Invoke-QiehaoReadOnlyRefresh })
+    $window.Add_Loaded({
+        Invoke-QiehaoReadOnlyRefresh
+        Start-QiehaoProcessMonitor
+    })
     $window.Add_Closed({
         if ($null -ne $script:guiExitTimer) {
             $script:guiExitTimer.Stop()
             $script:guiExitTimer = $null
+        }
+        if ($null -ne $script:guiLaunchTimer) {
+            $script:guiLaunchTimer.Stop()
+            $script:guiLaunchTimer = $null
+        }
+        if ($null -ne $script:guiProcessTimer) {
+            $script:guiProcessTimer.Stop()
+            $script:guiProcessTimer = $null
         }
     })
     [void]$window.ShowDialog()

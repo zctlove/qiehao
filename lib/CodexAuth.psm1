@@ -2274,6 +2274,76 @@ function Get-CodexActiveProfile {
     return Read-ActiveProfileState -StateDirectory $script:StateDirectory
 }
 
+function Invoke-TestCodexActiveIdentity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CodexHome,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProfilesDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StateDirectory,
+
+        [object[]]$ProcessData,
+
+        [switch]$UseProvidedProcessData
+    )
+
+    $authBytes = $null
+    try {
+        Assert-CodexNotRunning -ProcessData $ProcessData `
+            -UseProvidedProcessData:$UseProvidedProcessData
+        $activeState = Read-ActiveProfileState -StateDirectory $StateDirectory
+        $authPath = Join-Path -Path $CodexHome -ChildPath 'auth.json'
+        $authBytes = Read-SensitiveFileBytes -Path $authPath
+        $null = Test-CodexAuthBytes -Bytes $authBytes
+        $null = Assert-CodexAuthMatchesProfileIdentity `
+            -Name ([string]$activeState.ActiveProfile) `
+            -AuthBytes $authBytes -ProfilesDirectory $ProfilesDirectory `
+            -MismatchCode 'ACTIVE_PROFILE_IDENTITY_MISMATCH'
+        return [pscustomobject]@{
+            Result = 'ACTIVE_IDENTITY_CONFIRMED'
+        }
+    }
+    catch {
+        $safeCodes = @(
+            'ACTIVE_PROFILE_IDENTITY_MISMATCH',
+            'ACTIVE_PROFILE_NOT_INITIALIZED',
+            'PROFILE_IDENTITY_MARKER_MISSING',
+            'PROFILE_IDENTITY_MARKER_INVALID',
+            'AUTH_IDENTITY_SCHEMA_UNRECOGNIZED',
+            'PROFILE_IDENTITY_SCHEMA_UNRECOGNIZED',
+            'CODEX_PROCESS_RUNNING',
+            'CODEX_PROCESS_STATE_UNKNOWN'
+        )
+        $code = [string]$_.Exception.Message
+        if (-not ($safeCodes -ccontains $code)) {
+            $code = 'ACTIVE_IDENTITY_CHECK_FAILED'
+        }
+        return [pscustomobject]@{
+            Result = $code
+        }
+    }
+    finally {
+        if ($null -ne $authBytes -and $authBytes.Length -gt 0) {
+            [Array]::Clear($authBytes, 0, $authBytes.Length)
+        }
+    }
+}
+
+function Test-CodexActiveIdentity {
+    [CmdletBinding()]
+    param()
+
+    return Invoke-WithCodexWriteLock -Operation {
+        $codexHome = Get-CodexHome
+        Invoke-TestCodexActiveIdentity -CodexHome $codexHome `
+            -ProfilesDirectory $script:ProfilesDirectory `
+            -StateDirectory $script:StateDirectory
+    }
+}
+
 function Invoke-CodexAccountSwitch {
     param(
         [Parameter(Mandatory = $true)]
@@ -3015,5 +3085,6 @@ Export-ModuleMember -Function @(
     'Initialize-CodexProfileIdentityMarker',
     'Initialize-CodexActiveProfile',
     'Get-CodexActiveProfile',
+    'Test-CodexActiveIdentity',
     'Switch-CodexAccountProfile'
 )
