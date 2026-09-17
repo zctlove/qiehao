@@ -660,6 +660,9 @@ function ConvertTo-QiehaoExitMessage {
             return '无法安全确认 Codex 进程，请手动退出后重新检测。'
         }
         'CODEX_CLOSE_REQUESTED' { return '已发送正常关闭请求，正在等待 Codex 退出。' }
+        'CODEX_CLOSE_REQUEST_FAILED' {
+            return 'Codex 主窗口拒绝了正常关闭请求，请在系统托盘中选择退出，然后点击“刷新”。'
+        }
         'CODEX_MAIN_WINDOW_NOT_FOUND' {
             return '未找到可安全关闭的 Codex 主窗口，请在系统托盘中选择退出，然后点击“刷新”。'
         }
@@ -1009,6 +1012,143 @@ function Stop-QiehaoDispatcherTimer {
         Stopped = $true
         HandlerRemoved = $handlerRemoved
     }
+}
+
+function New-QiehaoWaitTimerRuntime {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ProbeProvider,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$CompletionAction,
+
+        [scriptblock]$ClosingProvider = { $false },
+
+        [scriptblock]$ClockProvider = { [DateTime]::UtcNow },
+
+        [scriptblock]$TimerFactory,
+
+        [ValidateRange(1, 60000)]
+        [int]$IntervalMilliseconds = 500,
+
+        [ValidateRange(0.001, 3600)]
+        [double]$TimeoutSeconds = 10
+    )
+
+    $timer = if ($null -ne $TimerFactory) {
+        & $TimerFactory
+    }
+    else {
+        New-Object System.Windows.Threading.DispatcherTimer
+    }
+    if ($null -eq $timer) { throw 'GUI_WAIT_TIMER_FACTORY_FAILED' }
+    $timer.Interval = [TimeSpan]::FromMilliseconds($IntervalMilliseconds)
+    $state = [pscustomobject]@{
+        StartedAt = [DateTime](& $ClockProvider)
+        TimeoutSeconds = $TimeoutSeconds
+        Timer = $timer
+        TickHandler = $null
+        Active = $true
+        Started = $false
+        Stopped = $false
+        HandlerRemoved = $false
+        TickCount = 0
+        CallbackFailed = $false
+        CompletionFailed = $false
+        Result = 'Pending'
+        LastProbe = 'Pending'
+    }
+
+    $finalize = {
+        param([Parameter(Mandatory = $true)][string]$Result)
+        if (-not $state.Active) { return }
+        $state.Active = $false
+        $state.Result = $Result
+        $cleanup = Stop-QiehaoDispatcherTimer -Timer $state.Timer `
+            -TickHandler $state.TickHandler
+        $state.Stopped = [bool]$cleanup.Stopped
+        $state.HandlerRemoved = [bool]$cleanup.HandlerRemoved
+        try { $null = & $CompletionAction $Result $state }
+        catch { $state.CompletionFailed = $true }
+    }.GetNewClosure()
+
+    $handler = [System.EventHandler]({
+        param($sender, $eventArgs)
+        if (-not $state.Active) { return }
+        $state.TickCount++
+        try {
+            if ([bool](& $ClosingProvider)) {
+                & $finalize 'Closing'
+                return
+            }
+            $probe = [string](& $ProbeProvider)
+            $state.LastProbe = $probe
+            if ($probe -ceq 'Succeeded') {
+                & $finalize 'Succeeded'
+                return
+            }
+            if ($probe -ceq 'Unknown') {
+                & $finalize 'Unknown'
+                return
+            }
+            if ($probe -cne 'Pending') {
+                throw 'GUI_WAIT_TIMER_PROBE_INVALID'
+            }
+            $now = [DateTime](& $ClockProvider)
+            if (($now - $state.StartedAt).TotalSeconds -ge
+                $state.TimeoutSeconds) {
+                & $finalize 'TimedOut'
+            }
+        }
+        catch {
+            $state.CallbackFailed = $true
+            & $finalize 'Error'
+        }
+    }.GetNewClosure())
+    $state.TickHandler = $handler
+    $timer.Add_Tick($handler)
+    return $state
+}
+
+function Start-QiehaoWaitTimerRuntime {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Runtime
+    )
+
+    try {
+        $Runtime.Timer.Start()
+        $Runtime.Started = $true
+    }
+    catch {
+        $null = Stop-QiehaoWaitTimerRuntime -Runtime $Runtime `
+            -Result 'StartFailed'
+        throw
+    }
+    return $Runtime
+}
+
+function Stop-QiehaoWaitTimerRuntime {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$Runtime,
+
+        [string]$Result = 'Cancelled'
+    )
+
+    if ($null -eq $Runtime) {
+        return [pscustomobject]@{ Stopped = $false; HandlerRemoved = $false }
+    }
+    $Runtime.Active = $false
+    if ([string]$Runtime.Result -ceq 'Pending') { $Runtime.Result = $Result }
+    $cleanup = Stop-QiehaoDispatcherTimer -Timer $Runtime.Timer `
+        -TickHandler $Runtime.TickHandler
+    $Runtime.Stopped = [bool]$cleanup.Stopped
+    $Runtime.HandlerRemoved = [bool]$cleanup.HandlerRemoved
+    return $cleanup
 }
 
 function Read-QiehaoUiPreferences {
@@ -1550,6 +1690,9 @@ Export-ModuleMember -Function @(
     'Resolve-QiehaoProjectStateDirectory',
     'Invoke-QiehaoExitButtonAction',
     'Stop-QiehaoDispatcherTimer',
+    'New-QiehaoWaitTimerRuntime',
+    'Start-QiehaoWaitTimerRuntime',
+    'Stop-QiehaoWaitTimerRuntime',
     'Read-QiehaoUiPreferences',
     'Write-QiehaoUiPreferences',
     'Test-QiehaoCustomLaunchPath',

@@ -1102,6 +1102,8 @@ function Request-CodexDesktopClose {
                 Result = 'CODEX_PROCESS_STATE_UNKNOWN'
                 CloseRequested = $false
                 RequestedCount = 0
+                AttemptedCount = 0
+                FailedCount = 0
             }
         }
     }
@@ -1112,6 +1114,8 @@ function Request-CodexDesktopClose {
             Result = 'CODEX_ALREADY_STOPPED'
             CloseRequested = $false
             RequestedCount = 0
+            AttemptedCount = 0
+            FailedCount = 0
         }
     }
     if ($processState.ReasonCode -cne 'CODEX_PROCESS_RUNNING') {
@@ -1119,6 +1123,8 @@ function Request-CodexDesktopClose {
             Result = 'CODEX_PROCESS_STATE_UNKNOWN'
             CloseRequested = $false
             RequestedCount = 0
+            AttemptedCount = 0
+            FailedCount = 0
         }
     }
 
@@ -1131,6 +1137,8 @@ function Request-CodexDesktopClose {
     }
 
     $requestedCount = 0
+    $attemptedCount = 0
+    $failedCount = 0
     foreach ($item in $snapshot) {
         if ($null -eq $item) {
             continue
@@ -1185,12 +1193,17 @@ function Request-CodexDesktopClose {
                 $ownerProcessId -eq $CallerProcessId) {
                 continue
             }
+            $attemptedCount++
             try {
                 if ([bool](& $CloseMainWindowAction $item)) {
                     $requestedCount++
                 }
+                else {
+                    $failedCount++
+                }
             }
             catch {
+                $failedCount++
                 # A failed normal-close request is not escalated to termination.
             }
             continue
@@ -1243,11 +1256,18 @@ public static class QiehaoquNativeWindow {
                 $ownerProcessId -eq $CallerProcessId) {
                 continue
             }
+            $attemptedCount++
             if ([bool]$liveProcess.CloseMainWindow()) {
                 $requestedCount++
             }
+            else {
+                $failedCount++
+            }
         }
         catch {
+            if ($attemptedCount -gt ($requestedCount + $failedCount)) {
+                $failedCount++
+            }
             # Do not expose process details and never fall back to force-kill.
         }
         finally {
@@ -1262,12 +1282,25 @@ public static class QiehaoquNativeWindow {
             Result = 'CODEX_CLOSE_REQUESTED'
             CloseRequested = $true
             RequestedCount = $requestedCount
+            AttemptedCount = $attemptedCount
+            FailedCount = $failedCount
+        }
+    }
+    if ($attemptedCount -gt 0) {
+        return [pscustomobject]@{
+            Result = 'CODEX_CLOSE_REQUEST_FAILED'
+            CloseRequested = $false
+            RequestedCount = 0
+            AttemptedCount = $attemptedCount
+            FailedCount = $failedCount
         }
     }
     return [pscustomobject]@{
         Result = 'CODEX_MAIN_WINDOW_NOT_FOUND'
         CloseRequested = $false
         RequestedCount = 0
+        AttemptedCount = 0
+        FailedCount = 0
     }
 }
 

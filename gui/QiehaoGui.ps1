@@ -118,8 +118,10 @@ try {
     $script:guiExitInProgress = $false
     $script:guiExitTimer = $null
     $script:guiExitTimerTickHandler = $null
+    $script:guiExitWaitRuntime = $null
     $script:guiLaunchTimer = $null
     $script:guiLaunchTimerTickHandler = $null
+    $script:guiLaunchWaitRuntime = $null
     $script:guiProcessTimer = $null
     $script:guiProcessTimerTickHandler = $null
     $script:guiPendingAfterExit = $null
@@ -554,28 +556,53 @@ try {
     }
 
     function Stop-QiehaoLaunchWaitTimer {
-        $null = Stop-QiehaoDispatcherTimer `
-            -Timer $script:guiLaunchTimer `
-            -TickHandler $script:guiLaunchTimerTickHandler
+        if ($null -ne $script:guiLaunchWaitRuntime) {
+            $null = Stop-QiehaoWaitTimerRuntime `
+                -Runtime $script:guiLaunchWaitRuntime -Result 'Cancelled'
+        }
+        else {
+            $null = Stop-QiehaoDispatcherTimer `
+                -Timer $script:guiLaunchTimer `
+                -TickHandler $script:guiLaunchTimerTickHandler
+        }
+        $script:guiLaunchWaitRuntime = $null
         $script:guiLaunchTimer = $null
         $script:guiLaunchTimerTickHandler = $null
     }
 
     function Stop-QiehaoExitWaitTimer {
-        $null = Stop-QiehaoDispatcherTimer `
-            -Timer $script:guiExitTimer `
-            -TickHandler $script:guiExitTimerTickHandler
+        if ($null -ne $script:guiExitWaitRuntime) {
+            $null = Stop-QiehaoWaitTimerRuntime `
+                -Runtime $script:guiExitWaitRuntime -Result 'Cancelled'
+        }
+        else {
+            $null = Stop-QiehaoDispatcherTimer `
+                -Timer $script:guiExitTimer `
+                -TickHandler $script:guiExitTimerTickHandler
+        }
+        $script:guiExitWaitRuntime = $null
         $script:guiExitTimer = $null
         $script:guiExitTimerTickHandler = $null
     }
 
     function Stop-QiehaoAllTimers {
+        $hadActiveWait = (
+            $null -ne $script:guiExitWaitRuntime -and
+            [bool]$script:guiExitWaitRuntime.Active
+        )
         $script:guiIsClosing = $true
         Stop-QiehaoProcessMonitor
         Stop-QiehaoLaunchWaitTimer
         Stop-QiehaoExitWaitTimer
         $script:guiPendingAfterExit = $null
         $script:guiExitInProgress = $false
+        $script:guiIsWriteOperationBusy = $false
+        if ($hadActiveWait) {
+            try { $refreshStatusText.Text = '退出等待已停止' }
+            catch { }
+        }
+        try { Update-QiehaoActionButtons }
+        catch { }
     }
 
     function Get-QiehaoInstalledCodexApplications {
@@ -781,49 +808,66 @@ try {
             [string]$FinalState
         )
         Stop-QiehaoLaunchWaitTimer
-        if (-not $script:guiIsClosing) { Start-QiehaoProcessMonitor }
+        $script:guiIsWriteOperationBusy = $false
         Set-QiehaoWriteBusy -Value $false
-        if ($FinalState -ceq 'Running') {
-            $refreshStatusText.Text = 'Codex 已启动'
-            Invoke-QiehaoReadOnlyRefresh
-            return
+        try {
+            if (-not $script:guiIsClosing) { Start-QiehaoProcessMonitor }
+            if ($FinalState -ceq 'Running') {
+                $refreshStatusText.Text = 'Codex 已启动'
+                Invoke-QiehaoReadOnlyRefresh
+                return
+            }
+            if ($FinalState -ceq 'Unknown') {
+                Show-QiehaoSafeMessage `
+                    -Message '已请求启动，但无法确认 Codex 进程状态。' `
+                    -Severity Warning
+            }
+            else {
+                Show-QiehaoSafeMessage `
+                    -Message '已请求启动，但 10 秒内未检测到 Codex 运行。' `
+                    -Severity Warning
+            }
+            $null = Update-QiehaoProcessOnlyStatus
         }
-        if ($FinalState -ceq 'Unknown') {
-            Show-QiehaoSafeMessage -Message '已请求启动，但无法确认 Codex 进程状态。' `
-                -Severity Warning
+        catch {
+            $script:guiIsWriteOperationBusy = $false
+            try {
+                $refreshStatusText.Text = '启动状态检测失败，已停止等待'
+                Update-QiehaoActionButtons
+            }
+            catch { }
         }
-        else {
-            Show-QiehaoSafeMessage -Message '已请求启动，但 10 秒内未检测到 Codex 运行。' `
-                -Severity Warning
-        }
-        $null = Update-QiehaoProcessOnlyStatus
     }
 
     function Start-QiehaoLaunchWait {
-        $startedAt = [DateTime]::UtcNow
         Stop-QiehaoProcessMonitor
         Stop-QiehaoLaunchWaitTimer
-        $script:guiLaunchTimer = New-Object System.Windows.Threading.DispatcherTimer
-        $script:guiLaunchTimer.Interval = [TimeSpan]::FromMilliseconds(500)
-        $script:guiLaunchTimerTickHandler = [System.EventHandler]{
-            param($sender, $eventArgs)
-            if ($script:guiIsClosing) {
-                Stop-QiehaoLaunchWaitTimer
-                return
+        $script:guiLaunchWaitRuntime = New-QiehaoWaitTimerRuntime `
+            -IntervalMilliseconds 500 -TimeoutSeconds 10 `
+            -ClosingProvider { [bool]$script:guiIsClosing } `
+            -ProbeProvider {
+                $status = Get-QiehaoLiveCodexStatus
+                if ($status -ceq '运行中') { return 'Succeeded' }
+                if ($status -ceq '未知') { return 'Unknown' }
+                return 'Pending'
+            } `
+            -CompletionAction {
+                param($Result, $Runtime)
+                switch ($Result) {
+                    'Succeeded' { Complete-QiehaoLaunchWait -FinalState 'Running' }
+                    'TimedOut' { Complete-QiehaoLaunchWait -FinalState 'Stopped' }
+                    'Closing' { Stop-QiehaoLaunchWaitTimer }
+                    default { Complete-QiehaoLaunchWait -FinalState 'Unknown' }
+                }
             }
-            $status = Get-QiehaoLiveCodexStatus
-            if ($status -ceq '运行中') {
-                Complete-QiehaoLaunchWait -FinalState 'Running'; return
-            }
-            if ($status -ceq '未知') {
-                Complete-QiehaoLaunchWait -FinalState 'Unknown'; return
-            }
-            if (([DateTime]::UtcNow - $startedAt).TotalSeconds -ge 10) {
-                Complete-QiehaoLaunchWait -FinalState 'Stopped'
-            }
+        $script:guiLaunchTimer = $script:guiLaunchWaitRuntime.Timer
+        $script:guiLaunchTimerTickHandler = `
+            $script:guiLaunchWaitRuntime.TickHandler
+        try {
+            $null = Start-QiehaoWaitTimerRuntime `
+                -Runtime $script:guiLaunchWaitRuntime
         }
-        $script:guiLaunchTimer.Add_Tick($script:guiLaunchTimerTickHandler)
-        $script:guiLaunchTimer.Start()
+        catch { Complete-QiehaoLaunchWait -FinalState 'Unknown' }
     }
 
     function Invoke-QiehaoLaunchCodex {
@@ -881,67 +925,89 @@ try {
             [ValidateSet('Stopped', 'Running', 'Unknown')]
             [string]$FinalState
         )
-        Stop-QiehaoExitWaitTimer
-        if (-not $script:guiIsClosing) { Start-QiehaoProcessMonitor }
-        $script:guiExitInProgress = $false
         $pending = $script:guiPendingAfterExit
+        Stop-QiehaoExitWaitTimer
+        $script:guiExitInProgress = $false
         $script:guiPendingAfterExit = $null
-        if ($FinalState -ceq 'Stopped' -and $null -ne $pending) {
-            try { & $pending }
-            catch {
-                Set-QiehaoWriteBusy -Value $false
-                Show-QiehaoSafeMessage -Message '退出后的操作无法安全继续，已停止。' `
-                    -Severity Warning
-                Invoke-QiehaoReadOnlyRefresh
+        $script:guiIsWriteOperationBusy = $false
+        try {
+            Set-QiehaoWriteBusy -Value $false
+            if (-not $script:guiIsClosing) { Start-QiehaoProcessMonitor }
+            if ($FinalState -ceq 'Stopped' -and $null -ne $pending) {
+                try { & $pending }
+                catch {
+                    Set-QiehaoWriteBusy -Value $false
+                    Show-QiehaoSafeMessage `
+                        -Message '退出后的操作无法安全继续，已停止。' `
+                        -Severity Warning
+                    Invoke-QiehaoReadOnlyRefresh
+                }
+                return
             }
-            return
+            if ($FinalState -ceq 'Stopped') {
+                Show-QiehaoSafeMessage -Message 'Codex 已正常退出。'
+            }
+            elseif ($FinalState -ceq 'Running') {
+                Show-QiehaoSafeMessage `
+                    -Message 'Codex 仍有后台进程，请从系统托盘退出后重试。' `
+                    -Severity Warning
+            }
+            else {
+                Show-QiehaoSafeMessage `
+                    -Message '无法确认 Codex 是否完全退出，本次未执行后续操作。' `
+                    -Severity Warning
+            }
+            if (-not $script:guiIsClosing) { Invoke-QiehaoReadOnlyRefresh }
         }
-        Set-QiehaoWriteBusy -Value $false
-        if ($FinalState -ceq 'Stopped') {
-            Show-QiehaoSafeMessage -Message 'Codex 已正常退出。'
+        catch {
+            $script:guiIsWriteOperationBusy = $false
+            try {
+                $refreshStatusText.Text = '退出状态检测失败，已停止等待'
+                Update-QiehaoActionButtons
+            }
+            catch { }
         }
-        elseif ($FinalState -ceq 'Running') {
-            Show-QiehaoSafeMessage `
-                -Message 'Codex 仍有后台进程，请从系统托盘退出后重试。' `
-                -Severity Warning
+        finally {
+            $script:guiExitInProgress = $false
+            if (-not $script:guiIsWriteOperationBusy) {
+                try { Update-QiehaoActionButtons }
+                catch { }
+            }
         }
-        else {
-            Show-QiehaoSafeMessage `
-                -Message '无法确认 Codex 是否完全退出，本次未执行后续操作。' `
-                -Severity Warning
-        }
-        Invoke-QiehaoReadOnlyRefresh
     }
 
     function Start-QiehaoExitWait {
         param([AllowNull()][scriptblock]$OnStopped)
-        $startedAt = [DateTime]::UtcNow
         $script:guiPendingAfterExit = $OnStopped
         $script:guiExitInProgress = $true
         Set-QiehaoWriteBusy -Value $true -StatusText '正在等待 Codex 正常退出…'
         Stop-QiehaoProcessMonitor
         Stop-QiehaoExitWaitTimer
-        $script:guiExitTimer = New-Object System.Windows.Threading.DispatcherTimer
-        $script:guiExitTimer.Interval = [TimeSpan]::FromMilliseconds(500)
-        $script:guiExitTimerTickHandler = [System.EventHandler]{
-            param($sender, $eventArgs)
-            if ($script:guiIsClosing) {
-                Stop-QiehaoExitWaitTimer
-                return
+        $script:guiExitWaitRuntime = New-QiehaoWaitTimerRuntime `
+            -IntervalMilliseconds 500 -TimeoutSeconds 10 `
+            -ClosingProvider { [bool]$script:guiIsClosing } `
+            -ProbeProvider {
+                $status = Get-QiehaoLiveCodexStatus
+                if ($status -ceq '已退出') { return 'Succeeded' }
+                if ($status -ceq '未知') { return 'Unknown' }
+                return 'Pending'
+            } `
+            -CompletionAction {
+                param($Result, $Runtime)
+                switch ($Result) {
+                    'Succeeded' { Complete-QiehaoExitWait -FinalState 'Stopped' }
+                    'TimedOut' { Complete-QiehaoExitWait -FinalState 'Running' }
+                    'Closing' { Stop-QiehaoExitWaitTimer }
+                    default { Complete-QiehaoExitWait -FinalState 'Unknown' }
+                }
             }
-            $status = Get-QiehaoLiveCodexStatus
-            if ($status -ceq '已退出') {
-                Complete-QiehaoExitWait -FinalState 'Stopped'; return
-            }
-            if ($status -ceq '未知') {
-                Complete-QiehaoExitWait -FinalState 'Unknown'; return
-            }
-            if (([DateTime]::UtcNow - $startedAt).TotalSeconds -ge 10) {
-                Complete-QiehaoExitWait -FinalState 'Running'
-            }
+        $script:guiExitTimer = $script:guiExitWaitRuntime.Timer
+        $script:guiExitTimerTickHandler = $script:guiExitWaitRuntime.TickHandler
+        try {
+            $null = Start-QiehaoWaitTimerRuntime `
+                -Runtime $script:guiExitWaitRuntime
         }
-        $script:guiExitTimer.Add_Tick($script:guiExitTimerTickHandler)
-        $script:guiExitTimer.Start()
+        catch { Complete-QiehaoExitWait -FinalState 'Unknown' }
     }
 
     function Request-QiehaoNormalExit {

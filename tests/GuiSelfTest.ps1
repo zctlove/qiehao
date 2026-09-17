@@ -47,6 +47,32 @@ function Read-TestWindow {
     }
 }
 
+function Invoke-TestDispatcherFor {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 5000)]
+        [int]$Milliseconds
+    )
+
+    $frame = New-Object System.Windows.Threading.DispatcherFrame
+    $stopTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $stopTimer.Interval = [TimeSpan]::FromMilliseconds($Milliseconds)
+    $stopHandler = [System.EventHandler]({
+        param($sender, $eventArgs)
+        $stopTimer.Stop()
+        $frame.Continue = $false
+    }.GetNewClosure())
+    $stopTimer.Add_Tick($stopHandler)
+    try {
+        $stopTimer.Start()
+        [System.Windows.Threading.Dispatcher]::PushFrame($frame)
+    }
+    finally {
+        $stopTimer.Remove_Tick($stopHandler)
+        $stopTimer.Stop()
+    }
+}
+
 if ($XamlOnly) {
     $testWindow = Read-TestWindow
     try {
@@ -900,19 +926,27 @@ $runningCodexSnapshot = @(
         MainWindowOwnerProcessId=9101
     }
 )
-$closeCapture = [pscustomobject]@{ Count=0; LastPid=0 }
+$closeCapture = [pscustomobject]@{ Count=0; LastPid=0; Order=@() }
 $closeRequested = Request-CodexDesktopClose `
     -ProcessData $runningCodexSnapshot -CloseMainWindowAction ({
         param($ProcessItem)
+        $closeCapture.Order += 'CloseMainWindow'
         $closeCapture.Count++
         $closeCapture.LastPid = [int]$ProcessItem.Id
         return $true
     }.GetNewClosure())
+if ($closeRequested.Result -ceq 'CODEX_CLOSE_REQUESTED') {
+    $closeCapture.Order += 'WaitTimer'
+}
 Assert-GuiTest -Condition (
     $closeRequested.Result -ceq 'CODEX_CLOSE_REQUESTED' -and
     $closeRequested.CloseRequested -and
+    $closeRequested.AttemptedCount -eq 1 -and
+    $closeRequested.RequestedCount -eq 1 -and
+    $closeRequested.FailedCount -eq 0 -and
     $closeCapture.Count -eq 1 -and
-    $closeCapture.LastPid -eq 9101
+    $closeCapture.LastPid -eq 9101 -and
+    (@($closeCapture.Order) -join '|') -ceq 'CloseMainWindow|WaitTimer'
 ) -Code 'GUI_NORMAL_CLOSE_REQUEST_FAILED'
 
 $selfCloseCalls = [pscustomobject]@{ Count=0 }
@@ -1058,6 +1092,22 @@ Assert-GuiTest -Condition (
 ) -Code 'GUI_EXIT_BROWSER_PROCESS_TARGETED'
 
 $failedCloseCalls = [pscustomobject]@{ Count=0 }
+$falseCloseCalls = [pscustomobject]@{ Count=0 }
+$falseCloseResult = Request-CodexDesktopClose `
+    -ProcessData $runningCodexSnapshot -CloseMainWindowAction ({
+        param($ProcessItem)
+        $falseCloseCalls.Count++
+        return $false
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    $falseCloseResult.Result -ceq 'CODEX_CLOSE_REQUEST_FAILED' -and
+    -not $falseCloseResult.CloseRequested -and
+    $falseCloseResult.AttemptedCount -eq 1 -and
+    $falseCloseResult.RequestedCount -eq 0 -and
+    $falseCloseResult.FailedCount -eq 1 -and
+    $falseCloseCalls.Count -eq 1
+) -Code 'GUI_CLOSE_MAIN_WINDOW_FALSE_NOT_REPORTED'
+
 $failedNormalExit = Request-CodexDesktopClose -CallerProcessId 9799 `
     -ProcessData @([pscustomobject]@{
         ProcessName='ChatGPT.exe'; Id=9701
@@ -1075,8 +1125,10 @@ $safeExitDispatch = Invoke-QiehaoExitButtonAction -ExitAction ({
     throw 'FAKE_EXIT_HANDLER_FAILURE'
 }.GetNewClosure())
 Assert-GuiTest -Condition (
-    $failedNormalExit.Result -ceq 'CODEX_MAIN_WINDOW_NOT_FOUND' -and
+    $failedNormalExit.Result -ceq 'CODEX_CLOSE_REQUEST_FAILED' -and
     -not $failedNormalExit.CloseRequested -and
+    $failedNormalExit.AttemptedCount -eq 1 -and
+    $failedNormalExit.FailedCount -eq 1 -and
     $failedCloseCalls.Count -eq 1 -and
     $safeExitDispatch.Failed -and
     -not $safeExitDispatch.Completed -and
@@ -1141,6 +1193,95 @@ Assert-GuiTest -Condition (
     -not $fakeTimer.Active -and $null -eq $fakeTimer.Handler -and
     $timerProbe.Count -eq 1
 ) -Code 'GUI_TIMER_STOP_OR_HANDLER_DETACH_FAILED'
+
+function New-TestWaitRuntime {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ProbeProvider,
+
+        [double]$TimeoutSeconds = 1
+    )
+
+    $guiState = [pscustomobject]@{
+        Busy = $true
+        Recoverable = $false
+        CompletionResult = ''
+    }
+    $completion = {
+        param($Result, $Runtime)
+        $guiState.Busy = $false
+        $guiState.Recoverable = $true
+        $guiState.CompletionResult = $Result
+    }.GetNewClosure()
+    $runtime = New-QiehaoWaitTimerRuntime `
+        -IntervalMilliseconds 10 -TimeoutSeconds $TimeoutSeconds `
+        -ProbeProvider $ProbeProvider -CompletionAction $completion
+    $null = Start-QiehaoWaitTimerRuntime -Runtime $runtime
+    return [pscustomobject]@{ Runtime = $runtime; Gui = $guiState }
+}
+
+$runningThenStopped = [pscustomobject]@{ Calls = 0 }
+$successWait = New-TestWaitRuntime -ProbeProvider ({
+    $runningThenStopped.Calls++
+    if ($runningThenStopped.Calls -ge 2) { return 'Succeeded' }
+    return 'Pending'
+}.GetNewClosure())
+Invoke-TestDispatcherFor -Milliseconds 100
+$successTicksAfterStop = $successWait.Runtime.TickCount
+Invoke-TestDispatcherFor -Milliseconds 30
+Assert-GuiTest -Condition (
+    $successWait.Runtime.StartedAt -is [DateTime] -and
+    $successWait.Runtime.Result -ceq 'Succeeded' -and
+    $successWait.Runtime.TickCount -ge 2 -and
+    $successWait.Runtime.TickCount -eq $successTicksAfterStop -and
+    $successWait.Runtime.Stopped -and
+    $successWait.Runtime.HandlerRemoved -and
+    -not $successWait.Runtime.Active -and
+    -not $successWait.Gui.Busy -and $successWait.Gui.Recoverable
+) -Code 'GUI_REAL_TIMER_RUNNING_TO_STOPPED_FAILED'
+
+$timeoutWait = New-TestWaitRuntime -TimeoutSeconds 0.03 `
+    -ProbeProvider { 'Pending' }
+Invoke-TestDispatcherFor -Milliseconds 100
+Assert-GuiTest -Condition (
+    $timeoutWait.Runtime.Result -ceq 'TimedOut' -and
+    $timeoutWait.Runtime.TickCount -ge 1 -and
+    $timeoutWait.Runtime.Stopped -and
+    $timeoutWait.Runtime.HandlerRemoved -and
+    -not $timeoutWait.Runtime.Active -and
+    -not $timeoutWait.Gui.Busy -and $timeoutWait.Gui.Recoverable
+) -Code 'GUI_REAL_TIMER_TIMEOUT_CLEANUP_FAILED'
+
+$errorWait = New-TestWaitRuntime -ProbeProvider {
+    throw 'FAKE_PROCESS_PROVIDER_FAILURE'
+}
+Invoke-TestDispatcherFor -Milliseconds 50
+Assert-GuiTest -Condition (
+    $errorWait.Runtime.Result -ceq 'Error' -and
+    $errorWait.Runtime.CallbackFailed -and
+    $errorWait.Runtime.Stopped -and
+    $errorWait.Runtime.HandlerRemoved -and
+    -not $errorWait.Runtime.Active -and
+    -not $errorWait.Gui.Busy -and $errorWait.Gui.Recoverable
+) -Code 'GUI_REAL_TIMER_CALLBACK_EXCEPTION_ESCAPED'
+
+$closingWait = New-TestWaitRuntime -TimeoutSeconds 1 `
+    -ProbeProvider { 'Pending' }
+Invoke-TestDispatcherFor -Milliseconds 30
+$closingTicksBeforeStop = $closingWait.Runtime.TickCount
+$closingCleanup = Stop-QiehaoWaitTimerRuntime `
+    -Runtime $closingWait.Runtime -Result 'WindowClosing'
+$closingWait.Gui.Busy = $false
+$closingWait.Gui.Recoverable = $true
+Invoke-TestDispatcherFor -Milliseconds 30
+Assert-GuiTest -Condition (
+    $closingTicksBeforeStop -ge 1 -and
+    $closingWait.Runtime.Result -ceq 'WindowClosing' -and
+    $closingCleanup.Stopped -and $closingCleanup.HandlerRemoved -and
+    $closingWait.Runtime.TickCount -eq $closingTicksBeforeStop -and
+    -not $closingWait.Runtime.Active -and
+    -not $closingWait.Gui.Busy -and $closingWait.Gui.Recoverable
+) -Code 'GUI_REAL_TIMER_WINDOW_CLOSE_CLEANUP_FAILED'
 
 $guiSource = [System.IO.File]::ReadAllText($guiScriptPath)
 $helperSource = [System.IO.File]::ReadAllText($helperModulePath)
@@ -1305,13 +1446,18 @@ $timerWaitAndCloseSection = [regex]::Match(
 Assert-GuiTest -Condition (
     -not [string]::IsNullOrWhiteSpace($timerWaitAndCloseSection) -and
     ([regex]::Matches($timerWaitAndCloseSection,
-        'FromMilliseconds\(500\)')).Count -eq 2 -and
-    $timerWaitAndCloseSection -match '\.TotalSeconds -ge 10' -and
+        'IntervalMilliseconds 500')).Count -eq 2 -and
+    ([regex]::Matches($timerWaitAndCloseSection,
+        'TimeoutSeconds 10')).Count -eq 2 -and
     $timerWaitAndCloseSection -match 'Stop-QiehaoProcessMonitor' -and
     $timerWaitAndCloseSection -match 'Start-QiehaoProcessMonitor' -and
     $timerWaitAndCloseSection -match 'Add_Closing\(\{ Stop-QiehaoAllTimers \}\)' -and
     $timerWaitAndCloseSection -match 'Add_Closed\(' -and
+    $timerWaitAndCloseSection -notmatch '\$startedAt' -and
     $helperSource -match 'Remove_Tick' -and
+    $helperSource -match '\$state\.StartedAt' -and
+    $helperSource -match 'GetNewClosure' -and
+    $helperSource -match "finalize 'Error'" -and
     $guiSource -match 'guiIsClosing'
 ) -Code 'GUI_TIMER_WAIT_OR_WINDOW_CLOSE_CLEANUP_MISSING'
 
@@ -1408,6 +1554,8 @@ finally {
     VerifyRefresh = 'PASS'
     ExitAlreadyStopped = 'PASS'
     ExitCloseMainWindowRequested = 'PASS'
+    ExitCloseBeforeWaitTimer = 'PASS'
+    ExitCloseMainWindowFalseReported = 'PASS'
     ExitPostCloseStopped = 'PASS'
     ExitStillRunningNoForce = 'PASS'
     ExitUnknownNoRequest = 'PASS'
@@ -1422,6 +1570,10 @@ finally {
     LaunchExitButtonStates = 'PASS'
     ProcessMonitorReadOnly = 'PASS'
     ProcessMonitorFiveSeconds = 'PASS'
+    ExitWaitRealDispatcherClosure = 'PASS'
+    ExitWaitTimeoutCleanup = 'PASS'
+    ExitWaitCallbackIsolation = 'PASS'
+    ExitWaitWindowCloseCleanup = 'PASS'
     WindowCloseStopsAllTimers = 'PASS'
     GlassCardsAndButtons = 'PASS'
     ActiveRowDistinct = 'PASS'
