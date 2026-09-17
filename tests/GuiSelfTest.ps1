@@ -239,24 +239,99 @@ try {
         $corruptImageResult.UsedSolidFallback
     ) -Code 'GUI_CORRUPT_THEME_DID_NOT_FALL_BACK'
 
-    $writtenPreference = Write-QiehaoUiPreferences `
-        -StateDirectory $fakeStateDirectory -Background '03-ice-glass'
-    $writtenPreferenceBackground = [string]$writtenPreference.Background
-    $writtenPreference = $null
-    $restoredPreference = Read-QiehaoUiPreferences `
-        -StateDirectory $fakeStateDirectory
+    $null = Write-QiehaoUiPreferences -StateDirectory $fakeStateDirectory `
+        -Background '02-navy-gold'
+    $preferencePath = Join-Path $fakeStateDirectory 'ui-preferences.json'
+    [System.IO.File]::SetLastWriteTimeUtc(
+        $preferencePath, [DateTime]::UtcNow.AddMinutes(-1)
+    )
+    $initialWriteTime = ([System.IO.FileInfo]$preferencePath).LastWriteTimeUtc
+    $themeWindow = Read-TestWindow
+    $themeSelectionHandler = $null
+    $themeLoadedHandler = $null
+    try {
+        $themeCombo = $themeWindow.FindName('ThemeComboBox')
+        $wpfThemes = @(Get-QiehaoBackgroundThemes)
+        $themeCombo.ItemsSource = $wpfThemes
+        $existingPreference = Read-QiehaoUiPreferences `
+            -StateDirectory $fakeStateDirectory
+        $startupTheme = @($wpfThemes | Where-Object {
+            [string]$_.Id -ceq [string]$existingPreference.Background
+        } | Select-Object -First 1)[0]
+        $themeCombo.SelectedItem = $startupTheme
+        $themeLifecycle = [pscustomobject]@{
+            Ready = $false; HandlerCalls = 0; PersistCalls = 0
+        }
+        $themeSelectionHandler = {
+            param($sender, $eventArgs)
+            $themeLifecycle.HandlerCalls++
+            if ($themeLifecycle.Ready -and $null -ne $sender.SelectedItem) {
+                $themeLifecycle.PersistCalls++
+                $null = Write-QiehaoUiPreferences `
+                    -StateDirectory $fakeStateDirectory `
+                    -Background ([string]$sender.SelectedItem.Id)
+            }
+        }.GetNewClosure()
+        $themeCombo.Add_SelectionChanged($themeSelectionHandler)
+        $iceTheme = @($wpfThemes | Where-Object {
+            [string]$_.Id -ceq '03-ice-glass'
+        } | Select-Object -First 1)[0]
+        $themeCombo.SelectedItem = $iceTheme
+        $beforeLoadedPreference = Read-QiehaoUiPreferences `
+            -StateDirectory $fakeStateDirectory
+        $themeCombo.SelectedItem = $startupTheme
+        $themeLoadedHandler = {
+            param($sender, $eventArgs)
+            $themeLifecycle.Ready = $true
+        }.GetNewClosure()
+        $themeWindow.Add_Loaded($themeLoadedHandler)
+        $themeWindow.RaiseEvent((New-Object System.Windows.RoutedEventArgs(
+            [System.Windows.FrameworkElement]::LoadedEvent
+        )))
+        $themeCombo.SelectedItem = $iceTheme
+        $immediatePreference = Read-QiehaoUiPreferences `
+            -StateDirectory $fakeStateDirectory
+        $immediateWriteTime = ([System.IO.FileInfo]$preferencePath).LastWriteTimeUtc
+    }
+    finally {
+        if ($null -ne $themeSelectionHandler) {
+            $themeCombo.Remove_SelectionChanged($themeSelectionHandler)
+        }
+        if ($null -ne $themeLoadedHandler) {
+            $themeWindow.Remove_Loaded($themeLoadedHandler)
+        }
+        $themeWindow.Close()
+    }
+    $secondThemeWindow = Read-TestWindow
+    try {
+        $secondThemeCombo = $secondThemeWindow.FindName('ThemeComboBox')
+        $secondThemes = @(Get-QiehaoBackgroundThemes)
+        $secondThemeCombo.ItemsSource = $secondThemes
+        $restoredPreference = Read-QiehaoUiPreferences `
+            -StateDirectory $fakeStateDirectory
+        $secondThemeCombo.SelectedItem = @($secondThemes | Where-Object {
+            [string]$_.Id -ceq [string]$restoredPreference.Background
+        } | Select-Object -First 1)[0]
+        $secondSelectedThemeId = [string]$secondThemeCombo.SelectedItem.Id
+    }
+    finally { $secondThemeWindow.Close() }
     $preferenceData = ConvertFrom-Json -InputObject (
-        [System.IO.File]::ReadAllText((Join-Path $fakeStateDirectory `
-            'ui-preferences.json'))
+        [System.IO.File]::ReadAllText($preferencePath)
     )
     Assert-GuiTest -Condition (
-        $writtenPreferenceBackground -ceq '03-ice-glass' -and
+        @($themeCombo.ItemsSource).Count -eq 5 -and
+        [string]$startupTheme.Id -ceq '02-navy-gold' -and
+        $beforeLoadedPreference.Background -ceq '02-navy-gold' -and
+        $themeLifecycle.Ready -and $themeLifecycle.HandlerCalls -ge 3 -and
+        $themeLifecycle.PersistCalls -eq 1 -and
+        $immediatePreference.Background -ceq '03-ice-glass' -and
+        $immediateWriteTime -gt $initialWriteTime -and
         $restoredPreference.Background -ceq '03-ice-glass' -and
-        -not $restoredPreference.UsedDefault -and
+        $secondSelectedThemeId -ceq '03-ice-glass' -and
         (@($preferenceData.PSObject.Properties.Name) -join '|') -ceq
             'schema_version|background' -and
         [int]$preferenceData.schema_version -eq 1
-    ) -Code 'GUI_THEME_PREFERENCE_RESTORE_FAILED'
+    ) -Code 'GUI_WPF_THEME_PERSISTENCE_LIFECYCLE_FAILED'
 
     $fakeProjectRoot = Join-Path $themeTestRoot 'project-from-any-cwd'
     $fakeGuiRoot = Join-Path $fakeProjectRoot 'gui'
@@ -265,6 +340,8 @@ try {
     [System.IO.Directory]::CreateDirectory($otherWorkingDirectory) | Out-Null
     $resolvedStateBefore = Resolve-QiehaoProjectStateDirectory `
         -GuiScriptRoot $fakeGuiRoot
+    $null = Write-QiehaoUiPreferences `
+        -StateDirectory $resolvedStateBefore -Background '02-navy-gold'
     Push-Location -LiteralPath $otherWorkingDirectory
     try {
         $resolvedStateFromOtherCwd = Resolve-QiehaoProjectStateDirectory `
@@ -1242,6 +1319,9 @@ Assert-GuiTest -Condition (
     $guiSource -match 'Resolve-QiehaoProjectStateDirectory -GuiScriptRoot \$guiRoot' -and
     $guiSource -match '\$themeComboBox\.SelectedItem = \$startupTheme' -and
     $guiSource -match 'guiThemePersistenceReady' -and
+    $guiSource -match 'Set-QiehaoTheme -Theme \$selectedTheme -Persist' -and
+    $helperSource -match 'File\]::Replace' -and
+    $helperSource -match 'NullString\]::Value' -and
     $guiSource -match 'Request-CodexDesktopClose -CallerProcessId \$PID' -and
     $guiSource -match 'Invoke-QiehaoExitButtonAction'
 ) -Code 'GUI_PREF_OR_SAFE_EXIT_WIRING_MISSING'
@@ -1303,6 +1383,8 @@ finally {
     BackgroundUniformToFill = 'PASS'
     ImmediateThemeSwitch = 'PASS'
     ThemePreferenceRestore = 'PASS'
+    ThemePersistenceWpfLifecycle = 'PASS'
+    ThemeExistingFileAtomicReplace = 'PASS'
     ThemePreferenceDifferentWorkingDirectory = 'PASS'
     CorruptPreferenceFallback = 'PASS'
     ChineseTextEncoding = 'PASS'

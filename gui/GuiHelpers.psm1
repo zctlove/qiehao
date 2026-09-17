@@ -1111,7 +1111,12 @@ function Write-QiehaoUiPreferences {
         $stream = $null
 
         if ([System.IO.File]::Exists($preferencePath)) {
-            [System.IO.File]::Replace($temporaryPath, $preferencePath, $null)
+            # PowerShell coerces a plain $null string argument to an empty path.
+            [System.IO.File]::Replace(
+                $temporaryPath,
+                $preferencePath,
+                [System.Management.Automation.Language.NullString]::Value
+            )
         }
         else {
             [System.IO.File]::Move($temporaryPath, $preferencePath)
