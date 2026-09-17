@@ -140,6 +140,8 @@
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="12" />
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="10" />
+                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
                     <Grid Grid.Row="0">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
@@ -171,6 +173,19 @@
                             <TextBlock x:Name="WebChatGPTText" Style="{StaticResource StatusValueStyle}" Text="不受影响" />
                             <TextBlock Margin="0,3,0,0" FontSize="11" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Text="浏览器 / PWA 登录状态不会被本工具修改" />
                         </StackPanel>
+                    </Grid>
+                    <Grid Grid.Row="4">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="CodexSafetyHintText" Grid.Column="0"
+                                   VerticalAlignment="Center" TextWrapping="Wrap"
+                                   Foreground="#FFFFC857"
+                                   Text="正在检测 Codex 进程状态……" />
+                        <Button x:Name="CancelSwitchWaitButton" Grid.Column="1"
+                                Content="取消等待" Visibility="Collapsed"
+                                MinHeight="30" Padding="12,4" Margin="12,0,0,0" />
                     </Grid>
                 </Grid>
             </Border>
@@ -281,8 +296,7 @@
                             <Button x:Name="DeleteButton" Content="删除账号" Style="{StaticResource DangerButtonStyle}" IsEnabled="False" />
                         </WrapPanel>
                         <WrapPanel Grid.Column="1">
-                            <Button x:Name="LaunchCodexButton" Content="启动 Codex" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="False" />
-                            <Button x:Name="ExitCodexButton" Content="正常退出 Codex" IsEnabled="False" Margin="0" />
+                            <Button x:Name="LaunchCodexButton" Content="启动 Codex" Style="{StaticResource PrimaryButtonStyle}" IsEnabled="False" Margin="0" />
                         </WrapPanel>
                     </Grid>
                     <Grid Grid.Row="4">

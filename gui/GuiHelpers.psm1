@@ -522,7 +522,7 @@ function Get-QiehaoActionState {
 
         [switch]$IsWriteOperationBusy,
 
-        [switch]$ExitInProgress,
+        [switch]$ManualSwitchWaitInProgress,
 
         [bool]$LaunchTargetAvailable = $true
     )
@@ -539,8 +539,7 @@ function Get-QiehaoActionState {
         Add = $available
         Rename = $available -and $hasSelection
         Delete = $available -and $hasSelection -and -not $isActive
-        ExitCodex = $available -and -not $ExitInProgress -and
-            $CodexStatus -ceq '运行中'
+        CancelSwitchWait = [bool]$ManualSwitchWaitInProgress
         ContextSwitch = $available -and $hasSelection -and -not $isActive
         ContextVerify = $available -and $hasSelection -and
             $CodexStatus -ceq '已退出'
@@ -567,11 +566,9 @@ function Invoke-QiehaoSwitchRequest {
         [Parameter(Mandatory = $true)]
         [scriptblock]$SwitchProvider,
 
-        [scriptblock]$ConfirmExitProvider = { $false },
+        [scriptblock]$ConfirmWaitProvider = { $false },
 
-        [scriptblock]$ExitProvider = { $null },
-
-        [scriptblock]$WaitForStopProvider = { param($TimeoutSeconds) $null },
+        [scriptblock]$ManualWaitProvider = { param($TargetProfile) $null },
 
         [switch]$IsBusy
     )
@@ -607,43 +604,30 @@ function Invoke-QiehaoSwitchRequest {
     }
 
     if ($status -ceq '运行中') {
-        if (-not [bool](& $ConfirmExitProvider)) {
+        if (-not [bool](& $ConfirmWaitProvider)) {
             $mapped = ConvertTo-QiehaoOperationResult -ResultCode 'OPERATION_CANCELLED'
             $mapped | Add-Member -NotePropertyName CoreCalled -NotePropertyValue $false
+            $mapped | Add-Member -NotePropertyName WaitStarted -NotePropertyValue $false
             return $mapped
         }
         try {
-            $exitResult = & $ExitProvider
-            $exitCode = Get-QiehaoSafeResultCode -Result $exitResult `
-                -Fallback 'CODEX_PROCESS_STATE_UNKNOWN'
+            $null = & $ManualWaitProvider $SelectedProfile
         }
         catch {
-            $exitCode = 'CODEX_PROCESS_STATE_UNKNOWN'
-        }
-        if ($exitCode -cne 'CODEX_NATIVE_QUIT_REQUESTED' -and
-            $exitCode -cne 'CODEX_ALREADY_STOPPED') {
             $mapped = ConvertTo-QiehaoOperationResult `
                 -ResultCode 'CODEX_PROCESS_STATE_UNKNOWN'
             $mapped | Add-Member -NotePropertyName CoreCalled -NotePropertyValue $false
+            $mapped | Add-Member -NotePropertyName WaitStarted -NotePropertyValue $false
             return $mapped
         }
-        try {
-            $postExitStatus = ConvertTo-QiehaoCodexStatus `
-                -ProcessState (& $WaitForStopProvider 8)
-        }
-        catch {
-            $postExitStatus = '未知'
-        }
-        if ($postExitStatus -ceq '运行中') {
-            $mapped = ConvertTo-QiehaoOperationResult -ResultCode 'CODEX_EXIT_TIMEOUT'
-            $mapped | Add-Member -NotePropertyName CoreCalled -NotePropertyValue $false
-            return $mapped
-        }
-        if ($postExitStatus -cne '已退出') {
-            $mapped = ConvertTo-QiehaoOperationResult `
-                -ResultCode 'CODEX_EXIT_STATE_UNKNOWN'
-            $mapped | Add-Member -NotePropertyName CoreCalled -NotePropertyValue $false
-            return $mapped
+        return [pscustomobject]@{
+            ResultCode = 'CODEX_MANUAL_EXIT_WAIT_STARTED'
+            Message = '请从 Codex 菜单“文件 → 退出”或系统托盘选择“退出”。检测到 Codex 完全退出后将自动继续切换。'
+            Severity = 'Info'
+            IsSuccess = $false
+            RefreshRequired = $false
+            CoreCalled = $false
+            WaitStarted = $true
         }
     }
 

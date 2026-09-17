@@ -99,7 +99,8 @@ try {
     $renameButton = Get-RequiredControl -Window $window -Name 'RenameButton'
     $deleteButton = Get-RequiredControl -Window $window -Name 'DeleteButton'
     $launchCodexButton = Get-RequiredControl -Window $window -Name 'LaunchCodexButton'
-    $exitCodexButton = Get-RequiredControl -Window $window -Name 'ExitCodexButton'
+    $codexSafetyHintText = Get-RequiredControl -Window $window -Name 'CodexSafetyHintText'
+    $cancelSwitchWaitButton = Get-RequiredControl -Window $window -Name 'CancelSwitchWaitButton'
     $launchSettingsButton = Get-RequiredControl -Window $window -Name 'LaunchSettingsButton'
     $launchTargetText = Get-RequiredControl -Window $window -Name 'LaunchTargetText'
     $themeComboBox = Get-RequiredControl -Window $window -Name 'ThemeComboBox'
@@ -115,24 +116,17 @@ try {
     $script:guiCurrentCodexStatus = '未知'
     $script:guiCurrentActiveProfile = '未初始化'
     $script:guiIsWriteOperationBusy = $false
-    $script:guiExitInProgress = $false
-    $script:guiExitTimer = $null
-    $script:guiExitTimerTickHandler = $null
-    $script:guiExitWaitRuntime = $null
+    $script:guiManualSwitchWaitInProgress = $false
+    $script:guiManualSwitchWaitTimer = $null
+    $script:guiManualSwitchWaitTimerTickHandler = $null
+    $script:guiManualSwitchWaitRuntime = $null
     $script:guiLaunchTimer = $null
     $script:guiLaunchTimerTickHandler = $null
     $script:guiLaunchWaitRuntime = $null
     $script:guiProcessTimer = $null
     $script:guiProcessTimerTickHandler = $null
-    $script:guiPendingAfterExit = $null
-    $script:guiNativeQuitDiagnostics = [pscustomobject]@{
-        NativeQuitTargetFound = $false
-        NativeQuitMethod = 'None'
-        NativeQuitInvokeResult = 'not-requested'
-        WaitElapsedMs = 0
-        ProcessState = 'Unknown'
-        BlockingProcessCount = 0
-    }
+    $script:guiPendingAction = $null
+    $script:guiPendingTargetProfile = $null
     $script:guiLaunchTarget = $null
     $script:guiLaunchSettings = $null
     $script:guiAllProfileRows = @()
@@ -151,7 +145,7 @@ try {
             -ActiveProfile $script:guiCurrentActiveProfile `
             -CodexStatus $script:guiCurrentCodexStatus `
             -IsWriteOperationBusy:$script:guiIsWriteOperationBusy `
-            -ExitInProgress:$script:guiExitInProgress `
+            -ManualSwitchWaitInProgress:$script:guiManualSwitchWaitInProgress `
             -LaunchTargetAvailable:($null -ne $script:guiLaunchTarget -and
                 [bool]$script:guiLaunchTarget.Available)
         $refreshButton.IsEnabled = [bool]$state.Refresh
@@ -161,11 +155,12 @@ try {
         $renameButton.IsEnabled = [bool]$state.Rename
         $deleteButton.IsEnabled = [bool]$state.Delete
         $launchCodexButton.IsEnabled = [bool]$state.LaunchCodex
-        $exitCodexButton.IsEnabled = [bool]$state.ExitCodex
+        $cancelSwitchWaitButton.IsEnabled = [bool]$state.CancelSwitchWait
         $contextSwitchMenuItem.IsEnabled = [bool]$state.ContextSwitch
         $contextVerifyMenuItem.IsEnabled = [bool]$state.ContextVerify
         $contextRenameMenuItem.IsEnabled = [bool]$state.ContextRename
         $contextDeleteMenuItem.IsEnabled = [bool]$state.ContextDelete
+        Update-QiehaoCodexSafetyHint
     }
 
     function Set-QiehaoWriteBusy {
@@ -511,6 +506,35 @@ try {
         }
     }
 
+    function Update-QiehaoCodexSafetyHint {
+        if ($script:guiManualSwitchWaitInProgress) {
+            $codexSafetyHintText.Text =
+                '等待用户正常退出 Codex；检测到完全退出后将自动继续切换。'
+            $codexSafetyHintText.Foreground = '#FFFFC857'
+            $cancelSwitchWaitButton.Visibility =
+                [System.Windows.Visibility]::Visible
+            return
+        }
+        $cancelSwitchWaitButton.Visibility =
+            [System.Windows.Visibility]::Collapsed
+        switch ($script:guiCurrentCodexStatus) {
+            '运行中' {
+                $codexSafetyHintText.Text =
+                    'Codex 正在运行。切换账号前，请在 Codex 中选择“文件 → 退出”，或从系统托盘选择“Quit Codex”。关闭主窗口不等于完全退出。'
+                $codexSafetyHintText.Foreground = '#FFFFC857'
+            }
+            '已退出' {
+                $codexSafetyHintText.Text = 'Codex 已安全退出，可以切换账号。'
+                $codexSafetyHintText.Foreground = '#FF59D48B'
+            }
+            default {
+                $codexSafetyHintText.Text =
+                    '无法确认 Codex 是否完全退出，请先检查 Codex 状态；为保护账号状态，切换与写操作将安全停止。'
+                $codexSafetyHintText.Foreground = '#FFFF7B72'
+            }
+        }
+    }
+
     function Set-QiehaoCodexStatusVisual {
         param(
             [Parameter(Mandatory = $true)]
@@ -524,6 +548,7 @@ try {
             '已退出' { $codexStatusText.Foreground = '#FF59D48B' }
             default { $codexStatusText.Foreground = $window.Resources['TextSecondaryBrush'] }
         }
+        Update-QiehaoCodexSafetyHint
     }
 
     function Get-QiehaoLiveCodexStatus {
@@ -578,35 +603,37 @@ try {
         $script:guiLaunchTimerTickHandler = $null
     }
 
-    function Stop-QiehaoExitWaitTimer {
-        if ($null -ne $script:guiExitWaitRuntime) {
+    function Stop-QiehaoManualSwitchWaitTimer {
+        param([string]$Result = 'Cancelled')
+        if ($null -ne $script:guiManualSwitchWaitRuntime) {
             $null = Stop-QiehaoWaitTimerRuntime `
-                -Runtime $script:guiExitWaitRuntime -Result 'Cancelled'
+                -Runtime $script:guiManualSwitchWaitRuntime -Result $Result
         }
         else {
             $null = Stop-QiehaoDispatcherTimer `
-                -Timer $script:guiExitTimer `
-                -TickHandler $script:guiExitTimerTickHandler
+                -Timer $script:guiManualSwitchWaitTimer `
+                -TickHandler $script:guiManualSwitchWaitTimerTickHandler
         }
-        $script:guiExitWaitRuntime = $null
-        $script:guiExitTimer = $null
-        $script:guiExitTimerTickHandler = $null
+        $script:guiManualSwitchWaitRuntime = $null
+        $script:guiManualSwitchWaitTimer = $null
+        $script:guiManualSwitchWaitTimerTickHandler = $null
     }
 
     function Stop-QiehaoAllTimers {
         $hadActiveWait = (
-            $null -ne $script:guiExitWaitRuntime -and
-            [bool]$script:guiExitWaitRuntime.Active
+            $null -ne $script:guiManualSwitchWaitRuntime -and
+            [bool]$script:guiManualSwitchWaitRuntime.Active
         )
         $script:guiIsClosing = $true
         Stop-QiehaoProcessMonitor
         Stop-QiehaoLaunchWaitTimer
-        Stop-QiehaoExitWaitTimer
-        $script:guiPendingAfterExit = $null
-        $script:guiExitInProgress = $false
+        Stop-QiehaoManualSwitchWaitTimer -Result 'WindowClosing'
+        $script:guiPendingAction = $null
+        $script:guiPendingTargetProfile = $null
+        $script:guiManualSwitchWaitInProgress = $false
         $script:guiIsWriteOperationBusy = $false
         if ($hadActiveWait) {
-            try { $refreshStatusText.Text = '退出等待已停止' }
+            try { $refreshStatusText.Text = '切换等待已停止' }
             catch { }
         }
         try { Update-QiehaoActionButtons }
@@ -927,211 +954,130 @@ try {
             -Severity Warning
     }
 
-    function Complete-QiehaoExitWait {
+    function Complete-QiehaoManualSwitchWait {
         param(
             [Parameter(Mandatory = $true)]
-            [ValidateSet('Stopped', 'Running', 'Unknown')]
+            [ValidateSet('Stopped', 'Running', 'Unknown', 'Cancelled', 'Closing')]
             [string]$FinalState
         )
-        $pending = $script:guiPendingAfterExit
-        $completedRuntime = $script:guiExitWaitRuntime
-        if ($null -ne $completedRuntime) {
-            $script:guiNativeQuitDiagnostics.WaitElapsedMs =
-                [int]$completedRuntime.ElapsedMilliseconds
-            $script:guiNativeQuitDiagnostics.BlockingProcessCount =
-                [int]$completedRuntime.BlockingProcessCount
-        }
-        $script:guiNativeQuitDiagnostics.ProcessState = switch ($FinalState) {
-            'Stopped' { 'Stopped' }
-            'Running' { 'Running' }
-            default { 'Unknown' }
-        }
-        Stop-QiehaoExitWaitTimer
-        $script:guiExitInProgress = $false
-        $script:guiPendingAfterExit = $null
+        $targetProfile = $script:guiPendingTargetProfile
+        Stop-QiehaoManualSwitchWaitTimer -Result $FinalState
+        $script:guiPendingAction = $null
+        $script:guiPendingTargetProfile = $null
+        $script:guiManualSwitchWaitInProgress = $false
         $script:guiIsWriteOperationBusy = $false
+        if ($script:guiIsClosing -or $FinalState -ceq 'Closing') { return }
         try {
-            Set-QiehaoWriteBusy -Value $false
-            if (-not $script:guiIsClosing) { Start-QiehaoProcessMonitor }
-            if ($FinalState -ceq 'Stopped' -and $null -ne $pending) {
-                try { & $pending }
-                catch {
-                    Set-QiehaoWriteBusy -Value $false
+            Start-QiehaoProcessMonitor
+            if ($FinalState -ceq 'Stopped') {
+                Set-QiehaoCodexStatusVisual -Status '已退出'
+                if ([string]::IsNullOrWhiteSpace($targetProfile)) {
                     Show-QiehaoSafeMessage `
-                        -Message '退出后的操作无法安全继续，已停止。' `
+                        -Message '等待目标已丢失，本次未切换账号。' `
                         -Severity Warning
-                    Invoke-QiehaoReadOnlyRefresh
+                    Update-QiehaoActionButtons
+                    return
                 }
+                Set-QiehaoWriteBusy -Value $true `
+                    -StatusText "已检测到 Codex 完全退出，正在切换到 '$targetProfile'……"
+                Invoke-QiehaoSwitchCore -TargetProfile $targetProfile
                 return
             }
-            if ($FinalState -ceq 'Stopped') {
-                Show-QiehaoSafeMessage -Message 'Codex 已正常退出。'
-            }
-            elseif ($FinalState -ceq 'Running') {
+            if ($FinalState -ceq 'Running') {
+                Set-QiehaoCodexStatusVisual -Status '运行中'
                 Show-QiehaoSafeMessage `
-                    -Message 'Codex 仍有后台进程，请使用 Codex 的退出功能或系统托盘退出后重试。' `
+                    -Message '等待超时，90 秒内尚未检测到 Codex 完全退出。未执行账号切换；您可以再次点击“切换账号”重新等待。' `
                     -Severity Warning
+            }
+            elseif ($FinalState -ceq 'Cancelled') {
+                $refreshStatusText.Text = '已取消等待，本次未切换账号'
             }
             else {
+                Set-QiehaoCodexStatusVisual -Status '未知'
                 Show-QiehaoSafeMessage `
-                    -Message '无法确认 Codex 是否完全退出，本次未执行后续操作。' `
+                    -Message '无法确认 Codex 是否完全退出，本次未切换账号。' `
                     -Severity Warning
             }
-            if (-not $script:guiIsClosing) { Invoke-QiehaoReadOnlyRefresh }
+            Update-QiehaoActionButtons
         }
         catch {
             $script:guiIsWriteOperationBusy = $false
             try {
-                $refreshStatusText.Text = '退出状态检测失败，已停止等待'
+                $refreshStatusText.Text = '退出状态检测失败，本次未切换账号'
                 Update-QiehaoActionButtons
             }
             catch { }
         }
-        finally {
-            $script:guiExitInProgress = $false
-            if (-not $script:guiIsWriteOperationBusy) {
-                try { Update-QiehaoActionButtons }
-                catch { }
-            }
-        }
     }
 
-    function Start-QiehaoExitWait {
-        param([AllowNull()][scriptblock]$OnStopped)
-        $script:guiPendingAfterExit = $OnStopped
-        $script:guiExitInProgress = $true
-        Set-QiehaoWriteBusy -Value $true -StatusText 'Codex 正在退出……'
-        Stop-QiehaoProcessMonitor
-        Stop-QiehaoExitWaitTimer
-        $script:guiExitWaitRuntime = New-QiehaoWaitTimerRuntime `
-            -IntervalMilliseconds 500 -TimeoutSeconds 8 `
-            -MilestoneSeconds 5 -MilestoneAction {
-                param($Runtime)
-                $script:guiNativeQuitDiagnostics.WaitElapsedMs =
-                    [int]$Runtime.ElapsedMilliseconds
-                if (-not $script:guiIsClosing) {
-                    $refreshStatusText.Text = 'Codex 正在完成后台收尾……'
-                }
-            } `
-            -ClosingProvider { [bool]$script:guiIsClosing } `
-            -ProbeProvider {
-                $processState = Test-CodexProcessesStopped
-                $status = ConvertTo-QiehaoCodexStatus -ProcessState $processState
-                $blockingCount = @($processState.BlockingProcesses).Count
-                $runtime = $script:guiExitWaitRuntime
-                if ($null -ne $runtime) {
-                    $previousCount = $runtime.BlockingProcessCount
-                    if ($null -ne $previousCount -and
-                        $blockingCount -lt [int]$previousCount) {
-                        $runtime.BlockingProcessProgress = $true
-                    }
-                    $runtime.PreviousBlockingProcessCount = $previousCount
-                    $runtime.BlockingProcessCount = $blockingCount
-                    $script:guiNativeQuitDiagnostics.WaitElapsedMs =
-                        [int]$runtime.ElapsedMilliseconds
-                    $script:guiNativeQuitDiagnostics.BlockingProcessCount =
-                        $blockingCount
-                }
-                $script:guiNativeQuitDiagnostics.ProcessState = switch ($status) {
-                    '已退出' { 'Stopped' }
-                    '运行中' { 'Running' }
-                    default { 'Unknown' }
-                }
-                if ($status -ceq '已退出') { return 'Succeeded' }
-                if ($status -ceq '未知') { return 'Unknown' }
-                return 'Pending'
-            } `
-            -CompletionAction {
-                param($Result, $Runtime)
-                switch ($Result) {
-                    'Succeeded' { Complete-QiehaoExitWait -FinalState 'Stopped' }
-                    'TimedOut' { Complete-QiehaoExitWait -FinalState 'Running' }
-                    'Closing' { Stop-QiehaoExitWaitTimer }
-                    default { Complete-QiehaoExitWait -FinalState 'Unknown' }
-                }
-            }
-        $script:guiExitTimer = $script:guiExitWaitRuntime.Timer
-        $script:guiExitTimerTickHandler = $script:guiExitWaitRuntime.TickHandler
-        try {
-            $null = Start-QiehaoWaitTimerRuntime `
-                -Runtime $script:guiExitWaitRuntime
-        }
-        catch { Complete-QiehaoExitWait -FinalState 'Unknown' }
-    }
-
-    function Request-QiehaoNormalExit {
-        param([AllowNull()][scriptblock]$OnStopped)
+    function Start-QiehaoManualSwitchWait {
+        param(
+            [Parameter(Mandatory = $true)][string]$TargetProfile,
+            [ValidateRange(0.001, 3600)][double]$TimeoutSeconds = 90
+        )
         $liveStatus = Get-QiehaoLiveCodexStatus
         Set-QiehaoCodexStatusVisual -Status $liveStatus
         if ($liveStatus -ceq '已退出') {
-            Update-QiehaoActionButtons
-            if ($null -ne $OnStopped) {
-                try { & $OnStopped }
-                catch {
-                    Set-QiehaoWriteBusy -Value $false
-                    Show-QiehaoSafeMessage -Message '退出后的操作无法安全继续，已停止。' `
-                        -Severity Warning
-                }
-            }
-            else {
-                Show-QiehaoSafeMessage -Message 'Codex 已经退出。'
-                Invoke-QiehaoReadOnlyRefresh
-            }
+            Set-QiehaoWriteBusy -Value $true -StatusText '正在安全切换账号……'
+            Invoke-QiehaoSwitchCore -TargetProfile $TargetProfile
             return
         }
         if ($liveStatus -cne '运行中') {
+            Show-QiehaoSafeMessage `
+                -Message '无法确认 Codex 是否完全退出，本次未开始等待或切换。' `
+                -Severity Warning
             Update-QiehaoActionButtons
-            Show-QiehaoSafeMessage `
-                -Message '无法确认 Codex 是否完全退出。请手动检查后点击“刷新”。' `
-                -Severity Warning
             return
         }
-        Set-QiehaoWriteBusy -Value $true -StatusText '正在请求 Codex 正常退出…'
-        try { $result = Request-CodexDesktopNativeQuit -CallerProcessId $PID }
-        catch {
-            Set-QiehaoWriteBusy -Value $false
-            Show-QiehaoSafeMessage `
-                -Message '无法安全确认 Codex 进程，请手动退出后重新检测。' `
-                -Severity Warning
-            Invoke-QiehaoReadOnlyRefresh
-            return
-        }
-        $script:guiNativeQuitDiagnostics = [pscustomobject]@{
-            NativeQuitTargetFound = [bool]$result.NativeQuitTargetFound
-            NativeQuitMethod = [string]$result.NativeQuitMethod
-            NativeQuitInvokeResult = [string]$result.NativeQuitInvokeResult
-            WaitElapsedMs = 0
-            ProcessState = switch ([string]$result.Result) {
-                'CODEX_ALREADY_STOPPED' { 'Stopped' }
-                'CODEX_PROCESS_STATE_UNKNOWN' { 'Unknown' }
-                default { 'Running' }
-            }
-            BlockingProcessCount = [int]$result.BlockingProcessCount
-        }
-        if ([string]$result.Result -ceq 'CODEX_NATIVE_QUIT_REQUESTED') {
-            Start-QiehaoExitWait -OnStopped $OnStopped
-            return
-        }
-        if ([string]$result.Result -ceq 'CODEX_ALREADY_STOPPED') {
-            Set-QiehaoWriteBusy -Value $false
-            if ($null -ne $OnStopped) {
-                try { & $OnStopped }
-                catch {
-                    Show-QiehaoSafeMessage -Message '操作无法安全继续，已停止。' `
-                        -Severity Warning
+        Stop-QiehaoManualSwitchWaitTimer -Result 'Restarted'
+        $script:guiPendingAction = 'Switch'
+        $script:guiPendingTargetProfile = $TargetProfile
+        $script:guiManualSwitchWaitInProgress = $true
+        Set-QiehaoWriteBusy -Value $true `
+            -StatusText "等待 Codex 完全退出，随后自动切换到 '$TargetProfile'……"
+        Stop-QiehaoProcessMonitor
+        try {
+            $script:guiManualSwitchWaitRuntime = New-QiehaoWaitTimerRuntime `
+                -IntervalMilliseconds 500 -TimeoutSeconds $TimeoutSeconds `
+                -ClosingProvider { [bool]$script:guiIsClosing } `
+                -ProbeProvider {
+                    $status = ConvertTo-QiehaoCodexStatus `
+                        -ProcessState (Test-CodexProcessesStopped)
+                    Set-QiehaoCodexStatusVisual -Status $status
+                    if ($status -ceq '已退出') { return 'Succeeded' }
+                    if ($status -ceq '未知') { return 'Unknown' }
+                    return 'Pending'
+                } `
+                -CompletionAction {
+                    param($Result, $Runtime)
+                    switch ($Result) {
+                        'Succeeded' {
+                            Complete-QiehaoManualSwitchWait -FinalState 'Stopped'
+                        }
+                        'TimedOut' {
+                            Complete-QiehaoManualSwitchWait -FinalState 'Running'
+                        }
+                        'Closing' {
+                            Complete-QiehaoManualSwitchWait -FinalState 'Closing'
+                        }
+                        default {
+                            Complete-QiehaoManualSwitchWait -FinalState 'Unknown'
+                        }
+                    }
                 }
-            }
-            else {
-                Show-QiehaoSafeMessage -Message 'Codex 已经退出。'
-                Invoke-QiehaoReadOnlyRefresh
-            }
-            return
+            $script:guiManualSwitchWaitTimer =
+                $script:guiManualSwitchWaitRuntime.Timer
+            $script:guiManualSwitchWaitTimerTickHandler =
+                $script:guiManualSwitchWaitRuntime.TickHandler
+            $null = Start-QiehaoWaitTimerRuntime `
+                -Runtime $script:guiManualSwitchWaitRuntime
         }
-        Set-QiehaoWriteBusy -Value $false
-        Show-QiehaoSafeMessage `
-            -Message (ConvertTo-QiehaoExitMessage -ResultCode $result.Result) `
-            -Severity Warning
-        Invoke-QiehaoReadOnlyRefresh
+        catch { Complete-QiehaoManualSwitchWait -FinalState 'Unknown' }
+    }
+
+    function Cancel-QiehaoManualSwitchWait {
+        if (-not $script:guiManualSwitchWaitInProgress) { return }
+        Complete-QiehaoManualSwitchWait -FinalState 'Cancelled'
     }
 
     function Invoke-QiehaoSwitchCore {
@@ -1176,14 +1122,12 @@ try {
         }
         if ($liveStatus -ceq '运行中') {
             $confirmed = Show-QiehaoChoiceDialog -Title '切换账号' `
-                -Message 'Codex 正在运行，需要先正常退出后才能切换。' `
-                -ConfirmText '正常退出并切换'
+                -Message ("目标账号：$targetProfile`n`n" +
+                    '请从 Codex 菜单“文件 → 退出”或系统托盘选择“退出”。' +
+                    "`n检测到 Codex 完全退出后将自动继续切换。") `
+                -ConfirmText '开始等待并继续切换'
             if (-not $confirmed) { return }
-            $capturedTarget = $targetProfile
-            $continuation = {
-                Invoke-QiehaoSwitchCore -TargetProfile $capturedTarget
-            }.GetNewClosure()
-            Request-QiehaoNormalExit -OnStopped $continuation
+            Start-QiehaoManualSwitchWait -TargetProfile $targetProfile
             return
         }
         Set-QiehaoWriteBusy -Value $true -StatusText '正在安全切换账号…'
@@ -1332,12 +1276,10 @@ try {
         }
         Set-QiehaoWriteBusy -Value $true -StatusText '准备添加账号…'
         if ($liveStatus -ceq '运行中') {
-            $confirmed = Show-QiehaoChoiceDialog -Title '添加账号' `
-                -Message 'Codex 正在运行，需要先正常退出后才能保存当前状态。' `
-                -ConfirmText '正常退出并继续'
-            if (-not $confirmed) { Set-QiehaoWriteBusy -Value $false; return }
-            $continuation = { Start-QiehaoAddWizard }
-            Request-QiehaoNormalExit -OnStopped $continuation
+            Set-QiehaoWriteBusy -Value $false
+            Show-QiehaoSafeMessage `
+                -Message '请先从 Codex 菜单“文件 → 退出”或系统托盘选择“退出”，确认状态变为“已退出”后再添加账号。' `
+                -Severity Warning
             return
         }
         Start-QiehaoAddWizard
@@ -1448,18 +1390,7 @@ try {
     $deleteButton.Add_Click({ Invoke-QiehaoDeleteSelectedProfile })
     $launchCodexButton.Add_Click({ Invoke-QiehaoLaunchCodex })
     $launchSettingsButton.Add_Click({ Show-QiehaoLaunchSettingsDialog })
-    $exitCodexButton.Add_Click({
-        if (-not $script:guiIsWriteOperationBusy) {
-            $dispatch = Invoke-QiehaoExitButtonAction `
-                -ExitAction { Request-QiehaoNormalExit }
-            if ($dispatch.Failed) {
-                Set-QiehaoWriteBusy -Value $false
-                Show-QiehaoSafeMessage `
-                    -Message '正常退出请求失败，账号管理器将继续运行。' `
-                    -Severity Warning
-            }
-        }
-    })
+    $cancelSwitchWaitButton.Add_Click({ Cancel-QiehaoManualSwitchWait })
     $contextSwitchMenuItem.Add_Click({ Invoke-QiehaoSwitchSelectedProfile })
     $contextVerifyMenuItem.Add_Click({ Invoke-QiehaoVerifySelectedProfile })
     $contextRenameMenuItem.Add_Click({ Invoke-QiehaoRenameSelectedProfile })

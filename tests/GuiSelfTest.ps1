@@ -599,23 +599,17 @@ Assert-GuiTest -Condition (
 ) -Code 'GUI_SWITCH_UNKNOWN_EXECUTED'
 
 $runningFlow = [pscustomobject]@{
-    Confirm=0; Exit=0; Wait=0; Switch=0; Timeout=0; Order=@()
+    Confirm=0; Wait=0; Switch=0; Target=''; Order=@()
 }
 $runningSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' `
     -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESS_RUNNING' } } `
-    -ConfirmExitProvider ({ $runningFlow.Confirm++; $true }.GetNewClosure()) `
-    -ExitProvider ({
-        $runningFlow.Exit++
-        $runningFlow.Order += 'NativeQuit'
-        [pscustomobject]@{ Result='CODEX_NATIVE_QUIT_REQUESTED' }
-    }.GetNewClosure()) `
-    -WaitForStopProvider ({
-        param($TimeoutSeconds)
+    -ConfirmWaitProvider ({ $runningFlow.Confirm++; $true }.GetNewClosure()) `
+    -ManualWaitProvider ({
+        param($TargetProfile)
         $runningFlow.Wait++
-        $runningFlow.Timeout = $TimeoutSeconds
-        $runningFlow.Order += 'Stopped'
-        [pscustomobject]@{ ReasonCode='CODEX_PROCESSES_STOPPED' }
+        $runningFlow.Target = $TargetProfile
+        $runningFlow.Order += 'ManualWait'
     }.GetNewClosure()) `
     -SwitchProvider ({
         param($Name)
@@ -624,42 +618,39 @@ $runningSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
         [pscustomobject]@{ Result='SWITCH_SUCCESS' }
     }.GetNewClosure())
 Assert-GuiTest -Condition (
-    $runningSwitch.IsSuccess -and $runningFlow.Confirm -eq 1 -and
-    $runningFlow.Exit -eq 1 -and $runningFlow.Wait -eq 1 -and
-    $runningFlow.Switch -eq 1 -and $runningFlow.Timeout -eq 8 -and
-    (@($runningFlow.Order) -join '|') -ceq 'NativeQuit|Stopped|Switch'
-) -Code 'GUI_RUNNING_EXIT_AND_SWITCH_FAILED'
+    $runningSwitch.WaitStarted -and -not $runningSwitch.CoreCalled -and
+    $runningSwitch.ResultCode -ceq 'CODEX_MANUAL_EXIT_WAIT_STARTED' -and
+    $runningFlow.Confirm -eq 1 -and $runningFlow.Wait -eq 1 -and
+    $runningFlow.Switch -eq 0 -and $runningFlow.Target -ceq 'Team' -and
+    (@($runningFlow.Order) -join '|') -ceq 'ManualWait'
+) -Code 'GUI_RUNNING_MANUAL_WAIT_NOT_STARTED'
 
-$failedExitFlow = [pscustomobject]@{ Switch=0 }
-$failedExitSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
+$cancelledWaitFlow = [pscustomobject]@{ Wait=0; Switch=0 }
+$cancelledWaitSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' `
     -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESS_RUNNING' } } `
-    -ConfirmExitProvider { $true } `
-    -ExitProvider { [pscustomobject]@{ Result='CODEX_NATIVE_QUIT_REQUESTED' } } `
-    -WaitForStopProvider {
-        param($TimeoutSeconds)
-        [pscustomobject]@{ ReasonCode='CODEX_PROCESS_RUNNING' }
-    } `
-    -SwitchProvider ({ $failedExitFlow.Switch++ }.GetNewClosure())
+    -ConfirmWaitProvider { $false } `
+    -ManualWaitProvider ({ $cancelledWaitFlow.Wait++ }.GetNewClosure()) `
+    -SwitchProvider ({ $cancelledWaitFlow.Switch++ }.GetNewClosure())
 Assert-GuiTest -Condition (
-    -not $failedExitSwitch.CoreCalled -and
-    $failedExitSwitch.ResultCode -ceq 'CODEX_EXIT_TIMEOUT' -and
-    $failedExitFlow.Switch -eq 0
-) -Code 'GUI_FAILED_EXIT_STILL_SWITCHED'
+    -not $cancelledWaitSwitch.CoreCalled -and
+    -not $cancelledWaitSwitch.WaitStarted -and
+    $cancelledWaitSwitch.ResultCode -ceq 'OPERATION_CANCELLED' -and
+    $cancelledWaitFlow.Wait -eq 0 -and $cancelledWaitFlow.Switch -eq 0
+) -Code 'GUI_MANUAL_WAIT_CANCELLED_BUT_STARTED'
 
-$unknownAfterExit = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
+$failedWaitFlow = [pscustomobject]@{ Switch=0 }
+$failedWait = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' `
     -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESS_RUNNING' } } `
-    -ConfirmExitProvider { $true } `
-    -ExitProvider { [pscustomobject]@{ Result='CODEX_NATIVE_QUIT_REQUESTED' } } `
-    -WaitForStopProvider {
-        param($TimeoutSeconds)
-        [pscustomobject]@{ ReasonCode='CODEX_PROCESS_STATE_UNKNOWN' }
-    } -SwitchProvider { throw 'SWITCH_SHOULD_NOT_RUN' }
+    -ConfirmWaitProvider { $true } `
+    -ManualWaitProvider { throw 'FAKE_WAIT_START_FAILURE' } `
+    -SwitchProvider ({ $failedWaitFlow.Switch++ }.GetNewClosure())
 Assert-GuiTest -Condition (
-    -not $unknownAfterExit.CoreCalled -and
-    $unknownAfterExit.ResultCode -ceq 'CODEX_EXIT_STATE_UNKNOWN'
-) -Code 'GUI_UNKNOWN_AFTER_EXIT_NOT_BLOCKED'
+    -not $failedWait.CoreCalled -and -not $failedWait.WaitStarted -and
+    $failedWait.ResultCode -ceq 'CODEX_PROCESS_STATE_UNKNOWN' -and
+    $failedWaitFlow.Switch -eq 0
+) -Code 'GUI_MANUAL_WAIT_START_FAILURE_NOT_BLOCKED'
 
 $busyCalls = [pscustomobject]@{ Count=0 }
 $busySwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
@@ -691,6 +682,9 @@ $otherRunningActions = Get-QiehaoActionState -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' -CodexStatus '运行中'
 $busyActions = Get-QiehaoActionState -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' -CodexStatus '已退出' -IsWriteOperationBusy
+$waitingActions = Get-QiehaoActionState -SelectedProfile 'Team' `
+    -ActiveProfile 'Plus' -CodexStatus '运行中' `
+    -IsWriteOperationBusy -ManualSwitchWaitInProgress
 $unavailableLaunchActions = Get-QiehaoActionState -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' -CodexStatus '已退出' -LaunchTargetAvailable:$false
 Assert-GuiTest -Condition (
@@ -700,16 +694,19 @@ Assert-GuiTest -Condition (
     -not $activeStoppedActions.ContextDelete -and
     $activeStoppedActions.Rename -and
     $activeStoppedActions.LaunchCodex -and
-    -not $activeStoppedActions.ExitCodex -and
     $otherRunningActions.Switch -and
     -not $otherRunningActions.Verify -and
     -not $otherRunningActions.LaunchCodex -and
-    $otherRunningActions.ExitCodex -and
+    -not $otherRunningActions.CancelSwitchWait -and
     $busyActions.Refresh -and
     -not $busyActions.Switch -and -not $busyActions.Add -and
     -not $busyActions.Rename -and -not $busyActions.Delete -and
-    -not $busyActions.LaunchCodex -and -not $busyActions.ExitCodex -and
+    -not $busyActions.LaunchCodex -and
     -not $busyActions.ContextSwitch -and -not $busyActions.ContextRename -and
+    $waitingActions.CancelSwitchWait -and
+    -not $waitingActions.Switch -and -not $waitingActions.Verify -and
+    -not $waitingActions.Add -and -not $waitingActions.Rename -and
+    -not $waitingActions.Delete -and -not $waitingActions.LaunchCodex -and
     -not $unavailableLaunchActions.LaunchCodex
 ) -Code 'GUI_ACTION_ENABLE_RULES_FAILED'
 
@@ -1536,6 +1533,142 @@ Assert-GuiTest -Condition (
     -not $closingWait.Gui.Busy -and $closingWait.Gui.Recoverable
 ) -Code 'GUI_REAL_TIMER_WINDOW_CLOSE_CLEANUP_FAILED'
 
+function New-TestManualSwitchRuntime {
+    param(
+        [ValidateSet('Running', 'Stopped', 'Unknown')]
+        [string]$InitialStatus = 'Running',
+        [double]$TimeoutSeconds = 1
+    )
+    $manualState = [pscustomobject]@{
+        Status = $InitialStatus
+        Busy = $true
+        PendingAction = 'Switch'
+        PendingTarget = 'Team'
+        SwitchCalls = 0
+        Result = 'Pending'
+        CleanupBeforeSwitch = $false
+        Runtime = $null
+    }
+    $probe = {
+        switch ($manualState.Status) {
+            'Stopped' { return 'Succeeded' }
+            'Unknown' { return 'Unknown' }
+            default { return 'Pending' }
+        }
+    }.GetNewClosure()
+    $completion = {
+        param($Result, $Runtime)
+        $manualState.Result = $Result
+        $manualState.PendingAction = $null
+        $manualState.PendingTarget = $null
+        $manualState.Busy = $false
+        if ($Result -ceq 'Succeeded') {
+            $manualState.CleanupBeforeSwitch =
+                [bool]$Runtime.Stopped -and [bool]$Runtime.HandlerRemoved -and
+                $null -eq $manualState.PendingAction -and
+                $null -eq $manualState.PendingTarget
+            $manualState.SwitchCalls++
+        }
+    }.GetNewClosure()
+    $manualState.Runtime = New-QiehaoWaitTimerRuntime `
+        -IntervalMilliseconds 10 -TimeoutSeconds $TimeoutSeconds `
+        -ProbeProvider $probe -CompletionAction $completion
+    $null = Start-QiehaoWaitTimerRuntime -Runtime $manualState.Runtime
+    return $manualState
+}
+
+function Stop-TestManualSwitchRuntime {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][string]$Result
+    )
+    $cleanup = Stop-QiehaoWaitTimerRuntime -Runtime $State.Runtime -Result $Result
+    $State.Result = $Result
+    $State.PendingAction = $null
+    $State.PendingTarget = $null
+    $State.Busy = $false
+    return $cleanup
+}
+
+$manualStoppedWait = New-TestManualSwitchRuntime
+Invoke-TestDispatcherFor -Milliseconds 35
+Assert-GuiTest -Condition (
+    $manualStoppedWait.Runtime.Active -and
+    $manualStoppedWait.SwitchCalls -eq 0 -and
+    $manualStoppedWait.PendingAction -ceq 'Switch' -and
+    $manualStoppedWait.PendingTarget -ceq 'Team' -and
+    $manualStoppedWait.Busy
+) -Code 'GUI_MANUAL_WAIT_SWITCHED_WHILE_RUNNING'
+$manualStoppedWait.Status = 'Stopped'
+Invoke-TestDispatcherFor -Milliseconds 35
+Assert-GuiTest -Condition (
+    $manualStoppedWait.Result -ceq 'Succeeded' -and
+    $manualStoppedWait.SwitchCalls -eq 1 -and
+    $manualStoppedWait.CleanupBeforeSwitch -and
+    $manualStoppedWait.Runtime.Stopped -and
+    $manualStoppedWait.Runtime.HandlerRemoved -and
+    -not $manualStoppedWait.Runtime.Active -and
+    $null -eq $manualStoppedWait.PendingAction -and
+    $null -eq $manualStoppedWait.PendingTarget -and
+    -not $manualStoppedWait.Busy
+) -Code 'GUI_MANUAL_WAIT_STOPPED_DID_NOT_SWITCH_ONCE'
+
+$manualUnknownWait = New-TestManualSwitchRuntime
+Invoke-TestDispatcherFor -Milliseconds 20
+$manualUnknownWait.Status = 'Unknown'
+Invoke-TestDispatcherFor -Milliseconds 30
+Assert-GuiTest -Condition (
+    $manualUnknownWait.Result -ceq 'Unknown' -and
+    $manualUnknownWait.SwitchCalls -eq 0 -and
+    $manualUnknownWait.Runtime.Stopped -and
+    $manualUnknownWait.Runtime.HandlerRemoved -and
+    $null -eq $manualUnknownWait.PendingAction -and
+    $null -eq $manualUnknownWait.PendingTarget -and
+    -not $manualUnknownWait.Busy
+) -Code 'GUI_MANUAL_WAIT_UNKNOWN_DID_NOT_FAIL_CLOSED'
+
+$manualTimeoutWait = New-TestManualSwitchRuntime -TimeoutSeconds 0.03
+Invoke-TestDispatcherFor -Milliseconds 100
+Assert-GuiTest -Condition (
+    $manualTimeoutWait.Result -ceq 'TimedOut' -and
+    $manualTimeoutWait.SwitchCalls -eq 0 -and
+    $manualTimeoutWait.Runtime.Stopped -and
+    $manualTimeoutWait.Runtime.HandlerRemoved -and
+    $null -eq $manualTimeoutWait.PendingAction -and
+    $null -eq $manualTimeoutWait.PendingTarget -and
+    -not $manualTimeoutWait.Busy
+) -Code 'GUI_MANUAL_WAIT_TIMEOUT_DID_NOT_CLEANUP'
+
+$manualCancelledWait = New-TestManualSwitchRuntime
+Invoke-TestDispatcherFor -Milliseconds 20
+$manualCancelCleanup = Stop-TestManualSwitchRuntime `
+    -State $manualCancelledWait -Result 'Cancelled'
+Invoke-TestDispatcherFor -Milliseconds 30
+Assert-GuiTest -Condition (
+    $manualCancelledWait.Result -ceq 'Cancelled' -and
+    $manualCancelledWait.SwitchCalls -eq 0 -and
+    $manualCancelCleanup.Stopped -and $manualCancelCleanup.HandlerRemoved -and
+    $null -eq $manualCancelledWait.PendingAction -and
+    $null -eq $manualCancelledWait.PendingTarget -and
+    -not $manualCancelledWait.Busy
+) -Code 'GUI_MANUAL_WAIT_CANCEL_DID_NOT_CLEANUP'
+
+$manualClosingWait = New-TestManualSwitchRuntime
+Invoke-TestDispatcherFor -Milliseconds 20
+$manualCloseCleanup = Stop-TestManualSwitchRuntime `
+    -State $manualClosingWait -Result 'WindowClosing'
+$manualCloseTicks = $manualClosingWait.Runtime.TickCount
+Invoke-TestDispatcherFor -Milliseconds 30
+Assert-GuiTest -Condition (
+    $manualClosingWait.Result -ceq 'WindowClosing' -and
+    $manualClosingWait.SwitchCalls -eq 0 -and
+    $manualCloseCleanup.Stopped -and $manualCloseCleanup.HandlerRemoved -and
+    $manualClosingWait.Runtime.TickCount -eq $manualCloseTicks -and
+    $null -eq $manualClosingWait.PendingAction -and
+    $null -eq $manualClosingWait.PendingTarget -and
+    -not $manualClosingWait.Busy
+) -Code 'GUI_MANUAL_WAIT_WINDOW_CLOSE_DID_NOT_CLEANUP'
+
 $guiSource = [System.IO.File]::ReadAllText($guiScriptPath)
 $helperSource = [System.IO.File]::ReadAllText($helperModulePath)
 foreach ($requiredBackendCommand in @(
@@ -1596,7 +1729,8 @@ foreach ($requiredChineseText in @(
     '切换账号',
     '启动 Codex',
     '启动设置',
-    '正常退出 Codex'
+    '取消等待',
+    '正在检测 Codex 进程状态……'
 )) {
     Assert-GuiTest -Condition (
         $xamlTextForEncoding.Contains($requiredChineseText) -and
@@ -1638,9 +1772,7 @@ Assert-GuiTest -Condition (
     $refreshNode.GetAttribute('IsEnabled') -cne 'False'
 ) -Code 'GUI_REFRESH_BUTTON_DISABLED'
 
-foreach ($phaseTwoButtonName in @(
-    'VerifyButton', 'LaunchCodexButton', 'ExitCodexButton'
-)) {
+foreach ($phaseTwoButtonName in @('VerifyButton', 'LaunchCodexButton')) {
     $phaseTwoNode = $xamlDocument.SelectSingleNode(
         "//*[@x:Name='$phaseTwoButtonName']",
         $namespaceManager
@@ -1650,6 +1782,17 @@ foreach ($phaseTwoButtonName in @(
         $phaseTwoNode.GetAttribute('IsEnabled') -ceq 'False'
     ) -Code ('GUI_PHASE_TWO_BUTTON_INITIAL_STATE_INVALID_' + $phaseTwoButtonName)
 }
+Assert-GuiTest -Condition (
+    $null -eq $xamlDocument.SelectSingleNode(
+        "//*[@x:Name='ExitCodexButton']", $namespaceManager
+    ) -and
+    $null -ne $xamlDocument.SelectSingleNode(
+        "//*[@x:Name='CodexSafetyHintText']", $namespaceManager
+    ) -and
+    $null -ne $xamlDocument.SelectSingleNode(
+        "//*[@x:Name='CancelSwitchWaitButton']", $namespaceManager
+    )
+) -Code 'GUI_MANUAL_QUIT_CONTROLS_INVALID'
 
 foreach ($launchInfoName in @('LaunchSettingsButton', 'LaunchTargetText')) {
     Assert-GuiTest -Condition ($null -ne $xamlDocument.SelectSingleNode(
@@ -1674,11 +1817,17 @@ Assert-GuiTest -Condition (
 ) -Code 'GUI_FORCE_TERMINATION_API_PRESENT'
 Assert-GuiTest -Condition (
     $guiSource -match 'Test-CodexProfile' -and
-    $guiSource -match 'Request-CodexDesktopNativeQuit' -and
+    $guiSource -match 'Start-QiehaoManualSwitchWait' -and
+    $guiSource -match 'Cancel-QiehaoManualSwitchWait' -and
     $guiSource -match 'DispatcherTimer' -and
     $guiSource -match 'Invoke-QiehaoReadOnlyRefresh' -and
     $guiSource -match 'guiIsWriteOperationBusy'
 ) -Code 'GUI_OPERATION_WIRING_MISSING'
+Assert-GuiTest -Condition (
+    $guiSource -match 'Codex 已安全退出，可以切换账号。' -and
+    $guiSource -match '文件 → 退出' -and
+    $guiSource -match '无法确认 Codex 是否完全退出，请先检查 Codex 状态'
+) -Code 'GUI_DYNAMIC_SAFE_EXIT_HINTS_MISSING'
 
 $processMonitorSection = [regex]::Match(
     $guiSource,
@@ -1703,9 +1852,9 @@ Assert-GuiTest -Condition (
     ([regex]::Matches($timerWaitAndCloseSection,
         'TimeoutSeconds 10')).Count -eq 1 -and
     ([regex]::Matches($timerWaitAndCloseSection,
-        'TimeoutSeconds 8')).Count -eq 1 -and
-    $timerWaitAndCloseSection -match 'MilestoneSeconds 5' -and
-    $timerWaitAndCloseSection -match 'Codex 正在完成后台收尾' -and
+        'TimeoutSeconds = 90')).Count -eq 1 -and
+    $timerWaitAndCloseSection -match 'guiPendingAction = ''Switch''' -and
+    $timerWaitAndCloseSection -match 'guiPendingTargetProfile = \$TargetProfile' -and
     $timerWaitAndCloseSection -match 'Stop-QiehaoProcessMonitor' -and
     $timerWaitAndCloseSection -match 'Start-QiehaoProcessMonitor' -and
     $timerWaitAndCloseSection -match 'Add_Closing\(\{ Stop-QiehaoAllTimers \}\)' -and
@@ -1724,21 +1873,27 @@ Assert-GuiTest -Condition (
     $guiSource -match 'guiThemePersistenceReady' -and
     $guiSource -match 'Set-QiehaoTheme -Theme \$selectedTheme -Persist' -and
     $helperSource -match 'File\]::Replace' -and
-    $helperSource -match 'NullString\]::Value' -and
-    $guiSource -match 'Request-CodexDesktopNativeQuit -CallerProcessId \$PID' -and
-    $guiSource -match 'Invoke-QiehaoExitButtonAction'
-) -Code 'GUI_PREF_OR_SAFE_EXIT_WIRING_MISSING'
+    $helperSource -match 'NullString\]::Value'
+) -Code 'GUI_PREF_OR_MANUAL_WAIT_WIRING_MISSING'
 
-$normalExitSection = [regex]::Match(
+$manualWaitSection = [regex]::Match(
     $guiSource,
-    '(?s)function Request-QiehaoNormalExit\s*\{.*?function Invoke-QiehaoSwitchCore'
+    '(?s)function Complete-QiehaoManualSwitchWait\s*\{.*?function Invoke-QiehaoSwitchCore'
 ).Value
 Assert-GuiTest -Condition (
-    -not [string]::IsNullOrWhiteSpace($normalExitSection) -and
-    $normalExitSection -match 'Request-CodexDesktopNativeQuit' -and
-    $normalExitSection -match 'CODEX_NATIVE_QUIT_REQUESTED' -and
-    $normalExitSection -notmatch 'Request-CodexDesktopClose|CloseMainWindow'
-) -Code 'GUI_NORMAL_EXIT_STILL_USES_CLOSE_MAIN_WINDOW'
+    -not [string]::IsNullOrWhiteSpace($manualWaitSection) -and
+    $manualWaitSection -match 'IntervalMilliseconds 500' -and
+    $manualWaitSection -match 'TimeoutSeconds \$TimeoutSeconds' -and
+    $manualWaitSection -match 'Test-CodexProcessesStopped' -and
+    $manualWaitSection -match 'Invoke-QiehaoSwitchCore -TargetProfile \$targetProfile' -and
+    $manualWaitSection -match 'Stop-QiehaoManualSwitchWaitTimer' -and
+    $manualWaitSection -notmatch 'Request-CodexDesktopNativeQuit|Request-CodexDesktopClose|CloseMainWindow' -and
+    $manualWaitSection -notmatch '(?i)Get-CodexActiveProfile|Get-CodexAccountSlot|Test-CodexActiveIdentity|Save-CodexActiveProfile|Set-Content|Out-File|WriteAll|Invoke-WebRequest|Invoke-RestMethod'
+) -Code 'GUI_MANUAL_WAIT_IMPLEMENTATION_INVALID'
+Assert-GuiTest -Condition (
+    $guiSource -notmatch 'Request-CodexDesktopNativeQuit|Request-CodexDesktopClose|CloseMainWindow|ExitCodexButton|Request-QiehaoNormalExit' -and
+    $xamlTextForEncoding -notmatch '正常退出 Codex'
+) -Code 'GUI_AUTO_EXIT_PATH_STILL_REACHABLE'
 Assert-GuiTest -Condition (
     $coreAndGuiSource -match 'AutomationId' -and
     $coreAndGuiSource -match 'InvokePattern' -and
@@ -1749,7 +1904,7 @@ Assert-GuiTest -Condition (
 
 $launchSection = [regex]::Match(
     $guiSource,
-    '(?s)function Invoke-QiehaoLaunchCodex\s*\{.*?function Complete-QiehaoExitWait'
+    '(?s)function Invoke-QiehaoLaunchCodex\s*\{.*?function Complete-QiehaoManualSwitchWait'
 ).Value
 Assert-GuiTest -Condition (
     -not [string]::IsNullOrWhiteSpace($launchSection) -and
@@ -1827,37 +1982,29 @@ finally {
     VerifyIncompleteSafe = 'PASS'
     VerifySensitiveFailureSafe = 'PASS'
     VerifyRefresh = 'PASS'
-    ExitAlreadyStopped = 'PASS'
-    NativeQuitAutomationId = 'PASS'
-    NativeQuitEnglishName = 'PASS'
-    NativeQuitChineseName = 'PASS'
-    NativeQuitMissingMenuSafe = 'PASS'
-    NativeQuitInvokeFailureSafe = 'PASS'
-    NativeQuitUnsafeTargetsExcluded = 'PASS'
-    NativeQuitBrowserExtensionExcluded = 'PASS'
-    ExitCloseMainWindowRequested = 'PASS'
-    ExitCloseBeforeWaitTimer = 'PASS'
-    ExitCloseMainWindowFalseReported = 'PASS'
-    ExitPostCloseStopped = 'PASS'
-    ExitStillRunningNoForce = 'PASS'
-    ExitUnknownNoRequest = 'PASS'
-    ExitBrowserIsolation = 'PASS'
-    ExitSelfWindowExcluded = 'PASS'
-    ExitMixedProcessesOfficialOnly = 'PASS'
-    ExitWindowOwnerValidated = 'PASS'
-    ExitFailureKeepsManagerRunning = 'PASS'
+    LegacyExitAlreadyStopped = 'PASS'
+    LegacyNativeQuitHelpers = 'PASS'
+    LegacyCloseMainWindowHelpers = 'PASS'
     LaunchAutoDetection = 'PASS'
     LaunchCustomSettings = 'PASS'
     LaunchProviderContract = 'PASS'
-    LaunchExitButtonStates = 'PASS'
+    LaunchAndWaitButtonStates = 'PASS'
     ProcessMonitorReadOnly = 'PASS'
     ProcessMonitorFiveSeconds = 'PASS'
-    ExitWaitRealDispatcherClosure = 'PASS'
-    ExitWaitFiveSecondMilestone = 'PASS'
-    ExitWaitEightSecondHardTimeout = 'PASS'
-    ExitWaitTimeoutCleanup = 'PASS'
-    ExitWaitCallbackIsolation = 'PASS'
-    ExitWaitWindowCloseCleanup = 'PASS'
+    GenericWaitRealDispatcherClosure = 'PASS'
+    GenericWaitMilestone = 'PASS'
+    GenericWaitHardTimeout = 'PASS'
+    GenericWaitTimeoutCleanup = 'PASS'
+    GenericWaitCallbackIsolation = 'PASS'
+    GenericWaitWindowCloseCleanup = 'PASS'
+    ManualWaitRunningNoSwitch = 'PASS'
+    ManualWaitStoppedSwitchOnce = 'PASS'
+    ManualWaitUnknownFailClosed = 'PASS'
+    ManualWaitInjectedTimeout = 'PASS'
+    ManualWaitCancelCleanup = 'PASS'
+    ManualWaitWindowCloseCleanup = 'PASS'
+    ManualWaitDefaultNinetySeconds = 'PASS'
+    AutoExitGuiPathAbsent = 'PASS'
     WindowCloseStopsAllTimers = 'PASS'
     GlassCardsAndButtons = 'PASS'
     ActiveRowDistinct = 'PASS'
@@ -1866,9 +2013,9 @@ finally {
     DoubleClickStoppedSwitch = 'PASS'
     DoubleClickActiveNoWrite = 'PASS'
     NonRowDoubleClickIgnored = 'PASS'
-    RunningExitThenSwitch = 'PASS'
-    NativeQuitStoppedBeforeSwitch = 'PASS'
-    ExitFailureBlocksSwitch = 'PASS'
+    RunningStartsManualWait = 'PASS'
+    ManualWaitDoesNotPreSwitch = 'PASS'
+    ManualWaitStartFailureBlocksSwitch = 'PASS'
     UnknownBlocksSwitch = 'PASS'
     SwitchSuccess = 'PASS'
     SwitchRollbackSafe = 'PASS'
