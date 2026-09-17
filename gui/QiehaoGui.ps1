@@ -125,6 +125,14 @@ try {
     $script:guiProcessTimer = $null
     $script:guiProcessTimerTickHandler = $null
     $script:guiPendingAfterExit = $null
+    $script:guiNativeQuitDiagnostics = [pscustomobject]@{
+        NativeQuitTargetFound = $false
+        NativeQuitMethod = 'None'
+        NativeQuitInvokeResult = 'not-requested'
+        WaitElapsedMs = 0
+        ProcessState = 'Unknown'
+        BlockingProcessCount = 0
+    }
     $script:guiLaunchTarget = $null
     $script:guiLaunchSettings = $null
     $script:guiAllProfileRows = @()
@@ -926,6 +934,18 @@ try {
             [string]$FinalState
         )
         $pending = $script:guiPendingAfterExit
+        $completedRuntime = $script:guiExitWaitRuntime
+        if ($null -ne $completedRuntime) {
+            $script:guiNativeQuitDiagnostics.WaitElapsedMs =
+                [int]$completedRuntime.ElapsedMilliseconds
+            $script:guiNativeQuitDiagnostics.BlockingProcessCount =
+                [int]$completedRuntime.BlockingProcessCount
+        }
+        $script:guiNativeQuitDiagnostics.ProcessState = switch ($FinalState) {
+            'Stopped' { 'Stopped' }
+            'Running' { 'Running' }
+            default { 'Unknown' }
+        }
         Stop-QiehaoExitWaitTimer
         $script:guiExitInProgress = $false
         $script:guiPendingAfterExit = $null
@@ -949,7 +969,7 @@ try {
             }
             elseif ($FinalState -ceq 'Running') {
                 Show-QiehaoSafeMessage `
-                    -Message 'Codex 仍有后台进程，请从系统托盘退出后重试。' `
+                    -Message 'Codex 仍有后台进程，请使用 Codex 的退出功能或系统托盘退出后重试。' `
                     -Severity Warning
             }
             else {
@@ -980,14 +1000,43 @@ try {
         param([AllowNull()][scriptblock]$OnStopped)
         $script:guiPendingAfterExit = $OnStopped
         $script:guiExitInProgress = $true
-        Set-QiehaoWriteBusy -Value $true -StatusText '正在等待 Codex 正常退出…'
+        Set-QiehaoWriteBusy -Value $true -StatusText 'Codex 正在退出……'
         Stop-QiehaoProcessMonitor
         Stop-QiehaoExitWaitTimer
         $script:guiExitWaitRuntime = New-QiehaoWaitTimerRuntime `
-            -IntervalMilliseconds 500 -TimeoutSeconds 10 `
+            -IntervalMilliseconds 500 -TimeoutSeconds 8 `
+            -MilestoneSeconds 5 -MilestoneAction {
+                param($Runtime)
+                $script:guiNativeQuitDiagnostics.WaitElapsedMs =
+                    [int]$Runtime.ElapsedMilliseconds
+                if (-not $script:guiIsClosing) {
+                    $refreshStatusText.Text = 'Codex 正在完成后台收尾……'
+                }
+            } `
             -ClosingProvider { [bool]$script:guiIsClosing } `
             -ProbeProvider {
-                $status = Get-QiehaoLiveCodexStatus
+                $processState = Test-CodexProcessesStopped
+                $status = ConvertTo-QiehaoCodexStatus -ProcessState $processState
+                $blockingCount = @($processState.BlockingProcesses).Count
+                $runtime = $script:guiExitWaitRuntime
+                if ($null -ne $runtime) {
+                    $previousCount = $runtime.BlockingProcessCount
+                    if ($null -ne $previousCount -and
+                        $blockingCount -lt [int]$previousCount) {
+                        $runtime.BlockingProcessProgress = $true
+                    }
+                    $runtime.PreviousBlockingProcessCount = $previousCount
+                    $runtime.BlockingProcessCount = $blockingCount
+                    $script:guiNativeQuitDiagnostics.WaitElapsedMs =
+                        [int]$runtime.ElapsedMilliseconds
+                    $script:guiNativeQuitDiagnostics.BlockingProcessCount =
+                        $blockingCount
+                }
+                $script:guiNativeQuitDiagnostics.ProcessState = switch ($status) {
+                    '已退出' { 'Stopped' }
+                    '运行中' { 'Running' }
+                    default { 'Unknown' }
+                }
                 if ($status -ceq '已退出') { return 'Succeeded' }
                 if ($status -ceq '未知') { return 'Unknown' }
                 return 'Pending'
@@ -1038,7 +1087,7 @@ try {
             return
         }
         Set-QiehaoWriteBusy -Value $true -StatusText '正在请求 Codex 正常退出…'
-        try { $result = Request-CodexDesktopClose -CallerProcessId $PID }
+        try { $result = Request-CodexDesktopNativeQuit -CallerProcessId $PID }
         catch {
             Set-QiehaoWriteBusy -Value $false
             Show-QiehaoSafeMessage `
@@ -1047,7 +1096,19 @@ try {
             Invoke-QiehaoReadOnlyRefresh
             return
         }
-        if ([string]$result.Result -ceq 'CODEX_CLOSE_REQUESTED') {
+        $script:guiNativeQuitDiagnostics = [pscustomobject]@{
+            NativeQuitTargetFound = [bool]$result.NativeQuitTargetFound
+            NativeQuitMethod = [string]$result.NativeQuitMethod
+            NativeQuitInvokeResult = [string]$result.NativeQuitInvokeResult
+            WaitElapsedMs = 0
+            ProcessState = switch ([string]$result.Result) {
+                'CODEX_ALREADY_STOPPED' { 'Stopped' }
+                'CODEX_PROCESS_STATE_UNKNOWN' { 'Unknown' }
+                default { 'Running' }
+            }
+            BlockingProcessCount = [int]$result.BlockingProcessCount
+        }
+        if ([string]$result.Result -ceq 'CODEX_NATIVE_QUIT_REQUESTED') {
             Start-QiehaoExitWait -OnStopped $OnStopped
             return
         }

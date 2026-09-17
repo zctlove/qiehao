@@ -598,29 +598,36 @@ Assert-GuiTest -Condition (
     $switchCalls.Count -eq 1
 ) -Code 'GUI_SWITCH_UNKNOWN_EXECUTED'
 
-$runningFlow = [pscustomobject]@{ Confirm=0; Exit=0; Wait=0; Switch=0 }
+$runningFlow = [pscustomobject]@{
+    Confirm=0; Exit=0; Wait=0; Switch=0; Timeout=0; Order=@()
+}
 $runningSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' `
     -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESS_RUNNING' } } `
     -ConfirmExitProvider ({ $runningFlow.Confirm++; $true }.GetNewClosure()) `
     -ExitProvider ({
         $runningFlow.Exit++
-        [pscustomobject]@{ Result='CODEX_CLOSE_REQUESTED' }
+        $runningFlow.Order += 'NativeQuit'
+        [pscustomobject]@{ Result='CODEX_NATIVE_QUIT_REQUESTED' }
     }.GetNewClosure()) `
     -WaitForStopProvider ({
         param($TimeoutSeconds)
         $runningFlow.Wait++
+        $runningFlow.Timeout = $TimeoutSeconds
+        $runningFlow.Order += 'Stopped'
         [pscustomobject]@{ ReasonCode='CODEX_PROCESSES_STOPPED' }
     }.GetNewClosure()) `
     -SwitchProvider ({
         param($Name)
         $runningFlow.Switch++
+        $runningFlow.Order += 'Switch'
         [pscustomobject]@{ Result='SWITCH_SUCCESS' }
     }.GetNewClosure())
 Assert-GuiTest -Condition (
     $runningSwitch.IsSuccess -and $runningFlow.Confirm -eq 1 -and
     $runningFlow.Exit -eq 1 -and $runningFlow.Wait -eq 1 -and
-    $runningFlow.Switch -eq 1
+    $runningFlow.Switch -eq 1 -and $runningFlow.Timeout -eq 8 -and
+    (@($runningFlow.Order) -join '|') -ceq 'NativeQuit|Stopped|Switch'
 ) -Code 'GUI_RUNNING_EXIT_AND_SWITCH_FAILED'
 
 $failedExitFlow = [pscustomobject]@{ Switch=0 }
@@ -628,7 +635,7 @@ $failedExitSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' `
     -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESS_RUNNING' } } `
     -ConfirmExitProvider { $true } `
-    -ExitProvider { [pscustomobject]@{ Result='CODEX_CLOSE_REQUESTED' } } `
+    -ExitProvider { [pscustomobject]@{ Result='CODEX_NATIVE_QUIT_REQUESTED' } } `
     -WaitForStopProvider {
         param($TimeoutSeconds)
         [pscustomobject]@{ ReasonCode='CODEX_PROCESS_RUNNING' }
@@ -644,7 +651,7 @@ $unknownAfterExit = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' `
     -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESS_RUNNING' } } `
     -ConfirmExitProvider { $true } `
-    -ExitProvider { [pscustomobject]@{ Result='CODEX_CLOSE_REQUESTED' } } `
+    -ExitProvider { [pscustomobject]@{ Result='CODEX_NATIVE_QUIT_REQUESTED' } } `
     -WaitForStopProvider {
         param($TimeoutSeconds)
         [pscustomobject]@{ ReasonCode='CODEX_PROCESS_STATE_UNKNOWN' }
@@ -926,6 +933,215 @@ $runningCodexSnapshot = @(
         MainWindowOwnerProcessId=9101
     }
 )
+
+function New-FakeNativeQuitElement {
+    param(
+        [string]$Name,
+        [string]$AutomationId,
+        [int]$ProcessId = 9101,
+        [string]$ControlType = 'MenuItem',
+        [bool]$IsEnabled = $true,
+        [bool]$SupportsInvoke = $true,
+        [bool]$IsMenuDescendant = $true
+    )
+    return [pscustomobject]@{
+        Name = $Name
+        AutomationId = $AutomationId
+        ProcessId = $ProcessId
+        ControlType = $ControlType
+        IsEnabled = $IsEnabled
+        SupportsInvoke = $SupportsInvoke
+        IsMenuDescendant = $IsMenuDescendant
+    }
+}
+
+$stableIdCapture = [pscustomobject]@{ Invokes=0; Name='' }
+$stableIdQuit = Request-CodexDesktopNativeQuit `
+    -ProcessData $runningCodexSnapshot `
+    -AutomationSnapshotProvider {
+        param($WindowHandle, $ExpectedProcessId)
+        [pscustomobject]@{
+            Available = $true
+            Elements = @(New-FakeNativeQuitElement `
+                -Name 'Localized application command' `
+                -AutomationId 'app.quit' -ProcessId $ExpectedProcessId)
+            CleanupAction = $null
+        }
+    } `
+    -AutomationInvokeProvider ({
+        param($Element)
+        $stableIdCapture.Invokes++
+        $stableIdCapture.Name = [string]$Element.Name
+        return $true
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    $stableIdQuit.Result -ceq 'CODEX_NATIVE_QUIT_REQUESTED' -and
+    $stableIdQuit.NativeQuitTargetFound -and
+    $stableIdQuit.NativeQuitMethod -ceq 'AutomationId' -and
+    $stableIdQuit.NativeQuitInvokeResult -ceq 'requested' -and
+    $stableIdCapture.Invokes -eq 1
+) -Code 'GUI_NATIVE_QUIT_AUTOMATION_ID_FAILED'
+
+$englishCapture = [pscustomobject]@{ Invokes=0 }
+$englishQuit = Request-CodexDesktopNativeQuit `
+    -ProcessData $runningCodexSnapshot `
+    -AutomationSnapshotProvider {
+        param($WindowHandle, $ExpectedProcessId)
+        [pscustomobject]@{
+            Available = $true
+            Elements = @(New-FakeNativeQuitElement `
+                -Name 'Exit' -AutomationId '' -ProcessId $ExpectedProcessId)
+            CleanupAction = $null
+        }
+    } `
+    -AutomationInvokeProvider ({
+        param($Element)
+        $englishCapture.Invokes++
+        return $true
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    $englishQuit.Result -ceq 'CODEX_NATIVE_QUIT_REQUESTED' -and
+    $englishQuit.NativeQuitMethod -ceq 'Name' -and
+    $englishCapture.Invokes -eq 1
+) -Code 'GUI_NATIVE_QUIT_ENGLISH_EXIT_FAILED'
+
+$chineseCapture = [pscustomobject]@{ Invokes=0 }
+$chineseQuit = Request-CodexDesktopNativeQuit `
+    -ProcessData $runningCodexSnapshot `
+    -AutomationSnapshotProvider {
+        param($WindowHandle, $ExpectedProcessId)
+        [pscustomobject]@{
+            Available = $true
+            Elements = @(New-FakeNativeQuitElement `
+                -Name '退出 Codex' -AutomationId '' `
+                -ProcessId $ExpectedProcessId)
+            CleanupAction = $null
+        }
+    } `
+    -AutomationInvokeProvider ({
+        param($Element)
+        $chineseCapture.Invokes++
+        return $true
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    $chineseQuit.Result -ceq 'CODEX_NATIVE_QUIT_REQUESTED' -and
+    $chineseQuit.NativeQuitMethod -ceq 'Name' -and
+    $chineseCapture.Invokes -eq 1
+) -Code 'GUI_NATIVE_QUIT_CHINESE_EXIT_FAILED'
+
+$missingQuitCapture = [pscustomobject]@{ Invokes=0 }
+$missingQuit = Request-CodexDesktopNativeQuit `
+    -ProcessData $runningCodexSnapshot `
+    -AutomationSnapshotProvider {
+        param($WindowHandle, $ExpectedProcessId)
+        [pscustomobject]@{
+            Available = $true
+            Elements = @(New-FakeNativeQuitElement `
+                -Name 'New Window' -AutomationId 'newWindow' `
+                -ProcessId $ExpectedProcessId)
+            CleanupAction = $null
+        }
+    } `
+    -AutomationInvokeProvider ({
+        param($Element)
+        $missingQuitCapture.Invokes++
+        return $true
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    $missingQuit.Result -ceq 'CODEX_NATIVE_QUIT_UI_NOT_FOUND' -and
+    $missingQuit.NativeQuitTargetFound -and
+    $missingQuit.NativeQuitMethod -ceq 'None' -and
+    $missingQuitCapture.Invokes -eq 0
+) -Code 'GUI_NATIVE_QUIT_MISSING_MENU_UNSAFE_FALLBACK'
+
+$invokeFailureCapture = [pscustomobject]@{ Invokes=0; ManagerAlive=$true }
+$invokeFailure = Request-CodexDesktopNativeQuit `
+    -ProcessData $runningCodexSnapshot `
+    -AutomationSnapshotProvider {
+        param($WindowHandle, $ExpectedProcessId)
+        [pscustomobject]@{
+            Available = $true
+            Elements = @(New-FakeNativeQuitElement `
+                -Name 'Quit Codex' -AutomationId '' `
+                -ProcessId $ExpectedProcessId)
+            CleanupAction = $null
+        }
+    } `
+    -AutomationInvokeProvider ({
+        param($Element)
+        $invokeFailureCapture.Invokes++
+        throw 'FAKE_UIA_SENSITIVE_DETAIL'
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    $invokeFailure.Result -ceq 'CODEX_NATIVE_QUIT_INVOKE_FAILED' -and
+    $invokeFailure.NativeQuitInvokeResult -ceq 'failed' -and
+    $invokeFailure.NativeQuitMethod -ceq 'Name' -and
+    $invokeFailureCapture.Invokes -eq 1 -and
+    $invokeFailureCapture.ManagerAlive -and
+    (ConvertTo-QiehaoExitMessage -ResultCode $invokeFailure.Result) `
+        -notmatch 'FAKE_UIA_SENSITIVE_DETAIL'
+) -Code 'GUI_NATIVE_QUIT_INVOKE_EXCEPTION_ESCAPED'
+
+$unsafeNativeCapture = [pscustomobject]@{ Snapshots=0; Invokes=0 }
+$unsafeNativeQuit = Request-CodexDesktopNativeQuit -CallerProcessId 9401 `
+    -ProcessData @(
+        [pscustomobject]@{
+            ProcessName='ChatGPT.exe'; Id=9401
+            ExecutablePath=$nativeCodexPath; PathReadStatus='Readable'
+            ParentProcessId=0; ParentReadStatus='Readable'
+            MainWindowHandle=44001; MainWindowOwnerProcessId=9401
+        },
+        [pscustomobject]@{
+            ProcessName='ChatGPT.exe'; Id=9402
+            ExecutablePath='C:\Fake\Unrelated\ChatGPT.exe'
+            PathReadStatus='Readable'; ParentProcessId=0
+            ParentReadStatus='Readable'; MainWindowHandle=44002
+            MainWindowOwnerProcessId=9402
+        }
+    ) `
+    -AutomationSnapshotProvider ({
+        $unsafeNativeCapture.Snapshots++
+        throw 'UNSAFE_TARGET_REACHED_UIA'
+    }.GetNewClosure()) `
+    -AutomationInvokeProvider ({
+        $unsafeNativeCapture.Invokes++
+        return $true
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    $unsafeNativeQuit.Result -ceq 'CODEX_NATIVE_QUIT_UI_NOT_FOUND' -and
+    -not $unsafeNativeQuit.NativeQuitTargetFound -and
+    $unsafeNativeCapture.Snapshots -eq 0 -and
+    $unsafeNativeCapture.Invokes -eq 0
+) -Code 'GUI_NATIVE_QUIT_SELF_OR_UNOFFICIAL_TARGETED'
+
+$browserNativeCapture = [pscustomobject]@{ Snapshots=0; Invokes=0 }
+$browserNativeQuit = Request-CodexDesktopNativeQuit -ProcessData @(
+    [pscustomobject]@{
+        ProcessName='extension-host.exe'; Id=9451
+        ExecutablePath=$extensionHostPath; PathReadStatus='Readable'
+        ParentProcessId=9452; ParentReadStatus='Readable'
+        MainWindowHandle=44501; MainWindowOwnerProcessId=9451
+    },
+    [pscustomobject]@{
+        ProcessName='chrome.exe'; Id=9452
+        ExecutablePath='C:\Program Files\Google\Chrome\Application\chrome.exe'
+        PathReadStatus='Readable'; ParentProcessId=0
+        ParentReadStatus='Readable'; MainWindowHandle=44502
+        MainWindowOwnerProcessId=9452
+    }
+) -AutomationSnapshotProvider ({
+    $browserNativeCapture.Snapshots++
+    throw 'BROWSER_REACHED_UIA'
+}.GetNewClosure()) -AutomationInvokeProvider ({
+    $browserNativeCapture.Invokes++
+    return $true
+}.GetNewClosure())
+Assert-GuiTest -Condition (
+    $browserNativeQuit.Result -ceq 'CODEX_ALREADY_STOPPED' -and
+    $browserNativeCapture.Snapshots -eq 0 -and
+    $browserNativeCapture.Invokes -eq 0
+) -Code 'GUI_NATIVE_QUIT_BROWSER_EXTENSION_TARGETED'
+
 $closeCapture = [pscustomobject]@{ Count=0; LastPid=0; Order=@() }
 $closeRequested = Request-CodexDesktopClose `
     -ProcessData $runningCodexSnapshot -CloseMainWindowAction ({
@@ -1199,7 +1415,13 @@ function New-TestWaitRuntime {
         [Parameter(Mandatory = $true)]
         [scriptblock]$ProbeProvider,
 
-        [double]$TimeoutSeconds = 1
+        [double]$TimeoutSeconds = 1,
+
+        [double]$MilestoneSeconds = 0,
+
+        [scriptblock]$MilestoneAction,
+
+        [scriptblock]$ClockProvider = { [DateTime]::UtcNow }
     )
 
     $guiState = [pscustomobject]@{
@@ -1215,6 +1437,8 @@ function New-TestWaitRuntime {
     }.GetNewClosure()
     $runtime = New-QiehaoWaitTimerRuntime `
         -IntervalMilliseconds 10 -TimeoutSeconds $TimeoutSeconds `
+        -MilestoneSeconds $MilestoneSeconds `
+        -MilestoneAction $MilestoneAction -ClockProvider $ClockProvider `
         -ProbeProvider $ProbeProvider -CompletionAction $completion
     $null = Start-QiehaoWaitTimerRuntime -Runtime $runtime
     return [pscustomobject]@{ Runtime = $runtime; Gui = $guiState }
@@ -1239,6 +1463,35 @@ Assert-GuiTest -Condition (
     -not $successWait.Runtime.Active -and
     -not $successWait.Gui.Busy -and $successWait.Gui.Recoverable
 ) -Code 'GUI_REAL_TIMER_RUNNING_TO_STOPPED_FAILED'
+
+$phaseClock = [pscustomobject]@{ Now=[DateTime]::UtcNow }
+$phaseCapture = [pscustomobject]@{ Milestones=0; LastElapsed=0 }
+$phaseWait = New-TestWaitRuntime -TimeoutSeconds 8 -MilestoneSeconds 5 `
+    -ClockProvider ({ $phaseClock.Now }.GetNewClosure()) `
+    -MilestoneAction ({
+        param($Runtime)
+        $phaseCapture.Milestones++
+        $phaseCapture.LastElapsed = [int]$Runtime.ElapsedMilliseconds
+    }.GetNewClosure()) -ProbeProvider { 'Pending' }
+$phaseClock.Now = $phaseClock.Now.AddSeconds(5.1)
+Invoke-TestDispatcherFor -Milliseconds 30
+Assert-GuiTest -Condition (
+    $phaseWait.Runtime.Active -and $phaseWait.Runtime.MilestoneReached -and
+    $phaseCapture.Milestones -eq 1 -and
+    $phaseWait.Runtime.ElapsedMilliseconds -ge 5000 -and
+    $phaseWait.Gui.Busy
+) -Code 'GUI_EXIT_WAIT_FIVE_SECOND_MILESTONE_FAILED'
+$phaseClock.Now = $phaseClock.Now.AddSeconds(3)
+Invoke-TestDispatcherFor -Milliseconds 30
+Assert-GuiTest -Condition (
+    $phaseWait.Runtime.Result -ceq 'TimedOut' -and
+    $phaseWait.Runtime.ElapsedMilliseconds -ge 8000 -and
+    $phaseCapture.Milestones -eq 1 -and
+    $phaseWait.Runtime.Stopped -and
+    $phaseWait.Runtime.HandlerRemoved -and
+    -not $phaseWait.Runtime.Active -and
+    -not $phaseWait.Gui.Busy -and $phaseWait.Gui.Recoverable
+) -Code 'GUI_EXIT_WAIT_EIGHT_SECOND_HARD_TIMEOUT_FAILED'
 
 $timeoutWait = New-TestWaitRuntime -TimeoutSeconds 0.03 `
     -ProbeProvider { 'Pending' }
@@ -1421,7 +1674,7 @@ Assert-GuiTest -Condition (
 ) -Code 'GUI_FORCE_TERMINATION_API_PRESENT'
 Assert-GuiTest -Condition (
     $guiSource -match 'Test-CodexProfile' -and
-    $guiSource -match 'Request-CodexDesktopClose' -and
+    $guiSource -match 'Request-CodexDesktopNativeQuit' -and
     $guiSource -match 'DispatcherTimer' -and
     $guiSource -match 'Invoke-QiehaoReadOnlyRefresh' -and
     $guiSource -match 'guiIsWriteOperationBusy'
@@ -1448,7 +1701,11 @@ Assert-GuiTest -Condition (
     ([regex]::Matches($timerWaitAndCloseSection,
         'IntervalMilliseconds 500')).Count -eq 2 -and
     ([regex]::Matches($timerWaitAndCloseSection,
-        'TimeoutSeconds 10')).Count -eq 2 -and
+        'TimeoutSeconds 10')).Count -eq 1 -and
+    ([regex]::Matches($timerWaitAndCloseSection,
+        'TimeoutSeconds 8')).Count -eq 1 -and
+    $timerWaitAndCloseSection -match 'MilestoneSeconds 5' -and
+    $timerWaitAndCloseSection -match 'Codex 正在完成后台收尾' -and
     $timerWaitAndCloseSection -match 'Stop-QiehaoProcessMonitor' -and
     $timerWaitAndCloseSection -match 'Start-QiehaoProcessMonitor' -and
     $timerWaitAndCloseSection -match 'Add_Closing\(\{ Stop-QiehaoAllTimers \}\)' -and
@@ -1468,9 +1725,27 @@ Assert-GuiTest -Condition (
     $guiSource -match 'Set-QiehaoTheme -Theme \$selectedTheme -Persist' -and
     $helperSource -match 'File\]::Replace' -and
     $helperSource -match 'NullString\]::Value' -and
-    $guiSource -match 'Request-CodexDesktopClose -CallerProcessId \$PID' -and
+    $guiSource -match 'Request-CodexDesktopNativeQuit -CallerProcessId \$PID' -and
     $guiSource -match 'Invoke-QiehaoExitButtonAction'
 ) -Code 'GUI_PREF_OR_SAFE_EXIT_WIRING_MISSING'
+
+$normalExitSection = [regex]::Match(
+    $guiSource,
+    '(?s)function Request-QiehaoNormalExit\s*\{.*?function Invoke-QiehaoSwitchCore'
+).Value
+Assert-GuiTest -Condition (
+    -not [string]::IsNullOrWhiteSpace($normalExitSection) -and
+    $normalExitSection -match 'Request-CodexDesktopNativeQuit' -and
+    $normalExitSection -match 'CODEX_NATIVE_QUIT_REQUESTED' -and
+    $normalExitSection -notmatch 'Request-CodexDesktopClose|CloseMainWindow'
+) -Code 'GUI_NORMAL_EXIT_STILL_USES_CLOSE_MAIN_WINDOW'
+Assert-GuiTest -Condition (
+    $coreAndGuiSource -match 'AutomationId' -and
+    $coreAndGuiSource -match 'InvokePattern' -and
+    $coreAndGuiSource -match 'ExpandCollapsePattern' -and
+    $coreAndGuiSource -match 'ControlType\]::MenuItem' -and
+    $coreAndGuiSource -notmatch '(?i)SendKeys|Alt\+F4|mouse_event'
+) -Code 'GUI_NATIVE_QUIT_UIA_IMPLEMENTATION_UNSAFE'
 
 $launchSection = [regex]::Match(
     $guiSource,
@@ -1553,6 +1828,13 @@ finally {
     VerifySensitiveFailureSafe = 'PASS'
     VerifyRefresh = 'PASS'
     ExitAlreadyStopped = 'PASS'
+    NativeQuitAutomationId = 'PASS'
+    NativeQuitEnglishName = 'PASS'
+    NativeQuitChineseName = 'PASS'
+    NativeQuitMissingMenuSafe = 'PASS'
+    NativeQuitInvokeFailureSafe = 'PASS'
+    NativeQuitUnsafeTargetsExcluded = 'PASS'
+    NativeQuitBrowserExtensionExcluded = 'PASS'
     ExitCloseMainWindowRequested = 'PASS'
     ExitCloseBeforeWaitTimer = 'PASS'
     ExitCloseMainWindowFalseReported = 'PASS'
@@ -1571,6 +1853,8 @@ finally {
     ProcessMonitorReadOnly = 'PASS'
     ProcessMonitorFiveSeconds = 'PASS'
     ExitWaitRealDispatcherClosure = 'PASS'
+    ExitWaitFiveSecondMilestone = 'PASS'
+    ExitWaitEightSecondHardTimeout = 'PASS'
     ExitWaitTimeoutCleanup = 'PASS'
     ExitWaitCallbackIsolation = 'PASS'
     ExitWaitWindowCloseCleanup = 'PASS'
@@ -1583,6 +1867,7 @@ finally {
     DoubleClickActiveNoWrite = 'PASS'
     NonRowDoubleClickIgnored = 'PASS'
     RunningExitThenSwitch = 'PASS'
+    NativeQuitStoppedBeforeSwitch = 'PASS'
     ExitFailureBlocksSwitch = 'PASS'
     UnknownBlocksSwitch = 'PASS'
     SwitchSuccess = 'PASS'

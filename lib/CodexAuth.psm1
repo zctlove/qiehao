@@ -1304,6 +1304,438 @@ public static class QiehaoquNativeWindow {
     }
 }
 
+function New-CodexNativeQuitResult {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Result,
+        [bool]$TargetFound = $false,
+        [ValidateSet('AutomationId', 'Name', 'None')]
+        [string]$Method = 'None',
+        [ValidateSet('requested', 'failed', 'not-requested')]
+        [string]$InvokeResult = 'not-requested',
+        [int]$BlockingProcessCount = 0
+    )
+
+    return [pscustomobject]@{
+        Result = $Result
+        NativeQuitTargetFound = $TargetFound
+        NativeQuitMethod = $Method
+        NativeQuitInvokeResult = $InvokeResult
+        BlockingProcessCount = [Math]::Max(0, $BlockingProcessCount)
+    }
+}
+
+function Test-CodexNativeQuitAutomationName {
+    param([AllowNull()][string]$Name)
+
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    $normalized = ($Name -replace '&', '').Trim()
+    $normalized = ($normalized -replace '(?:\.{3})$', '').Trim()
+    $ellipsis = [string][char]0x2026
+    if ($normalized.EndsWith($ellipsis, [StringComparison]::Ordinal)) {
+        $normalized = $normalized.Substring(
+            0,
+            $normalized.Length - $ellipsis.Length
+        ).Trim()
+    }
+    $exitChinese = ([string][char]0x9000) + ([string][char]0x51FA)
+    $finishChinese = ([string][char]0x7ED3) + ([string][char]0x675F)
+    $closeApplicationChinese = ([string][char]0x5173) +
+        ([string][char]0x95ED) + ([string][char]0x5E94) +
+        ([string][char]0x7528)
+    return @(
+        'Exit', 'Quit', 'Exit Codex', 'Quit Codex',
+        'Exit ChatGPT', 'Quit ChatGPT', $exitChinese,
+        ($exitChinese + ' Codex'), ($exitChinese + ' ChatGPT'),
+        ($finishChinese + ' Codex'), ($finishChinese + ' ChatGPT'),
+        $closeApplicationChinese
+    ) -icontains $normalized
+}
+
+function Test-CodexNativeQuitAutomationId {
+    param([AllowNull()][string]$AutomationId)
+
+    if ([string]::IsNullOrWhiteSpace($AutomationId)) { return $false }
+    return @(
+        'quit', 'exit', 'app.quit', 'appQuit', 'menu.quit',
+        'menuQuit', 'file.exit', 'fileExit', 'file.quit',
+        'fileQuit', 'systemQuitMenuItem'
+    ) -icontains $AutomationId.Trim()
+}
+
+function Select-CodexNativeQuitAutomationElement {
+    param(
+        [AllowEmptyCollection()]
+        [object[]]$Elements,
+        [Parameter(Mandatory = $true)]
+        [int]$ExpectedProcessId
+    )
+
+    $eligible = @($Elements | Where-Object {
+        $null -ne $_ -and
+        [string]$_.ControlType -ceq 'MenuItem' -and
+        [int]$_.ProcessId -eq $ExpectedProcessId -and
+        [bool]$_.IsEnabled -and
+        [bool]$_.SupportsInvoke -and
+        [bool]$_.IsMenuDescendant
+    })
+    $byAutomationId = @($eligible | Where-Object {
+        Test-CodexNativeQuitAutomationId -AutomationId ([string]$_.AutomationId)
+    })
+    if ($byAutomationId.Count -eq 1) {
+        return [pscustomobject]@{
+            Element = $byAutomationId[0]
+            Method = 'AutomationId'
+        }
+    }
+    if ($byAutomationId.Count -gt 1) { return $null }
+
+    $byName = @($eligible | Where-Object {
+        Test-CodexNativeQuitAutomationName -Name ([string]$_.Name)
+    })
+    if ($byName.Count -eq 1) {
+        return [pscustomobject]@{
+            Element = $byName[0]
+            Method = 'Name'
+        }
+    }
+    return $null
+}
+
+function Get-CodexNativeQuitAutomationSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int64]$WindowHandle,
+        [Parameter(Mandatory = $true)]
+        [int]$ExpectedProcessId
+    )
+
+    try {
+        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+        Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+    }
+    catch {
+        return [pscustomobject]@{
+            Available = $false
+            Elements = @()
+            CleanupAction = $null
+        }
+    }
+
+    try {
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle(
+            [IntPtr]$WindowHandle
+        )
+        if ($null -eq $root -or
+            [int]$root.Current.ProcessId -ne $ExpectedProcessId) {
+            return [pscustomobject]@{
+                Available = $true
+                Elements = @()
+                CleanupAction = $null
+            }
+        }
+
+        $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+        $expandedPatterns = @()
+        $all = $root.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.Condition]::TrueCondition
+        )
+        for ($index = 0; $index -lt $all.Count; $index++) {
+            $element = $all.Item($index)
+            try {
+                if ($element.Current.ControlType -ne
+                    [System.Windows.Automation.ControlType]::MenuItem) {
+                    continue
+                }
+                $menuName = ([string]$element.Current.Name -replace '&', '').Trim()
+                $fileChinese = ([string][char]0x6587) +
+                    ([string][char]0x4EF6)
+                if (@('File', $fileChinese) -inotcontains $menuName) { continue }
+                $expandPattern = $null
+                if ($element.TryGetCurrentPattern(
+                    [System.Windows.Automation.ExpandCollapsePattern]::Pattern,
+                    [ref]$expandPattern
+                )) {
+                    $expandPattern.Expand()
+                    $expandedPatterns += $expandPattern
+                }
+            }
+            catch {
+                # Never use input simulation when the native menu cannot expand.
+            }
+        }
+
+        if ($expandedPatterns.Count -gt 0) {
+            $all = $root.FindAll(
+                [System.Windows.Automation.TreeScope]::Descendants,
+                [System.Windows.Automation.Condition]::TrueCondition
+            )
+        }
+
+        $normalized = @()
+        for ($index = 0; $index -lt $all.Count; $index++) {
+            $element = $all.Item($index)
+            try {
+                if ($element.Current.ControlType -ne
+                    [System.Windows.Automation.ControlType]::MenuItem) {
+                    continue
+                }
+                $hasMenuAncestor = $false
+                $ancestor = $walker.GetParent($element)
+                for ($depth = 0; $depth -lt 12 -and $null -ne $ancestor; $depth++) {
+                    $ancestorType = $ancestor.Current.ControlType
+                    if ($ancestorType -eq [System.Windows.Automation.ControlType]::Menu -or
+                        $ancestorType -eq [System.Windows.Automation.ControlType]::MenuBar) {
+                        $hasMenuAncestor = $true
+                        break
+                    }
+                    if ($ancestor -eq $root) { break }
+                    $ancestor = $walker.GetParent($ancestor)
+                }
+                $invokePattern = $null
+                $supportsInvoke = $element.TryGetCurrentPattern(
+                    [System.Windows.Automation.InvokePattern]::Pattern,
+                    [ref]$invokePattern
+                )
+                $normalized += [pscustomobject]@{
+                    Name = [string]$element.Current.Name
+                    AutomationId = [string]$element.Current.AutomationId
+                    ControlType = 'MenuItem'
+                    ProcessId = [int]$element.Current.ProcessId
+                    IsEnabled = [bool]$element.Current.IsEnabled
+                    SupportsInvoke = [bool]$supportsInvoke
+                    IsMenuDescendant = $hasMenuAncestor
+                    NativeElement = $element
+                }
+            }
+            catch {
+                # Stale or inaccessible elements are omitted without details.
+            }
+        }
+
+        $cleanup = {
+            foreach ($pattern in @($expandedPatterns)) {
+                try { $pattern.Collapse() }
+                catch { }
+            }
+        }.GetNewClosure()
+        return [pscustomobject]@{
+            Available = $true
+            Elements = @($normalized)
+            CleanupAction = $cleanup
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Available = $true
+            Elements = @()
+            CleanupAction = $null
+        }
+    }
+}
+
+function Invoke-CodexNativeQuitAutomation {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int64]$WindowHandle,
+        [Parameter(Mandatory = $true)]
+        [int]$ExpectedProcessId,
+        [scriptblock]$AutomationSnapshotProvider,
+        [scriptblock]$AutomationInvokeProvider
+    )
+
+    try {
+        $snapshot = if ($null -ne $AutomationSnapshotProvider) {
+            & $AutomationSnapshotProvider $WindowHandle $ExpectedProcessId
+        }
+        else {
+            Get-CodexNativeQuitAutomationSnapshot -WindowHandle $WindowHandle -ExpectedProcessId $ExpectedProcessId
+        }
+    }
+    catch {
+        return New-CodexNativeQuitResult -Result 'CODEX_NATIVE_QUIT_NOT_AVAILABLE' -TargetFound $true
+    }
+
+    if ($null -eq $snapshot -or -not [bool]$snapshot.Available) {
+        return New-CodexNativeQuitResult -Result 'CODEX_NATIVE_QUIT_NOT_AVAILABLE' -TargetFound $true
+    }
+    $cleanupProperty = $snapshot.PSObject.Properties['CleanupAction']
+    $cleanup = if ($null -eq $cleanupProperty) {
+        $null
+    }
+    else {
+        $cleanupProperty.Value
+    }
+    $selection = Select-CodexNativeQuitAutomationElement -Elements @($snapshot.Elements) -ExpectedProcessId $ExpectedProcessId
+    if ($null -eq $selection) {
+        if ($null -ne $cleanup) {
+            try { & $cleanup }
+            catch { }
+        }
+        return New-CodexNativeQuitResult -Result 'CODEX_NATIVE_QUIT_UI_NOT_FOUND' -TargetFound $true
+    }
+
+    try {
+        $invoked = if ($null -ne $AutomationInvokeProvider) {
+            [bool](& $AutomationInvokeProvider $selection.Element)
+        }
+        else {
+            $pattern = $null
+            $nativeElement = $selection.Element.NativeElement
+            if ($null -eq $nativeElement -or
+                -not $nativeElement.TryGetCurrentPattern(
+                    [System.Windows.Automation.InvokePattern]::Pattern,
+                    [ref]$pattern
+                )) {
+                $false
+            }
+            else {
+                $pattern.Invoke()
+                $true
+            }
+        }
+        if (-not $invoked) { throw 'CODEX_NATIVE_QUIT_INVOKE_FAILED' }
+        return New-CodexNativeQuitResult -Result 'CODEX_NATIVE_QUIT_REQUESTED' -TargetFound $true -Method ([string]$selection.Method) -InvokeResult 'requested'
+    }
+    catch {
+        if ($null -ne $cleanup) {
+            try { & $cleanup }
+            catch { }
+        }
+        return New-CodexNativeQuitResult -Result 'CODEX_NATIVE_QUIT_INVOKE_FAILED' -TargetFound $true -Method ([string]$selection.Method) -InvokeResult 'failed'
+    }
+}
+
+function Request-CodexDesktopNativeQuit {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [object[]]$ProcessData,
+        [Parameter()]
+        [int]$CallerProcessId = $PID,
+        [Parameter()]
+        [scriptblock]$WindowOwnerProcessIdProvider,
+        [Parameter()]
+        [scriptblock]$AutomationSnapshotProvider,
+        [Parameter()]
+        [scriptblock]$AutomationInvokeProvider
+    )
+
+    $useProvidedProcessData = $PSBoundParameters.ContainsKey('ProcessData')
+    if ($useProvidedProcessData) {
+        $snapshot = @($ProcessData)
+    }
+    else {
+        try { $snapshot = @(Get-ProcessInspectionSnapshot) }
+        catch {
+            return New-CodexNativeQuitResult -Result 'CODEX_PROCESS_STATE_UNKNOWN'
+        }
+    }
+
+    $processState = Test-CodexProcessesStopped -ProcessData $snapshot
+    $blockingCount = @($processState.BlockingProcesses).Count
+    if ($processState.ReasonCode -ceq 'CODEX_PROCESSES_STOPPED') {
+        return New-CodexNativeQuitResult -Result 'CODEX_ALREADY_STOPPED'
+    }
+    if ($processState.ReasonCode -cne 'CODEX_PROCESS_RUNNING') {
+        return New-CodexNativeQuitResult -Result 'CODEX_PROCESS_STATE_UNKNOWN' -BlockingProcessCount $blockingCount
+    }
+
+    $blockingIds = @{}
+    foreach ($blockingProcess in @($processState.BlockingProcesses)) {
+        $pidProperty = $blockingProcess.PSObject.Properties['PID']
+        if ($null -ne $pidProperty) {
+            $blockingIds[[string][int]$pidProperty.Value] = $true
+        }
+    }
+
+    foreach ($item in $snapshot) {
+        if ($null -eq $item) { continue }
+        $nameProperty = $item.PSObject.Properties['ProcessName']
+        $idProperty = $item.PSObject.Properties['Id']
+        $pathProperty = $item.PSObject.Properties['ExecutablePath']
+        $pathStatusProperty = $item.PSObject.Properties['PathReadStatus']
+        if ($null -eq $nameProperty -or $null -eq $idProperty -or
+            $null -eq $pathProperty -or $null -eq $pathStatusProperty) {
+            continue
+        }
+
+        $processId = [int]$idProperty.Value
+        if ($processId -le 0 -or $processId -eq $CallerProcessId -or
+            -not $blockingIds.ContainsKey([string]$processId) -or
+            (Get-NormalizedProcessName -Name ([string]$nameProperty.Value)) -ine 'ChatGPT' -or
+            [string]$pathStatusProperty.Value -cne 'Readable' -or
+            -not (Test-NativeCodexChatGptPath -Path ([string]$pathProperty.Value))) {
+            continue
+        }
+
+        $windowHandle = [int64]0
+        $ownerProcessId = 0
+        $liveProcess = $null
+        try {
+            if ($useProvidedProcessData) {
+                $handleProperty = $item.PSObject.Properties['MainWindowHandle']
+                if ($null -eq $handleProperty) { continue }
+                $windowHandle = [int64]$handleProperty.Value
+                if ($null -ne $WindowOwnerProcessIdProvider) {
+                    $ownerProcessId = [int](& $WindowOwnerProcessIdProvider $windowHandle $item)
+                }
+                else {
+                    $ownerProperty = $item.PSObject.Properties['MainWindowOwnerProcessId']
+                    if ($null -ne $ownerProperty) {
+                        $ownerProcessId = [int]$ownerProperty.Value
+                    }
+                }
+            }
+            else {
+                $liveProcess = Get-Process -Id $processId -ErrorAction Stop
+                $livePath = [string]$liveProcess.Path
+                $liveName = Get-NormalizedProcessName -Name ([string]$liveProcess.ProcessName)
+                $windowHandle = [int64]$liveProcess.MainWindowHandle
+                if ([int]$liveProcess.Id -eq $CallerProcessId -or
+                    $liveName -ine 'ChatGPT' -or
+                    -not (Test-NativeCodexChatGptPath -Path $livePath)) {
+                    continue
+                }
+                if ($null -ne $WindowOwnerProcessIdProvider) {
+                    $ownerProcessId = [int](& $WindowOwnerProcessIdProvider $windowHandle $liveProcess)
+                }
+                else {
+                    if ($null -eq ('QiehaoquNativeWindow' -as [type])) {
+                        Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class QiehaoquNativeWindow { [DllImport("user32.dll", SetLastError = true)] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId); }' -ErrorAction Stop
+                    }
+                    [uint32]$nativeOwnerProcessId = 0
+                    $null = [QiehaoquNativeWindow]::GetWindowThreadProcessId(
+                        [IntPtr]$windowHandle,
+                        [ref]$nativeOwnerProcessId
+                    )
+                    $ownerProcessId = [int]$nativeOwnerProcessId
+                }
+            }
+        }
+        catch {
+            $windowHandle = 0
+            $ownerProcessId = 0
+        }
+        finally {
+            if ($null -ne $liveProcess) { $liveProcess.Dispose() }
+        }
+
+        if ($windowHandle -eq 0 -or $ownerProcessId -ne $processId -or
+            $ownerProcessId -eq $CallerProcessId) {
+            continue
+        }
+
+        $automationResult = Invoke-CodexNativeQuitAutomation -WindowHandle $windowHandle -ExpectedProcessId $processId -AutomationSnapshotProvider $AutomationSnapshotProvider -AutomationInvokeProvider $AutomationInvokeProvider
+        $automationResult.BlockingProcessCount = $blockingCount
+        return $automationResult
+    }
+
+    return New-CodexNativeQuitResult -Result 'CODEX_NATIVE_QUIT_UI_NOT_FOUND' -BlockingProcessCount $blockingCount
+}
+
 function Assert-CodexNotRunning {
     param(
         [object[]]$ProcessData,
@@ -3177,6 +3609,7 @@ Export-ModuleMember -Function @(
     'Unprotect-CodexAuthBytes',
     'Test-CodexProcessesStopped',
     'Request-CodexDesktopClose',
+    'Request-CodexDesktopNativeQuit',
     'Save-CodexAccountSlot',
     'Save-CodexActiveProfile',
     'Get-CodexAccountSlot',

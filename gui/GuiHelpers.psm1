@@ -287,6 +287,10 @@ function Get-QiehaoSafeResultCode {
             'CODEX_PROCESS_RUNNING',
             'CODEX_PROCESS_STATE_UNKNOWN',
             'CODEX_CLOSE_REQUESTED',
+            'CODEX_NATIVE_QUIT_REQUESTED',
+            'CODEX_NATIVE_QUIT_NOT_AVAILABLE',
+            'CODEX_NATIVE_QUIT_UI_NOT_FOUND',
+            'CODEX_NATIVE_QUIT_INVOKE_FAILED',
             'CODEX_ALREADY_STOPPED',
             'OPERATION_BUSY',
             'SWITCH_FAILED_ROLLED_BACK',
@@ -358,7 +362,7 @@ function ConvertTo-QiehaoOperationResult {
             $message = '无法确认 Codex 进程状态，请重新检测。'
         }
         'CODEX_EXIT_TIMEOUT' {
-            $message = 'Codex 仍有后台进程，请从系统托盘退出后重试。'
+            $message = 'Codex 仍有后台进程，请使用 Codex 的退出功能或系统托盘退出后重试。'
         }
         'CODEX_EXIT_STATE_UNKNOWN' {
             $message = '无法确认 Codex 是否完全退出，本次未执行切换。'
@@ -616,7 +620,7 @@ function Invoke-QiehaoSwitchRequest {
         catch {
             $exitCode = 'CODEX_PROCESS_STATE_UNKNOWN'
         }
-        if ($exitCode -cne 'CODEX_CLOSE_REQUESTED' -and
+        if ($exitCode -cne 'CODEX_NATIVE_QUIT_REQUESTED' -and
             $exitCode -cne 'CODEX_ALREADY_STOPPED') {
             $mapped = ConvertTo-QiehaoOperationResult `
                 -ResultCode 'CODEX_PROCESS_STATE_UNKNOWN'
@@ -625,7 +629,7 @@ function Invoke-QiehaoSwitchRequest {
         }
         try {
             $postExitStatus = ConvertTo-QiehaoCodexStatus `
-                -ProcessState (& $WaitForStopProvider 10)
+                -ProcessState (& $WaitForStopProvider 8)
         }
         catch {
             $postExitStatus = '未知'
@@ -665,6 +669,16 @@ function ConvertTo-QiehaoExitMessage {
         }
         'CODEX_MAIN_WINDOW_NOT_FOUND' {
             return '未找到可安全关闭的 Codex 主窗口，请在系统托盘中选择退出，然后点击“刷新”。'
+        }
+        'CODEX_NATIVE_QUIT_REQUESTED' { return 'Codex 正在退出……' }
+        'CODEX_NATIVE_QUIT_NOT_AVAILABLE' {
+            return '当前系统无法使用 Codex 原生退出入口，请使用 Codex 的退出功能或系统托盘退出后重试。'
+        }
+        'CODEX_NATIVE_QUIT_UI_NOT_FOUND' {
+            return '未找到 Codex 原生退出菜单，请使用 Codex 的退出功能或系统托盘退出后重试。'
+        }
+        'CODEX_NATIVE_QUIT_INVOKE_FAILED' {
+            return 'Codex 原生退出命令未能执行，请使用 Codex 的退出功能或系统托盘退出后重试。'
         }
         default { return '无法安全请求 Codex 退出，请手动退出后重新检测。' }
     }
@@ -1033,7 +1047,12 @@ function New-QiehaoWaitTimerRuntime {
         [int]$IntervalMilliseconds = 500,
 
         [ValidateRange(0.001, 3600)]
-        [double]$TimeoutSeconds = 10
+        [double]$TimeoutSeconds = 10,
+
+        [ValidateRange(0, 3600)]
+        [double]$MilestoneSeconds = 0,
+
+        [scriptblock]$MilestoneAction
     )
 
     $timer = if ($null -ne $TimerFactory) {
@@ -1047,6 +1066,7 @@ function New-QiehaoWaitTimerRuntime {
     $state = [pscustomobject]@{
         StartedAt = [DateTime](& $ClockProvider)
         TimeoutSeconds = $TimeoutSeconds
+        MilestoneSeconds = $MilestoneSeconds
         Timer = $timer
         TickHandler = $null
         Active = $true
@@ -1058,6 +1078,11 @@ function New-QiehaoWaitTimerRuntime {
         CompletionFailed = $false
         Result = 'Pending'
         LastProbe = 'Pending'
+        ElapsedMilliseconds = 0
+        MilestoneReached = $false
+        PreviousBlockingProcessCount = $null
+        BlockingProcessCount = $null
+        BlockingProcessProgress = $false
     }
 
     $finalize = {
@@ -1096,8 +1121,20 @@ function New-QiehaoWaitTimerRuntime {
                 throw 'GUI_WAIT_TIMER_PROBE_INVALID'
             }
             $now = [DateTime](& $ClockProvider)
-            if (($now - $state.StartedAt).TotalSeconds -ge
-                $state.TimeoutSeconds) {
+            $elapsed = $now - $state.StartedAt
+            $state.ElapsedMilliseconds = [Math]::Max(
+                0,
+                [int][Math]::Floor($elapsed.TotalMilliseconds)
+            )
+            if (-not $state.MilestoneReached -and
+                $state.MilestoneSeconds -gt 0 -and
+                $elapsed.TotalSeconds -ge $state.MilestoneSeconds) {
+                $state.MilestoneReached = $true
+                if ($null -ne $MilestoneAction) {
+                    $null = & $MilestoneAction $state
+                }
+            }
+            if ($elapsed.TotalSeconds -ge $state.TimeoutSeconds) {
                 & $finalize 'TimedOut'
             }
         }
