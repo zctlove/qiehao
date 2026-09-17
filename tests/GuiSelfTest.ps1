@@ -366,6 +366,207 @@ Assert-GuiTest -Condition (
     $edgeState.ReasonCode -ceq 'CODEX_PROCESSES_STOPPED'
 ) -Code 'GUI_BROWSER_EXTENSION_ISOLATION_FAILED'
 
+# GUI account-management behavior uses only injected providers. No call below
+# resolves the real CODEX_HOME or reads a real profile artifact.
+$switchCalls = [pscustomobject]@{ Count = 0; Last = '' }
+$stoppedSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
+    -ActiveProfile 'Plus' `
+    -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESSES_STOPPED' } } `
+    -SwitchProvider ({
+        param($Name)
+        $switchCalls.Count++
+        $switchCalls.Last = $Name
+        [pscustomobject]@{ Result='SWITCH_SUCCESS' }
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    $stoppedSwitch.CoreCalled -and $stoppedSwitch.IsSuccess -and
+    $switchCalls.Count -eq 1 -and $switchCalls.Last -ceq 'Team'
+) -Code 'GUI_SWITCH_STOPPED_FAILED'
+
+$alreadyActiveSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Plus' `
+    -ActiveProfile 'Plus' `
+    -ProcessProvider { throw 'PROCESS_SHOULD_NOT_BE_CALLED' } `
+    -SwitchProvider ({ $switchCalls.Count++ }.GetNewClosure())
+Assert-GuiTest -Condition (
+    -not $alreadyActiveSwitch.CoreCalled -and
+    $alreadyActiveSwitch.ResultCode -ceq 'ALREADY_ACTIVE' -and
+    $switchCalls.Count -eq 1
+) -Code 'GUI_SWITCH_ACTIVE_WROTE_AUTH'
+
+$unknownSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
+    -ActiveProfile 'Plus' `
+    -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESS_STATE_UNKNOWN' } } `
+    -SwitchProvider ({ $switchCalls.Count++ }.GetNewClosure())
+Assert-GuiTest -Condition (
+    -not $unknownSwitch.CoreCalled -and
+    $unknownSwitch.ResultCode -ceq 'CODEX_PROCESS_STATE_UNKNOWN' -and
+    $switchCalls.Count -eq 1
+) -Code 'GUI_SWITCH_UNKNOWN_EXECUTED'
+
+$runningFlow = [pscustomobject]@{ Confirm=0; Exit=0; Wait=0; Switch=0 }
+$runningSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
+    -ActiveProfile 'Plus' `
+    -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESS_RUNNING' } } `
+    -ConfirmExitProvider ({ $runningFlow.Confirm++; $true }.GetNewClosure()) `
+    -ExitProvider ({
+        $runningFlow.Exit++
+        [pscustomobject]@{ Result='CODEX_CLOSE_REQUESTED' }
+    }.GetNewClosure()) `
+    -WaitForStopProvider ({
+        param($TimeoutSeconds)
+        $runningFlow.Wait++
+        [pscustomobject]@{ ReasonCode='CODEX_PROCESSES_STOPPED' }
+    }.GetNewClosure()) `
+    -SwitchProvider ({
+        param($Name)
+        $runningFlow.Switch++
+        [pscustomobject]@{ Result='SWITCH_SUCCESS' }
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    $runningSwitch.IsSuccess -and $runningFlow.Confirm -eq 1 -and
+    $runningFlow.Exit -eq 1 -and $runningFlow.Wait -eq 1 -and
+    $runningFlow.Switch -eq 1
+) -Code 'GUI_RUNNING_EXIT_AND_SWITCH_FAILED'
+
+$failedExitFlow = [pscustomobject]@{ Switch=0 }
+$failedExitSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
+    -ActiveProfile 'Plus' `
+    -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESS_RUNNING' } } `
+    -ConfirmExitProvider { $true } `
+    -ExitProvider { [pscustomobject]@{ Result='CODEX_CLOSE_REQUESTED' } } `
+    -WaitForStopProvider {
+        param($TimeoutSeconds)
+        [pscustomobject]@{ ReasonCode='CODEX_PROCESS_RUNNING' }
+    } `
+    -SwitchProvider ({ $failedExitFlow.Switch++ }.GetNewClosure())
+Assert-GuiTest -Condition (
+    -not $failedExitSwitch.CoreCalled -and
+    $failedExitSwitch.ResultCode -ceq 'CODEX_EXIT_TIMEOUT' -and
+    $failedExitFlow.Switch -eq 0
+) -Code 'GUI_FAILED_EXIT_STILL_SWITCHED'
+
+$unknownAfterExit = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
+    -ActiveProfile 'Plus' `
+    -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESS_RUNNING' } } `
+    -ConfirmExitProvider { $true } `
+    -ExitProvider { [pscustomobject]@{ Result='CODEX_CLOSE_REQUESTED' } } `
+    -WaitForStopProvider {
+        param($TimeoutSeconds)
+        [pscustomobject]@{ ReasonCode='CODEX_PROCESS_STATE_UNKNOWN' }
+    } -SwitchProvider { throw 'SWITCH_SHOULD_NOT_RUN' }
+Assert-GuiTest -Condition (
+    -not $unknownAfterExit.CoreCalled -and
+    $unknownAfterExit.ResultCode -ceq 'CODEX_EXIT_STATE_UNKNOWN'
+) -Code 'GUI_UNKNOWN_AFTER_EXIT_NOT_BLOCKED'
+
+$busyCalls = [pscustomobject]@{ Count=0 }
+$busySwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
+    -ActiveProfile 'Plus' `
+    -ProcessProvider { throw 'PROCESS_SHOULD_NOT_RUN' } `
+    -SwitchProvider ({ $busyCalls.Count++ }.GetNewClosure()) -IsBusy
+Assert-GuiTest -Condition (
+    -not $busySwitch.CoreCalled -and
+    $busySwitch.ResultCode -ceq 'OPERATION_BUSY' -and
+    $busyCalls.Count -eq 0
+) -Code 'GUI_BUSY_SWITCH_EXECUTED'
+
+$rollbackResult = ConvertTo-QiehaoOperationResult `
+    -ResultCode 'SWITCH_FAILED_ROLLED_BACK'
+$rollbackFailureResult = ConvertTo-QiehaoOperationResult `
+    -ResultCode 'SWITCH_ROLLBACK_FAILED'
+$identityResult = ConvertTo-QiehaoOperationResult `
+    -ResultCode 'ACTIVE_PROFILE_IDENTITY_MISMATCH'
+Assert-GuiTest -Condition (
+    $rollbackResult.Message -ceq '切换失败，已安全恢复原账号。' -and
+    $rollbackFailureResult.Severity -ceq 'Critical' -and
+    $rollbackFailureResult.Message -match '请不要启动 Codex' -and
+    $identityResult.Message -match '已阻止操作'
+) -Code 'GUI_SWITCH_RESULT_MAPPING_FAILED'
+
+$activeStoppedActions = Get-QiehaoActionState -SelectedProfile 'Plus' `
+    -ActiveProfile 'Plus' -CodexStatus '已退出'
+$otherRunningActions = Get-QiehaoActionState -SelectedProfile 'Team' `
+    -ActiveProfile 'Plus' -CodexStatus '运行中'
+$busyActions = Get-QiehaoActionState -SelectedProfile 'Team' `
+    -ActiveProfile 'Plus' -CodexStatus '已退出' -IsWriteOperationBusy
+Assert-GuiTest -Condition (
+    -not $activeStoppedActions.Switch -and
+    -not $activeStoppedActions.ContextSwitch -and
+    -not $activeStoppedActions.Delete -and
+    -not $activeStoppedActions.ContextDelete -and
+    $activeStoppedActions.Rename -and
+    $otherRunningActions.Switch -and
+    -not $otherRunningActions.Verify -and
+    $busyActions.Refresh -and
+    -not $busyActions.Switch -and -not $busyActions.Add -and
+    -not $busyActions.Rename -and -not $busyActions.Delete -and
+    -not $busyActions.ContextSwitch -and -not $busyActions.ContextRename
+) -Code 'GUI_ACTION_ENABLE_RULES_FAILED'
+
+$renameCalls = [pscustomobject]@{ Count=0; From=''; To='' }
+$renameSuccess = Invoke-QiehaoOperationProvider -Operation 'RENAME' `
+    -Provider ({
+        param($From, $To)
+        $renameCalls.Count++; $renameCalls.From=$From; $renameCalls.To=$To
+        [pscustomobject]@{ Result='PROFILE_RENAME_SUCCESS' }
+    }.GetNewClosure()) -ArgumentList @('Plus','Primary')
+$renameRollback = Invoke-QiehaoOperationProvider -Operation 'RENAME' `
+    -Provider { throw 'PROFILE_RENAME_FAILED_ROLLED_BACK' }
+Assert-GuiTest -Condition (
+    $renameSuccess.IsSuccess -and $renameSuccess.RefreshRequired -and
+    $renameCalls.Count -eq 1 -and $renameCalls.From -ceq 'Plus' -and
+    $renameCalls.To -ceq 'Primary' -and
+    $renameRollback.Message -match '已恢复原名称'
+) -Code 'GUI_RENAME_FLOW_FAILED'
+
+$deleteSuccess = Invoke-QiehaoOperationProvider -Operation 'DELETE' `
+    -Provider { param($Name) [pscustomobject]@{ Result='PROFILE_REMOVE_SUCCESS' } } `
+    -ArgumentList @('Team')
+Assert-GuiTest -Condition (
+    $deleteSuccess.IsSuccess -and $deleteSuccess.RefreshRequired
+) -Code 'GUI_DELETE_FLOW_FAILED'
+
+$addSuccess = Invoke-QiehaoOperationProvider -Operation 'ADD' `
+    -Provider { param($Name) [pscustomobject]@{ Result='PROFILE_ADD_SUCCESS' } } `
+    -ArgumentList @('Work')
+$addDuplicateName = Invoke-QiehaoOperationProvider -Operation 'ADD' `
+    -Provider { throw 'PROFILE_NAME_ALREADY_EXISTS' }
+$addDuplicateIdentity = Invoke-QiehaoOperationProvider -Operation 'ADD' `
+    -Provider { throw 'PROFILE_IDENTITY_ALREADY_EXISTS' }
+Assert-GuiTest -Condition (
+    $addSuccess.IsSuccess -and
+    $addDuplicateName.Message -ceq '该本地账号名称已经存在。' -and
+    $addDuplicateIdentity.Message -ceq '该账号已经存在于本地账号列表中。' -and
+    $addDuplicateIdentity.Message -notmatch '(?i)account_id|@'
+) -Code 'GUI_ADD_RESULT_MAPPING_FAILED'
+
+$searchRows = @(
+    [pscustomobject]@{ Name='Work-US' },
+    [pscustomobject]@{ Name='Work-JP' },
+    [pscustomobject]@{ Name='Team' },
+    [pscustomobject]@{ Name='Personal' }
+)
+$workSearch = @(Select-QiehaoProfileRows -Rows $searchRows -SearchText 'work')
+$substringSearch = @(Select-QiehaoProfileRows -Rows $searchRows -SearchText 'RK-J')
+$clearedSearch = @(Select-QiehaoProfileRows -Rows $searchRows -SearchText '')
+Assert-GuiTest -Condition (
+    $workSearch.Count -eq 2 -and
+    (@($workSearch.Name) -join '|') -ceq 'Work-US|Work-JP' -and
+    $substringSearch.Count -eq 1 -and $substringSearch[0].Name -ceq 'Work-JP' -and
+    $clearedSearch.Count -eq 4
+) -Code 'GUI_PROFILE_SEARCH_FAILED'
+
+$guardedRow = New-Object PSObject -Property @{ Name='SafeName' }
+$guardedRow | Add-Member -MemberType ScriptProperty -Name Auth -Value {
+    throw 'SEARCH_READ_AUTH'
+}
+$guardedRow | Add-Member -MemberType ScriptProperty -Name Identity -Value {
+    throw 'SEARCH_READ_IDENTITY'
+}
+$guardedSearch = @(Select-QiehaoProfileRows -Rows @($guardedRow) -SearchText 'safe')
+Assert-GuiTest -Condition ($guardedSearch.Count -eq 1) `
+    -Code 'GUI_SEARCH_READ_SENSITIVE_PROPERTY'
+
 $verifyCalls = [pscustomobject]@{ Count=0 }
 $noSelectionVerify = Invoke-QiehaoVerifyRequest -SelectedProfile $null `
     -CodexStatus '已退出' -VerifyProvider ({
@@ -552,19 +753,44 @@ Assert-GuiTest -Condition (
 ) -Code 'GUI_REFRESH_PROVIDER_COUNT_FAILED'
 
 $guiSource = [System.IO.File]::ReadAllText($guiScriptPath)
-foreach ($dangerousCommand in @(
-    'Save-CodexAccountSlot',
+foreach ($requiredBackendCommand in @(
+    'Save-CodexActiveProfile',
     'Switch-CodexAccountProfile',
     'Add-CodexProfile',
     'Remove-CodexProfile',
-    'Rename-CodexProfile',
-    'Initialize-CodexProfileIdentityMarker',
-    'Initialize-CodexActiveProfile'
+    'Rename-CodexProfile'
 )) {
     Assert-GuiTest -Condition (
-        $guiSource -notmatch ('(?i)\b' + [regex]::Escape($dangerousCommand) + '\b')
-    ) -Code ('GUI_DANGEROUS_COMMAND_PRESENT_' + $dangerousCommand)
+        $guiSource -match ('(?i)\b' + [regex]::Escape($requiredBackendCommand) + '\b')
+    ) -Code ('GUI_BACKEND_WIRING_MISSING_' + $requiredBackendCommand)
 }
+Assert-GuiTest -Condition (
+    $guiSource -notmatch '(?i)\bSave-CodexAccountSlot\b'
+) -Code 'GUI_ADD_USED_UNSAFE_GENERIC_SAVE'
+foreach ($requiredGuiHandler in @(
+    'Invoke-QiehaoSwitchSelectedProfile',
+    'Invoke-QiehaoRenameSelectedProfile',
+    'Invoke-QiehaoDeleteSelectedProfile',
+    'Invoke-QiehaoAddAccount',
+    'Add_MouseDoubleClick',
+    'Add_PreviewMouseRightButtonDown',
+    'Add_PreviewKeyDown',
+    'Get-QiehaoDataGridRowFromSource'
+)) {
+    Assert-GuiTest -Condition ($guiSource.Contains($requiredGuiHandler)) `
+        -Code ('GUI_HANDLER_WIRING_MISSING_' + $requiredGuiHandler)
+}
+Assert-GuiTest -Condition (
+    ([regex]::Matches($guiSource,
+        'Invoke-QiehaoSwitchSelectedProfile')).Count -ge 4 -and
+    $guiSource -match 'DataGridRow' -and
+    $guiSource -match 'OriginalSource' -and
+    $guiSource -match 'ConfirmDelete' -and
+    $guiSource -match '我已登录新账号并退出' -and
+    $guiSource -match '本工具不会自动操作 OAuth' -and
+    $guiSource -match 'liveStatus -ceq ''运行中''' -and
+    $guiSource -match 'liveStatus -cne ''已退出'''
+) -Code 'GUI_ACCOUNT_MANAGEMENT_GUARDS_MISSING'
 
 [xml]$xamlDocument = [System.IO.File]::ReadAllText($xamlPath)
 $xamlTextForEncoding = [System.IO.File]::ReadAllText($xamlPath)
@@ -575,6 +801,7 @@ foreach ($requiredChineseText in @(
     '网页 ChatGPT',
     '不受影响',
     '已保存账号',
+    '搜索账号',
     '切换账号',
     '正常退出 Codex'
 )) {
@@ -607,7 +834,7 @@ foreach ($buttonName in @(
     Assert-GuiTest -Condition (
         $null -ne $buttonNode -and
         $buttonNode.GetAttribute('IsEnabled') -ceq 'False'
-    ) -Code ('GUI_DANGEROUS_BUTTON_ENABLED_' + $buttonName)
+    ) -Code ('GUI_WRITE_BUTTON_INITIAL_STATE_INVALID_' + $buttonName)
 }
 $refreshNode = $xamlDocument.SelectSingleNode(
     "//*[@x:Name='RefreshButton']",
@@ -637,8 +864,9 @@ Assert-GuiTest -Condition (
     $guiSource -match 'Test-CodexProfile' -and
     $guiSource -match 'Request-CodexDesktopClose' -and
     $guiSource -match 'DispatcherTimer' -and
-    $guiSource -match 'Invoke-QiehaoReadOnlyRefresh'
-) -Code 'GUI_PHASE_TWO_WIRING_MISSING'
+    $guiSource -match 'Invoke-QiehaoReadOnlyRefresh' -and
+    $guiSource -match 'guiIsWriteOperationBusy'
+) -Code 'GUI_OPERATION_WIRING_MISSING'
 
 $mutexName = 'Qiehaoqu.CodexAccountSwitcher.Gui.v1.SelfTest.' + `
     [Guid]::NewGuid().ToString('N')
@@ -710,7 +938,38 @@ finally {
     ExitUnknownNoRequest = 'PASS'
     ExitBrowserIsolation = 'PASS'
     RefreshReadOnly = 'PASS'
-    DangerousButtonsDisabled = 'PASS'
+    ClickOnlySelects = 'PASS'
+    DoubleClickStoppedSwitch = 'PASS'
+    DoubleClickActiveNoWrite = 'PASS'
+    NonRowDoubleClickIgnored = 'PASS'
+    RunningExitThenSwitch = 'PASS'
+    ExitFailureBlocksSwitch = 'PASS'
+    UnknownBlocksSwitch = 'PASS'
+    SwitchSuccess = 'PASS'
+    SwitchRollbackSafe = 'PASS'
+    SwitchRollbackFailureCritical = 'PASS'
+    IdentityMismatchSafe = 'PASS'
+    OperationBusyRejected = 'PASS'
+    RightClickSelectsRow = 'PASS'
+    ActiveContextSwitchDisabled = 'PASS'
+    ActiveDeleteDisabled = 'PASS'
+    F2RenameWired = 'PASS'
+    RenameSuccess = 'PASS'
+    RenameActiveAllowed = 'PASS'
+    RenameRollbackSafe = 'PASS'
+    DeleteNonActiveSuccess = 'PASS'
+    DeleteConfirmationRequired = 'PASS'
+    AddSuccess = 'PASS'
+    AddDuplicateNameSafe = 'PASS'
+    AddDuplicateIdentitySafe = 'PASS'
+    AddRunningGuard = 'PASS'
+    AddUnknownGuard = 'PASS'
+    SearchCaseInsensitive = 'PASS'
+    SearchSubstring = 'PASS'
+    SearchClearRestoresAll = 'PASS'
+    SearchNameOnly = 'PASS'
+    BusyDisablesWriteEntrypoints = 'PASS'
+    WriteButtonsInitialStateSafe = 'PASS'
     SecondInstanceBlocked = 'PASS'
     RealAuthOrProfileRead = $false
 }

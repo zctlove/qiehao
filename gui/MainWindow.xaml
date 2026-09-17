@@ -4,7 +4,7 @@
     x:Name="MainWindow"
     Title="Codex 账号管理器"
     Width="760"
-    Height="560"
+    Height="640"
     MinWidth="680"
     MinHeight="500"
     WindowStartupLocation="CenterScreen"
@@ -132,15 +132,35 @@
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="8" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="8" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
                     <DockPanel Grid.Row="0">
                         <TextBlock FontSize="17" FontWeight="SemiBold" Text="已保存账号" />
                         <TextBlock x:Name="ProfileCountText" DockPanel.Dock="Right" Foreground="#FF6B7280" VerticalAlignment="Center" Text="0 个账号" />
                     </DockPanel>
+                    <Grid Grid.Row="2">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="260" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock
+                            Grid.Column="0"
+                            Margin="0,0,8,0"
+                            VerticalAlignment="Center"
+                            Text="搜索账号：" />
+                        <TextBox
+                            x:Name="ProfileSearchTextBox"
+                            Grid.Column="1"
+                            MinHeight="30"
+                            Padding="7,4"
+                            ToolTip="仅按本地 Profile 名称搜索，不访问凭证或身份内容" />
+                    </Grid>
                     <DataGrid
                         x:Name="ProfilesGrid"
-                        Grid.Row="2"
+                        Grid.Row="4"
                         AutoGenerateColumns="False"
                         CanUserAddRows="False"
                         CanUserDeleteRows="False"
@@ -155,8 +175,18 @@
                         BorderThickness="1"
                         RowHeaderWidth="0"
                         SelectionMode="Single"
+                        SelectionUnit="FullRow"
                         VerticalScrollBarVisibility="Auto"
                         HorizontalScrollBarVisibility="Auto">
+                        <DataGrid.ContextMenu>
+                            <ContextMenu x:Name="ProfileContextMenu">
+                                <MenuItem x:Name="ContextSwitchMenuItem" Header="切换到此账号" />
+                                <MenuItem x:Name="ContextVerifyMenuItem" Header="验证账号" />
+                                <Separator />
+                                <MenuItem x:Name="ContextRenameMenuItem" Header="重命名" />
+                                <MenuItem x:Name="ContextDeleteMenuItem" Header="删除账号" />
+                            </ContextMenu>
+                        </DataGrid.ContextMenu>
                         <DataGrid.RowStyle>
                             <Style TargetType="DataGridRow">
                                 <Setter Property="Foreground" Value="#FF202733" />
@@ -229,7 +259,7 @@
             </Border>
 
             <DockPanel Grid.Row="6">
-                <TextBlock x:Name="RefreshStatusText" Foreground="#FF374151" FontWeight="SemiBold" Text="只读界面阶段" />
+                <TextBlock x:Name="RefreshStatusText" Foreground="#FF374151" FontWeight="SemiBold" Text="准备就绪" />
                 <TextBlock DockPanel.Dock="Right" Foreground="#FF4B5563" Text="不访问浏览器或网页登录状态" />
             </DockPanel>
         </Grid>

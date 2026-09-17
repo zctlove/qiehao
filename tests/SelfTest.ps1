@@ -718,6 +718,60 @@ try {
         [Array]::Clear($identitySchemaAuthAfter, 0, $identitySchemaAuthAfter.Length)
     }
 
+    # Add-wizard safety: refresh the existing active slot only after the live
+    # auth identity matches its protected marker. All paths are fake fixtures.
+    $fixtureSaveActive = New-SwitchFixture `
+        -Root (Join-Path $workDirectoryFull 'save-active-refresh') -Module $module `
+        -ActiveBytes $fakeAInitial -TargetBytes $fakeB
+    [System.IO.File]::WriteAllBytes($fixtureSaveActive.AuthPath, $fakeARefreshed)
+    $saveActiveResult = & $module {
+        param($Fixture)
+        Invoke-SaveCodexActiveProfile -CodexHome $Fixture.CodexHome `
+            -ProfilesDirectory $Fixture.Profiles -StateDirectory $Fixture.State `
+            -ProcessData @() -UseProvidedProcessData
+    } $fixtureSaveActive
+    $savedActiveBytes = & $module {
+        param($Profiles)
+        Read-CodexAccountSlotBytes -Name 'A' -ProfilesDirectory $Profiles
+    } $fixtureSaveActive.Profiles
+    try {
+        if ($saveActiveResult.Result -cne 'ACTIVE_PROFILE_SAVE_SUCCESS' -or
+            -not (Test-ByteArrayEqual -Left $savedActiveBytes -Right $fakeARefreshed)) {
+            throw 'SELFTEST_SAVE_ACTIVE_REFRESH_FAILED'
+        }
+    }
+    finally {
+        [Array]::Clear($savedActiveBytes, 0, $savedActiveBytes.Length)
+    }
+
+    $fixtureSaveActiveDrift = New-SwitchFixture `
+        -Root (Join-Path $workDirectoryFull 'save-active-drift') -Module $module `
+        -ActiveBytes $fakeAInitial -TargetBytes $fakeB
+    [System.IO.File]::WriteAllBytes($fixtureSaveActiveDrift.AuthPath, $fakeC)
+    $saveActiveDriftCode = $null
+    try {
+        & $module {
+            param($Fixture)
+            $null = Invoke-SaveCodexActiveProfile -CodexHome $Fixture.CodexHome `
+                -ProfilesDirectory $Fixture.Profiles -StateDirectory $Fixture.State `
+                -ProcessData @() -UseProvidedProcessData
+        } $fixtureSaveActiveDrift
+    }
+    catch { $saveActiveDriftCode = $_.Exception.Message }
+    $unchangedActiveBytes = & $module {
+        param($Profiles)
+        Read-CodexAccountSlotBytes -Name 'A' -ProfilesDirectory $Profiles
+    } $fixtureSaveActiveDrift.Profiles
+    try {
+        if ($saveActiveDriftCode -cne 'ACTIVE_PROFILE_IDENTITY_MISMATCH' -or
+            -not (Test-ByteArrayEqual -Left $unchangedActiveBytes -Right $fakeAInitial)) {
+            throw 'SELFTEST_SAVE_ACTIVE_DRIFT_NOT_BLOCKED'
+        }
+    }
+    finally {
+        [Array]::Clear($unchangedActiveBytes, 0, $unchangedActiveBytes.Length)
+    }
+
     # Identity 5: marker payloads are deliberately profile-name independent.
     # A future transactional rename can move the three artifacts and update
     # active state without decrypting or rewriting authentication content.
@@ -1152,6 +1206,8 @@ try {
         MissingIdentityMarkerRejected = 'PASS'
         LegacyMarkerInitialization = 'PASS'
         UnknownIdentitySchemaRejected = 'PASS'
+        SaveActiveRefresh = 'PASS'
+        SaveActiveIdentityDriftRejected = 'PASS'
         RenamedProfileMarkerAssociated = 'PASS'
         WebSessionIsolation = 'PASS'
         AddThirdProfile = 'PASS'

@@ -2069,6 +2069,84 @@ function Save-CodexAccountSlot {
     } -ArgumentList @($Name, [bool]$Force)
 }
 
+function Invoke-SaveCodexActiveProfile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CodexHome,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProfilesDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StateDirectory,
+
+        [object[]]$ProcessData,
+
+        [switch]$UseProvidedProcessData
+    )
+
+    $authBytes = $null
+    $readBackBytes = $null
+    try {
+        Assert-CodexNotRunning -ProcessData $ProcessData `
+            -UseProvidedProcessData:$UseProvidedProcessData
+
+        $activeState = Read-ActiveProfileState -StateDirectory $StateDirectory
+        $activeName = [string]$activeState.ActiveProfile
+        $authPath = Join-Path -Path $CodexHome -ChildPath 'auth.json'
+        $authBytes = Read-SensitiveFileBytes -Path $authPath
+        $null = Test-CodexAuthBytes -Bytes $authBytes
+
+        # The Add Account wizard must preserve refreshed credentials before the
+        # user signs out. Never trust the active label alone: a manual identity
+        # change must fail closed instead of contaminating the existing slot.
+        $null = Assert-CodexAuthMatchesProfileIdentity -Name $activeName `
+            -AuthBytes $authBytes -ProfilesDirectory $ProfilesDirectory `
+            -MismatchCode 'ACTIVE_PROFILE_IDENTITY_MISMATCH'
+        $null = Write-CodexAccountSlotBytes -Name $activeName `
+            -AuthBytes $authBytes -ProfilesDirectory $ProfilesDirectory -Force
+
+        $readBackBytes = Read-CodexAccountSlotBytes -Name $activeName `
+            -ProfilesDirectory $ProfilesDirectory
+        if (-not (Test-ByteArraysEqual -Left $authBytes -Right $readBackBytes)) {
+            throw (New-SafeException -Code 'ACTIVE_PROFILE_SAVE_VERIFICATION_FAILED')
+        }
+        $null = Assert-CodexAuthMatchesProfileIdentity -Name $activeName `
+            -AuthBytes $readBackBytes -ProfilesDirectory $ProfilesDirectory `
+            -MismatchCode 'ACTIVE_PROFILE_IDENTITY_MISMATCH'
+
+        return [pscustomobject]@{
+            Result = 'ACTIVE_PROFILE_SAVE_SUCCESS'
+            Profile = $activeName
+        }
+    }
+    catch {
+        if ($_.Exception.Message -match '^[A-Z][A-Z0-9_]+$') {
+            throw
+        }
+        throw (New-SafeException -Code 'ACTIVE_PROFILE_SAVE_FAILED')
+    }
+    finally {
+        foreach ($buffer in @($authBytes, $readBackBytes)) {
+            if ($null -ne $buffer -and $buffer.Length -gt 0) {
+                [Array]::Clear($buffer, 0, $buffer.Length)
+            }
+        }
+    }
+}
+
+function Save-CodexActiveProfile {
+    [CmdletBinding()]
+    param()
+
+    return Invoke-WithCodexWriteLock -Operation {
+        $codexHome = Get-CodexHome
+        Invoke-SaveCodexActiveProfile -CodexHome $codexHome `
+            -ProfilesDirectory $script:ProfilesDirectory `
+            -StateDirectory $script:StateDirectory
+    }
+}
+
 function Invoke-InitializeCodexProfileIdentityMarker {
     param(
         [Parameter(Mandatory = $true)]
@@ -2928,6 +3006,7 @@ Export-ModuleMember -Function @(
     'Test-CodexProcessesStopped',
     'Request-CodexDesktopClose',
     'Save-CodexAccountSlot',
+    'Save-CodexActiveProfile',
     'Get-CodexAccountSlot',
     'Add-CodexProfile',
     'Remove-CodexProfile',

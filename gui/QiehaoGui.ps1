@@ -12,8 +12,7 @@ $coreModulePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 $helperModulePath = Join-Path -Path $guiRoot -ChildPath 'GuiHelpers.psm1'
 $xamlPath = Join-Path -Path $guiRoot -ChildPath 'MainWindow.xaml'
 $stateDirectory = Join-Path -Path $projectRoot -ChildPath 'state'
-$backgroundDirectory = Join-Path -Path $guiRoot `
-    -ChildPath 'assets\backgrounds'
+$backgroundDirectory = Join-Path -Path $guiRoot -ChildPath 'assets\backgrounds'
 $guiMutexName = 'Qiehaoqu.CodexAccountSwitcher.Gui.v1'
 
 Add-Type -AssemblyName PresentationCore -ErrorAction Stop
@@ -33,12 +32,8 @@ function Read-QiehaoMainWindow {
         return [Windows.Markup.XamlReader]::Load($xmlReader)
     }
     finally {
-        if ($null -ne $xmlReader) {
-            $xmlReader.Dispose()
-        }
-        if ($null -ne $stringReader) {
-            $stringReader.Dispose()
-        }
+        if ($null -ne $xmlReader) { $xmlReader.Dispose() }
+        if ($null -ne $stringReader) { $stringReader.Dispose() }
         $xamlText = $null
     }
 }
@@ -47,16 +42,28 @@ function Get-RequiredControl {
     param(
         [Parameter(Mandatory = $true)]
         [System.Windows.Window]$Window,
-
         [Parameter(Mandatory = $true)]
         [string]$Name
     )
 
     $control = $Window.FindName($Name)
-    if ($null -eq $control) {
-        throw ('GUI_CONTROL_NOT_FOUND_' + $Name)
-    }
+    if ($null -eq $control) { throw ('GUI_CONTROL_NOT_FOUND_' + $Name) }
     return $control
+}
+
+function Get-RequiredContextMenuItem {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Windows.Controls.ContextMenu]$ContextMenu,
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    foreach ($item in @($ContextMenu.Items)) {
+        if ($item -is [System.Windows.Controls.MenuItem] -and
+            [string]$item.Name -ceq $Name) { return $item }
+    }
+    throw ('GUI_CONTEXT_MENU_ITEM_NOT_FOUND_' + $Name)
 }
 
 $lease = $null
@@ -77,152 +84,319 @@ try {
 
     $window = Read-QiehaoMainWindow
     $profilesGrid = Get-RequiredControl -Window $window -Name 'ProfilesGrid'
+    $profileSearchTextBox = Get-RequiredControl -Window $window -Name 'ProfileSearchTextBox'
     $profileCountText = Get-RequiredControl -Window $window -Name 'ProfileCountText'
     $codexStatusText = Get-RequiredControl -Window $window -Name 'CodexStatusText'
     $activeProfileText = Get-RequiredControl -Window $window -Name 'ActiveProfileText'
     $identityStatusText = Get-RequiredControl -Window $window -Name 'IdentityStatusText'
     $webChatGPTText = Get-RequiredControl -Window $window -Name 'WebChatGPTText'
     $refreshStatusText = Get-RequiredControl -Window $window -Name 'RefreshStatusText'
-    $refreshButton = Get-RequiredControl -Window $window -Name 'RefreshButton'
+    $switchButton = Get-RequiredControl -Window $window -Name 'SwitchButton'
     $verifyButton = Get-RequiredControl -Window $window -Name 'VerifyButton'
+    $refreshButton = Get-RequiredControl -Window $window -Name 'RefreshButton'
+    $addButton = Get-RequiredControl -Window $window -Name 'AddButton'
+    $renameButton = Get-RequiredControl -Window $window -Name 'RenameButton'
+    $deleteButton = Get-RequiredControl -Window $window -Name 'DeleteButton'
     $exitCodexButton = Get-RequiredControl -Window $window -Name 'ExitCodexButton'
     $themeComboBox = Get-RequiredControl -Window $window -Name 'ThemeComboBox'
     $backgroundImage = Get-RequiredControl -Window $window -Name 'BackgroundImage'
     $backgroundOverlay = Get-RequiredControl -Window $window -Name 'BackgroundOverlay'
+    $profileContextMenu = $profilesGrid.ContextMenu
+    if ($null -eq $profileContextMenu) { throw 'GUI_CONTEXT_MENU_NOT_FOUND' }
+    $contextSwitchMenuItem = Get-RequiredContextMenuItem -ContextMenu $profileContextMenu -Name 'ContextSwitchMenuItem'
+    $contextVerifyMenuItem = Get-RequiredContextMenuItem -ContextMenu $profileContextMenu -Name 'ContextVerifyMenuItem'
+    $contextRenameMenuItem = Get-RequiredContextMenuItem -ContextMenu $profileContextMenu -Name 'ContextRenameMenuItem'
+    $contextDeleteMenuItem = Get-RequiredContextMenuItem -ContextMenu $profileContextMenu -Name 'ContextDeleteMenuItem'
+
     $script:guiCurrentCodexStatus = '未知'
+    $script:guiCurrentActiveProfile = '未初始化'
+    $script:guiIsWriteOperationBusy = $false
     $script:guiExitInProgress = $false
     $script:guiExitTimer = $null
+    $script:guiPendingAfterExit = $null
+    $script:guiAllProfileRows = @()
     $script:guiVerificationStates = @{}
 
+    function Get-QiehaoSelectedProfileName {
+        if ($null -eq $profilesGrid.SelectedItem) { return $null }
+        return [string]$profilesGrid.SelectedItem.Name
+    }
+
     function Update-QiehaoActionButtons {
-        $hasSelection = $null -ne $profilesGrid.SelectedItem
-        $verifyButton.IsEnabled = -not $script:guiExitInProgress -and
-            $hasSelection -and
-            $script:guiCurrentCodexStatus -ceq '已退出'
-        $exitCodexButton.IsEnabled = -not $script:guiExitInProgress -and
-            $script:guiCurrentCodexStatus -ceq '运行中'
-        $refreshButton.IsEnabled = -not $script:guiExitInProgress
+        $state = Get-QiehaoActionState `
+            -SelectedProfile (Get-QiehaoSelectedProfileName) `
+            -ActiveProfile $script:guiCurrentActiveProfile `
+            -CodexStatus $script:guiCurrentCodexStatus `
+            -IsWriteOperationBusy:$script:guiIsWriteOperationBusy `
+            -ExitInProgress:$script:guiExitInProgress
+        $refreshButton.IsEnabled = [bool]$state.Refresh
+        $switchButton.IsEnabled = [bool]$state.Switch
+        $verifyButton.IsEnabled = [bool]$state.Verify
+        $addButton.IsEnabled = [bool]$state.Add
+        $renameButton.IsEnabled = [bool]$state.Rename
+        $deleteButton.IsEnabled = [bool]$state.Delete
+        $exitCodexButton.IsEnabled = [bool]$state.ExitCodex
+        $contextSwitchMenuItem.IsEnabled = [bool]$state.ContextSwitch
+        $contextVerifyMenuItem.IsEnabled = [bool]$state.ContextVerify
+        $contextRenameMenuItem.IsEnabled = [bool]$state.ContextRename
+        $contextDeleteMenuItem.IsEnabled = [bool]$state.ContextDelete
+    }
+
+    function Set-QiehaoWriteBusy {
+        param(
+            [Parameter(Mandatory = $true)]
+            [bool]$Value,
+            [string]$StatusText = ''
+        )
+        $script:guiIsWriteOperationBusy = $Value
+        if (-not [string]::IsNullOrWhiteSpace($StatusText)) {
+            $refreshStatusText.Text = $StatusText
+        }
+        Update-QiehaoActionButtons
     }
 
     function Show-QiehaoSafeMessage {
         param(
             [Parameter(Mandatory = $true)]
-            [string]$Message
+            [string]$Message,
+            [ValidateSet('Information', 'Warning', 'Critical')]
+            [string]$Severity = 'Information'
         )
-
+        $icon = [System.Windows.MessageBoxImage]::Information
+        $title = 'Codex 账号管理器'
+        if ($Severity -ceq 'Warning') {
+            $icon = [System.Windows.MessageBoxImage]::Warning
+        }
+        elseif ($Severity -ceq 'Critical') {
+            $icon = [System.Windows.MessageBoxImage]::Error
+            $title = '严重安全错误 - Codex 账号管理器'
+        }
         [void][System.Windows.MessageBox]::Show(
-            $Message,
-            'Codex 账号管理器',
-            [System.Windows.MessageBoxButton]::OK,
-            [System.Windows.MessageBoxImage]::Information
+            $window, $Message, $title,
+            [System.Windows.MessageBoxButton]::OK, $icon
         )
+    }
+
+    function Show-QiehaoOperationResult {
+        param([Parameter(Mandatory = $true)][object]$Result)
+        if (-not [string]::IsNullOrWhiteSpace([string]$Result.Message)) {
+            Show-QiehaoSafeMessage -Message ([string]$Result.Message) `
+                -Severity ([string]$Result.Severity)
+        }
+    }
+
+    function Show-QiehaoChoiceDialog {
+        param(
+            [Parameter(Mandatory = $true)][string]$Title,
+            [Parameter(Mandatory = $true)][string]$Message,
+            [Parameter(Mandatory = $true)][string]$ConfirmText,
+            [string]$CancelText = '取消'
+        )
+        $dialog = New-Object System.Windows.Window
+        $dialog.Title = $Title
+        $dialog.Width = 500
+        $dialog.Height = 230
+        $dialog.MinWidth = 420
+        $dialog.MinHeight = 200
+        $dialog.WindowStartupLocation = 'CenterOwner'
+        $dialog.ResizeMode = 'NoResize'
+        $dialog.ShowInTaskbar = $false
+        $dialog.Owner = $window
+        $dialog.FontFamily = $window.FontFamily
+        $dialog.FontSize = $window.FontSize
+        $root = New-Object System.Windows.Controls.Grid
+        $root.Margin = 18
+        $root.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition))
+        $buttonRow = New-Object System.Windows.Controls.RowDefinition
+        $buttonRow.Height = 'Auto'
+        $root.RowDefinitions.Add($buttonRow)
+        $messageText = New-Object System.Windows.Controls.TextBlock
+        $messageText.Text = $Message
+        $messageText.TextWrapping = 'Wrap'
+        $messageText.VerticalAlignment = 'Center'
+        [System.Windows.Controls.Grid]::SetRow($messageText, 0)
+        $root.Children.Add($messageText) | Out-Null
+        $buttons = New-Object System.Windows.Controls.StackPanel
+        $buttons.Orientation = 'Horizontal'
+        $buttons.HorizontalAlignment = 'Right'
+        $buttons.Margin = '0,18,0,0'
+        [System.Windows.Controls.Grid]::SetRow($buttons, 1)
+        $confirmButton = New-Object System.Windows.Controls.Button
+        $confirmButton.Content = $ConfirmText
+        $confirmButton.MinWidth = 130
+        $confirmButton.MinHeight = 34
+        $confirmButton.Margin = '0,0,8,0'
+        $confirmButton.IsDefault = $true
+        $cancelButton = New-Object System.Windows.Controls.Button
+        $cancelButton.Content = $CancelText
+        $cancelButton.MinWidth = 90
+        $cancelButton.MinHeight = 34
+        $cancelButton.IsCancel = $true
+        $confirmButton.Add_Click({ $dialog.Tag = $true; $dialog.DialogResult = $true })
+        $cancelButton.Add_Click({ $dialog.Tag = $false; $dialog.DialogResult = $false })
+        $buttons.Children.Add($confirmButton) | Out-Null
+        $buttons.Children.Add($cancelButton) | Out-Null
+        $root.Children.Add($buttons) | Out-Null
+        $dialog.Tag = $false
+        $dialog.Content = $root
+        $null = $dialog.ShowDialog()
+        return [bool]$dialog.Tag
+    }
+
+    function Show-QiehaoNameDialog {
+        param(
+            [Parameter(Mandatory = $true)][string]$Title,
+            [Parameter(Mandatory = $true)][string]$Prompt,
+            [string]$CurrentName = ''
+        )
+        $dialog = New-Object System.Windows.Window
+        $dialog.Title = $Title
+        $dialog.Width = 440
+        $dialog.Height = 240
+        $dialog.WindowStartupLocation = 'CenterOwner'
+        $dialog.ResizeMode = 'NoResize'
+        $dialog.ShowInTaskbar = $false
+        $dialog.Owner = $window
+        $dialog.FontFamily = $window.FontFamily
+        $dialog.FontSize = $window.FontSize
+        $root = New-Object System.Windows.Controls.Grid
+        $root.Margin = 18
+        foreach ($height in @('Auto', 'Auto', 'Auto', '*', 'Auto')) {
+            $row = New-Object System.Windows.Controls.RowDefinition
+            $row.Height = $height
+            $root.RowDefinitions.Add($row)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($CurrentName)) {
+            $currentText = New-Object System.Windows.Controls.TextBlock
+            $currentText.Text = '当前名称：' + $CurrentName
+            $currentText.Margin = '0,0,0,12'
+            [System.Windows.Controls.Grid]::SetRow($currentText, 0)
+            $root.Children.Add($currentText) | Out-Null
+        }
+        $promptText = New-Object System.Windows.Controls.TextBlock
+        $promptText.Text = $Prompt
+        [System.Windows.Controls.Grid]::SetRow($promptText, 1)
+        $root.Children.Add($promptText) | Out-Null
+        $nameBox = New-Object System.Windows.Controls.TextBox
+        $nameBox.MaxLength = 64
+        $nameBox.MinHeight = 32
+        $nameBox.Margin = '0,6,0,0'
+        $nameBox.Padding = '7,4'
+        [System.Windows.Controls.Grid]::SetRow($nameBox, 2)
+        $root.Children.Add($nameBox) | Out-Null
+        $buttons = New-Object System.Windows.Controls.StackPanel
+        $buttons.Orientation = 'Horizontal'
+        $buttons.HorizontalAlignment = 'Right'
+        $buttons.Margin = '0,18,0,0'
+        [System.Windows.Controls.Grid]::SetRow($buttons, 4)
+        $okButton = New-Object System.Windows.Controls.Button
+        $okButton.Content = '确定'
+        $okButton.MinWidth = 90
+        $okButton.MinHeight = 34
+        $okButton.Margin = '0,0,8,0'
+        $okButton.IsDefault = $true
+        $cancelButton = New-Object System.Windows.Controls.Button
+        $cancelButton.Content = '取消'
+        $cancelButton.MinWidth = 90
+        $cancelButton.MinHeight = 34
+        $cancelButton.IsCancel = $true
+        $okButton.Add_Click({
+            $candidate = ([string]$nameBox.Text).Trim()
+            if ([string]::IsNullOrWhiteSpace($candidate)) {
+                [void][System.Windows.MessageBox]::Show(
+                    $dialog, '名称不能为空。', 'Codex 账号管理器',
+                    [System.Windows.MessageBoxButton]::OK,
+                    [System.Windows.MessageBoxImage]::Warning
+                )
+                return
+            }
+            $dialog.Tag = $candidate
+            $dialog.DialogResult = $true
+        })
+        $cancelButton.Add_Click({ $dialog.DialogResult = $false })
+        $buttons.Children.Add($okButton) | Out-Null
+        $buttons.Children.Add($cancelButton) | Out-Null
+        $root.Children.Add($buttons) | Out-Null
+        $dialog.Content = $root
+        $result = $dialog.ShowDialog()
+        if ($result -eq $true) { return [string]$dialog.Tag }
+        return $null
     }
 
     function Set-QiehaoTheme {
         param(
-            [Parameter(Mandatory = $true)]
-            [object]$Theme,
-
+            [Parameter(Mandatory = $true)][object]$Theme,
             [switch]$Persist
         )
-
         $imageResult = Get-QiehaoBackgroundImage -Theme $Theme `
             -BackgroundDirectory $backgroundDirectory
-        if ($imageResult.Loaded) {
-            $backgroundImage.Source = $imageResult.ImageSource
-        }
-        else {
-            $backgroundImage.Source = $null
-            $window.Background = '#FFF4F6F8'
-        }
-
-        $overlayColor = if ([string]$Theme.OverlayMode -ceq 'Dark') {
+        if ($imageResult.Loaded) { $backgroundImage.Source = $imageResult.ImageSource }
+        else { $backgroundImage.Source = $null; $window.Background = '#FFF4F6F8' }
+        $backgroundOverlay.Background = if ([string]$Theme.OverlayMode -ceq 'Dark') {
             '#A6212B3A'
-        }
-        else {
-            '#BFFFFFFF'
-        }
-        $backgroundOverlay.Background = $overlayColor
-
+        } else { '#BFFFFFFF' }
         if ($Persist) {
             try {
-                $null = Write-QiehaoUiPreferences `
-                    -StateDirectory $stateDirectory -Background $Theme.Id
+                $null = Write-QiehaoUiPreferences -StateDirectory $stateDirectory `
+                    -Background $Theme.Id
                 $refreshStatusText.Text = if ($imageResult.Loaded) {
                     '皮肤已切换并保存'
-                }
-                else {
-                    '背景图片不可用，已使用默认纯色并保存选择'
-                }
+                } else { '背景图片不可用，已使用默认纯色并保存选择' }
             }
-            catch {
-                $refreshStatusText.Text = if ($imageResult.Loaded) {
-                    '皮肤已切换，但偏好保存失败'
-                }
-                else {
-                    '背景图片不可用，已使用默认纯色'
-                }
-            }
+            catch { $refreshStatusText.Text = '皮肤已切换，但偏好保存失败' }
         }
         return $imageResult
     }
 
-    function Set-QiehaoSnapshot {
-        param(
-            [Parameter(Mandatory = $true)]
-            [object]$Snapshot
-        )
-
-        $selectedName = if ($null -eq $profilesGrid.SelectedItem) {
-            $null
+    function Update-QiehaoProfileFilter {
+        $selectedName = Get-QiehaoSelectedProfileName
+        $filteredRows = @(Select-QiehaoProfileRows -Rows $script:guiAllProfileRows `
+            -SearchText $profileSearchTextBox.Text)
+        $profilesGrid.ItemsSource = $filteredRows
+        $profilesGrid.SelectedItem = $null
+        if (-not [string]::IsNullOrWhiteSpace($selectedName)) {
+            $matching = @($filteredRows | Where-Object {
+                ([string]$_.Name).Equals($selectedName, [StringComparison]::OrdinalIgnoreCase)
+            } | Select-Object -First 1)
+            if ($matching.Count -eq 1) { $profilesGrid.SelectedItem = $matching[0] }
+        }
+        if ($filteredRows.Count -eq $script:guiAllProfileRows.Count) {
+            $profileCountText.Text = [string]$filteredRows.Count + ' 个账号'
         }
         else {
-            [string]$profilesGrid.SelectedItem.Name
+            $profileCountText.Text = [string]$filteredRows.Count + ' / ' +
+                [string]$script:guiAllProfileRows.Count + ' 个账号'
         }
+        Update-QiehaoActionButtons
+    }
+
+    function Set-QiehaoSnapshot {
+        param([Parameter(Mandatory = $true)][object]$Snapshot)
         $rows = @($Snapshot.Profiles)
         foreach ($row in $rows) {
             if ($script:guiVerificationStates.ContainsKey([string]$row.Name)) {
                 $row.Verification = [string]$script:guiVerificationStates[[string]$row.Name]
             }
         }
-        $profilesGrid.ItemsSource = $rows
-        if (-not [string]::IsNullOrWhiteSpace($selectedName)) {
-            $matchingRow = @($rows | Where-Object {
-                [string]$_.Name -ceq $selectedName
-            } | Select-Object -First 1)
-            if ($matchingRow.Count -eq 1) {
-                $profilesGrid.SelectedItem = $matchingRow[0]
-            }
-        }
-        $profileCountText.Text = if ($rows.Count -eq 1) {
-            '1 个账号'
-        }
-        else {
-            [string]$rows.Count + ' 个账号'
-        }
+        $script:guiAllProfileRows = @($rows)
         $codexStatusText.Text = [string]$Snapshot.CodexDesktop
         $script:guiCurrentCodexStatus = [string]$Snapshot.CodexDesktop
         $activeProfileText.Text = [string]$Snapshot.ActiveProfile
+        $script:guiCurrentActiveProfile = [string]$Snapshot.ActiveProfile
         $identityStatusText.Text = [string]$Snapshot.IdentityStatus
         $webChatGPTText.Text = [string]$Snapshot.WebChatGPT
-
-        switch ([string]$Snapshot.CodexDesktop) {
+        switch ($script:guiCurrentCodexStatus) {
             '运行中' { $codexStatusText.Foreground = '#FFB42318' }
             '已退出' { $codexStatusText.Foreground = '#FF167A45' }
             default { $codexStatusText.Foreground = '#FF5B6472' }
         }
-
         $refreshStatusText.Text = if (@($Snapshot.ReadOnlyErrors).Count -eq 0) {
-            '只读状态已刷新'
-        }
-        else {
-            '部分只读状态暂不可用'
-        }
-        Update-QiehaoActionButtons
+            '状态已刷新'
+        } else { '部分只读状态暂不可用' }
+        Update-QiehaoProfileFilter
     }
 
     function Invoke-QiehaoReadOnlyRefresh {
-        $refreshButton.IsEnabled = $false
         try {
             $snapshot = Get-QiehaoGuiSnapshot `
                 -ListProvider { @(Get-CodexAccountSlot) } `
@@ -233,141 +407,341 @@ try {
         catch {
             $refreshStatusText.Text = '只读刷新失败'
             $codexStatusText.Text = '未知'
+            $script:guiCurrentCodexStatus = '未知'
             $identityStatusText.Text = '未知'
-        }
-        finally {
             Update-QiehaoActionButtons
         }
     }
 
-    function Invoke-QiehaoVerifySelectedProfile {
-        $selectedProfile = if ($null -eq $profilesGrid.SelectedItem) {
-            $null
-        }
-        else {
-            [string]$profilesGrid.SelectedItem.Name
-        }
-
-        $liveCodexStatus = '未知'
+    function Get-QiehaoLiveCodexStatus {
         try {
-            $liveCodexStatus = ConvertTo-QiehaoCodexStatus `
-                -ProcessState (Test-CodexProcessesStopped)
+            return ConvertTo-QiehaoCodexStatus -ProcessState (Test-CodexProcessesStopped)
         }
-        catch {
-            $liveCodexStatus = '未知'
-        }
-
-        $verifyResult = Invoke-QiehaoVerifyRequest `
-            -SelectedProfile $selectedProfile `
-            -CodexStatus $liveCodexStatus `
-            -VerifyProvider {
-                param($ProfileName)
-                Test-CodexProfile -Name $ProfileName
-            }
-
-        if ($verifyResult.CoreCalled -and
-            -not [string]::IsNullOrWhiteSpace($selectedProfile)) {
-            $script:guiVerificationStates[$selectedProfile] = `
-                [string]$verifyResult.VerificationStatus
-        }
-
-        $displayMessage = [string]$verifyResult.Message
-        if ($verifyResult.ResultCode -ceq 'PROFILE_VERIFY_SUCCESS') {
-            $displayMessage = "账号：$selectedProfile`n状态：已验证"
-        }
-        Show-QiehaoSafeMessage -Message $displayMessage
-
-        if ($verifyResult.CoreCalled) {
-            Invoke-QiehaoReadOnlyRefresh
-        }
-        else {
-            Update-QiehaoActionButtons
-        }
+        catch { return '未知' }
     }
 
     function Complete-QiehaoExitWait {
         param(
             [Parameter(Mandatory = $true)]
-            [string]$Message
+            [ValidateSet('Stopped', 'Running', 'Unknown')]
+            [string]$FinalState
         )
-
         if ($null -ne $script:guiExitTimer) {
             $script:guiExitTimer.Stop()
             $script:guiExitTimer = $null
         }
         $script:guiExitInProgress = $false
-        Show-QiehaoSafeMessage -Message $Message
+        $pending = $script:guiPendingAfterExit
+        $script:guiPendingAfterExit = $null
+        if ($FinalState -ceq 'Stopped' -and $null -ne $pending) {
+            try { & $pending }
+            catch {
+                Set-QiehaoWriteBusy -Value $false
+                Show-QiehaoSafeMessage -Message '退出后的操作无法安全继续，已停止。' `
+                    -Severity Warning
+                Invoke-QiehaoReadOnlyRefresh
+            }
+            return
+        }
+        Set-QiehaoWriteBusy -Value $false
+        if ($FinalState -ceq 'Stopped') {
+            Show-QiehaoSafeMessage -Message 'Codex 已正常退出。'
+        }
+        elseif ($FinalState -ceq 'Running') {
+            Show-QiehaoSafeMessage `
+                -Message 'Codex 仍有后台进程，请从系统托盘退出后重试。' `
+                -Severity Warning
+        }
+        else {
+            Show-QiehaoSafeMessage `
+                -Message '无法确认 Codex 是否完全退出，本次未执行后续操作。' `
+                -Severity Warning
+        }
         Invoke-QiehaoReadOnlyRefresh
     }
 
     function Start-QiehaoExitWait {
+        param([AllowNull()][scriptblock]$OnStopped)
         $startedAt = [DateTime]::UtcNow
+        $script:guiPendingAfterExit = $OnStopped
         $script:guiExitInProgress = $true
-        Update-QiehaoActionButtons
-        $refreshStatusText.Text = '正在等待 Codex 正常退出…'
-        $script:guiExitTimer = New-Object `
-            System.Windows.Threading.DispatcherTimer
+        Set-QiehaoWriteBusy -Value $true -StatusText '正在等待 Codex 正常退出…'
+        $script:guiExitTimer = New-Object System.Windows.Threading.DispatcherTimer
         $script:guiExitTimer.Interval = [TimeSpan]::FromMilliseconds(500)
         $script:guiExitTimer.Add_Tick({
-            $status = '未知'
-            try {
-                $status = ConvertTo-QiehaoCodexStatus `
-                    -ProcessState (Test-CodexProcessesStopped)
-            }
-            catch {
-                $status = '未知'
-            }
-
+            $status = Get-QiehaoLiveCodexStatus
             if ($status -ceq '已退出') {
-                Complete-QiehaoExitWait -Message 'Codex 已正常退出。'
-                return
+                Complete-QiehaoExitWait -FinalState 'Stopped'; return
             }
             if ($status -ceq '未知') {
-                Complete-QiehaoExitWait `
-                    -Message '无法确认 Codex 是否完全退出，请勿执行账号切换。'
-                return
+                Complete-QiehaoExitWait -FinalState 'Unknown'; return
             }
             if (([DateTime]::UtcNow - $startedAt).TotalSeconds -ge 10) {
-                Complete-QiehaoExitWait `
-                    -Message 'Codex 仍有后台进程，请在系统托盘中选择退出，然后点击“刷新”。'
+                Complete-QiehaoExitWait -FinalState 'Running'
             }
         })
         $script:guiExitTimer.Start()
     }
 
-    function Invoke-QiehaoSafeCodexExit {
-        $result = $null
-        try {
-            $result = Request-CodexDesktopClose
-        }
+    function Request-QiehaoNormalExit {
+        param([AllowNull()][scriptblock]$OnStopped)
+        Set-QiehaoWriteBusy -Value $true -StatusText '正在请求 Codex 正常退出…'
+        try { $result = Request-CodexDesktopClose }
         catch {
+            Set-QiehaoWriteBusy -Value $false
             Show-QiehaoSafeMessage `
-                -Message '无法安全确认 Codex 进程，请手动退出后重新检测。'
+                -Message '无法安全确认 Codex 进程，请手动退出后重新检测。' `
+                -Severity Warning
             Invoke-QiehaoReadOnlyRefresh
             return
         }
-
-        if ($result.Result -ceq 'CODEX_CLOSE_REQUESTED') {
-            Start-QiehaoExitWait
+        if ([string]$result.Result -ceq 'CODEX_CLOSE_REQUESTED') {
+            Start-QiehaoExitWait -OnStopped $OnStopped
             return
         }
+        if ([string]$result.Result -ceq 'CODEX_ALREADY_STOPPED' -and
+            $null -ne $OnStopped) {
+            try { & $OnStopped }
+            catch {
+                Set-QiehaoWriteBusy -Value $false
+                Show-QiehaoSafeMessage -Message '操作无法安全继续，已停止。' `
+                    -Severity Warning
+            }
+            return
+        }
+        Set-QiehaoWriteBusy -Value $false
         Show-QiehaoSafeMessage `
-            -Message (ConvertTo-QiehaoExitMessage -ResultCode $result.Result)
+            -Message (ConvertTo-QiehaoExitMessage -ResultCode $result.Result) `
+            -Severity Warning
         Invoke-QiehaoReadOnlyRefresh
+    }
+
+    function Invoke-QiehaoSwitchCore {
+        param([Parameter(Mandatory = $true)][string]$TargetProfile)
+        try {
+            $result = Invoke-QiehaoOperationProvider -Operation 'SWITCH' `
+                -Provider { param($Name) Switch-CodexAccountProfile -Name $Name } `
+                -ArgumentList @($TargetProfile)
+            Show-QiehaoOperationResult -Result $result
+            if ($result.RefreshRequired) { Invoke-QiehaoReadOnlyRefresh }
+        }
+        finally { Set-QiehaoWriteBusy -Value $false }
+    }
+
+    function Invoke-QiehaoSwitchSelectedProfile {
+        $targetProfile = Get-QiehaoSelectedProfileName
+        if ($script:guiIsWriteOperationBusy) {
+            Show-QiehaoOperationResult -Result (
+                ConvertTo-QiehaoOperationResult -ResultCode 'OPERATION_BUSY'
+            )
+            return
+        }
+        if ([string]::IsNullOrWhiteSpace($targetProfile)) {
+            Show-QiehaoOperationResult -Result (
+                ConvertTo-QiehaoOperationResult -ResultCode 'PROFILE_SELECTION_REQUIRED'
+            )
+            return
+        }
+        if ($targetProfile.Equals($script:guiCurrentActiveProfile,
+            [StringComparison]::OrdinalIgnoreCase)) {
+            Show-QiehaoOperationResult -Result (
+                ConvertTo-QiehaoOperationResult -ResultCode 'ALREADY_ACTIVE'
+            )
+            return
+        }
+        $liveStatus = Get-QiehaoLiveCodexStatus
+        if ($liveStatus -ceq '未知') {
+            Show-QiehaoOperationResult -Result (
+                ConvertTo-QiehaoOperationResult -ResultCode 'CODEX_PROCESS_STATE_UNKNOWN'
+            )
+            return
+        }
+        if ($liveStatus -ceq '运行中') {
+            $confirmed = Show-QiehaoChoiceDialog -Title '切换账号' `
+                -Message 'Codex 正在运行，需要先正常退出后才能切换。' `
+                -ConfirmText '正常退出并切换'
+            if (-not $confirmed) { return }
+            $capturedTarget = $targetProfile
+            $continuation = {
+                Invoke-QiehaoSwitchCore -TargetProfile $capturedTarget
+            }.GetNewClosure()
+            Request-QiehaoNormalExit -OnStopped $continuation
+            return
+        }
+        Set-QiehaoWriteBusy -Value $true -StatusText '正在安全切换账号…'
+        Invoke-QiehaoSwitchCore -TargetProfile $targetProfile
+    }
+
+    function Invoke-QiehaoVerifySelectedProfile {
+        if ($script:guiIsWriteOperationBusy) {
+            Show-QiehaoOperationResult -Result (
+                ConvertTo-QiehaoOperationResult -ResultCode 'OPERATION_BUSY'
+            )
+            return
+        }
+        $selectedProfile = Get-QiehaoSelectedProfileName
+        Set-QiehaoWriteBusy -Value $true -StatusText '正在验证账号…'
+        try {
+            $verifyResult = Invoke-QiehaoVerifyRequest `
+                -SelectedProfile $selectedProfile `
+                -CodexStatus (Get-QiehaoLiveCodexStatus) `
+                -VerifyProvider { param($ProfileName) Test-CodexProfile -Name $ProfileName }
+            if ($verifyResult.CoreCalled -and
+                -not [string]::IsNullOrWhiteSpace($selectedProfile)) {
+                $script:guiVerificationStates[$selectedProfile] = `
+                    [string]$verifyResult.VerificationStatus
+            }
+            $message = [string]$verifyResult.Message
+            if ($verifyResult.ResultCode -ceq 'PROFILE_VERIFY_SUCCESS') {
+                $message = "账号：$selectedProfile`n状态：已验证"
+            }
+            Show-QiehaoSafeMessage -Message $message
+            if ($verifyResult.CoreCalled) { Invoke-QiehaoReadOnlyRefresh }
+        }
+        finally { Set-QiehaoWriteBusy -Value $false }
+    }
+
+    function Invoke-QiehaoRenameSelectedProfile {
+        if ($script:guiIsWriteOperationBusy) { return }
+        $oldName = Get-QiehaoSelectedProfileName
+        if ([string]::IsNullOrWhiteSpace($oldName)) { return }
+        $newName = Show-QiehaoNameDialog -Title '重命名账号' `
+            -Prompt '新名称：' -CurrentName $oldName
+        if ([string]::IsNullOrWhiteSpace($newName)) { return }
+        Set-QiehaoWriteBusy -Value $true -StatusText '正在重命名账号…'
+        try {
+            $result = Invoke-QiehaoOperationProvider -Operation 'RENAME' `
+                -Provider {
+                    param($From, $To)
+                    Rename-CodexProfile -OldName $From -NewName $To
+                } -ArgumentList @($oldName, $newName)
+            if ($result.IsSuccess -and
+                $script:guiVerificationStates.ContainsKey($oldName)) {
+                $script:guiVerificationStates[$newName] = $script:guiVerificationStates[$oldName]
+                $script:guiVerificationStates.Remove($oldName)
+            }
+            Show-QiehaoOperationResult -Result $result
+            if ($result.RefreshRequired) { Invoke-QiehaoReadOnlyRefresh }
+        }
+        finally { Set-QiehaoWriteBusy -Value $false }
+    }
+
+    function Invoke-QiehaoDeleteSelectedProfile {
+        if ($script:guiIsWriteOperationBusy) { return }
+        $profileName = Get-QiehaoSelectedProfileName
+        if ([string]::IsNullOrWhiteSpace($profileName) -or
+            $profileName.Equals($script:guiCurrentActiveProfile,
+                [StringComparison]::OrdinalIgnoreCase)) { return }
+        $message = "确定删除本地账号 '$profileName' 吗？`n`n" +
+            "这只会删除本工具保存的本地账号槽位，`n" +
+            '不会删除 OpenAI 账号、订阅或网页登录状态。'
+        if (-not (Show-QiehaoChoiceDialog -Title '删除本地账号' `
+            -Message $message -ConfirmText '删除')) { return }
+        Set-QiehaoWriteBusy -Value $true -StatusText '正在删除本地账号…'
+        try {
+            $result = Invoke-QiehaoOperationProvider -Operation 'DELETE' `
+                -Provider { param($Name) Remove-CodexProfile -Name $Name -ConfirmDelete } `
+                -ArgumentList @($profileName)
+            if ($result.IsSuccess) { $script:guiVerificationStates.Remove($profileName) }
+            Show-QiehaoOperationResult -Result $result
+            if ($result.RefreshRequired) { Invoke-QiehaoReadOnlyRefresh }
+        }
+        finally { Set-QiehaoWriteBusy -Value $false }
+    }
+
+    function Start-QiehaoAddWizard {
+        try {
+            $activeName = $null
+            try {
+                $activeState = Get-CodexActiveProfile
+                $activeName = [string]$activeState.ActiveProfile
+            }
+            catch {
+                if ([string]$_.Exception.Message -ceq 'ACTIVE_PROFILE_NOT_INITIALIZED') {
+                    $activeName = $null
+                }
+                else {
+                    Show-QiehaoSafeMessage `
+                        -Message '无法安全读取当前账号状态，已停止添加流程。' `
+                        -Severity Warning
+                    return
+                }
+            }
+            if (-not [string]::IsNullOrWhiteSpace($activeName)) {
+                $saveResult = Invoke-QiehaoOperationProvider `
+                    -Operation 'SAVE_ACTIVE' -Provider { Save-CodexActiveProfile }
+                if (-not $saveResult.IsSuccess) {
+                    Show-QiehaoOperationResult -Result $saveResult
+                    return
+                }
+            }
+            $instructions = "请打开 Codex Desktop，使用官方登录流程登录要添加的新账号。`n`n" +
+                "登录完成后，请正常退出 Codex，然后返回本窗口继续。`n`n" +
+                '本工具不会自动操作 OAuth、网页、Cookie 或账号选择。'
+            $ready = Show-QiehaoChoiceDialog -Title '添加账号' `
+                -Message $instructions -ConfirmText '我已登录新账号并退出'
+            if (-not $ready) { return }
+            $liveStatus = Get-QiehaoLiveCodexStatus
+            if ($liveStatus -ceq '运行中') {
+                Show-QiehaoSafeMessage -Message '请先正常退出 Codex，再采集新账号。' `
+                    -Severity Warning
+                return
+            }
+            if ($liveStatus -cne '已退出') {
+                Show-QiehaoSafeMessage `
+                    -Message '无法确认 Codex 是否完全退出，本次未添加账号。' `
+                    -Severity Warning
+                return
+            }
+            $profileName = Show-QiehaoNameDialog -Title '添加账号' -Prompt '本地名称：'
+            if ([string]::IsNullOrWhiteSpace($profileName)) { return }
+            $result = Invoke-QiehaoOperationProvider -Operation 'ADD' `
+                -Provider { param($Name) Add-CodexProfile -Name $Name } `
+                -ArgumentList @($profileName)
+            Show-QiehaoOperationResult -Result $result
+            if ($result.RefreshRequired) { Invoke-QiehaoReadOnlyRefresh }
+        }
+        finally { Set-QiehaoWriteBusy -Value $false }
+    }
+
+    function Invoke-QiehaoAddAccount {
+        if ($script:guiIsWriteOperationBusy) { return }
+        $liveStatus = Get-QiehaoLiveCodexStatus
+        if ($liveStatus -ceq '未知') {
+            Show-QiehaoSafeMessage -Message '无法确认 Codex 进程状态，请重新检测。' `
+                -Severity Warning
+            return
+        }
+        Set-QiehaoWriteBusy -Value $true -StatusText '准备添加账号…'
+        if ($liveStatus -ceq '运行中') {
+            $confirmed = Show-QiehaoChoiceDialog -Title '添加账号' `
+                -Message 'Codex 正在运行，需要先正常退出后才能保存当前状态。' `
+                -ConfirmText '正常退出并继续'
+            if (-not $confirmed) { Set-QiehaoWriteBusy -Value $false; return }
+            $continuation = { Start-QiehaoAddWizard }
+            Request-QiehaoNormalExit -OnStopped $continuation
+            return
+        }
+        Start-QiehaoAddWizard
+    }
+
+    function Get-QiehaoDataGridRowFromSource {
+        param([AllowNull()][object]$Source)
+        $current = $Source -as [System.Windows.DependencyObject]
+        while ($null -ne $current) {
+            if ($current -is [System.Windows.Controls.DataGridRow]) { return $current }
+            if ($current -eq $profilesGrid) { return $null }
+            try { $current = [System.Windows.Media.VisualTreeHelper]::GetParent($current) }
+            catch { return $null }
+        }
+        return $null
     }
 
     $themes = @(Get-QiehaoBackgroundThemes)
     $themeComboBox.ItemsSource = $themes
     $preference = if ($SelfTest) {
-        [pscustomobject]@{
-            Background = '01-blue-glass'
-            IsValid = $true
-            UsedDefault = $true
-        }
-    }
-    else {
-        Read-QiehaoUiPreferences -StateDirectory $stateDirectory
-    }
+        [pscustomobject]@{ Background = '01-blue-glass'; IsValid = $true; UsedDefault = $true }
+    } else { Read-QiehaoUiPreferences -StateDirectory $stateDirectory }
     $startupTheme = Get-QiehaoBackgroundTheme -Id $preference.Background
     if ($null -eq $startupTheme) {
         $startupTheme = Get-QiehaoBackgroundTheme -Id '01-blue-glass'
@@ -375,9 +749,8 @@ try {
     $themeComboBox.SelectedValue = $startupTheme.Id
     $startupImageResult = Set-QiehaoTheme -Theme $startupTheme
     $themeComboBox.Add_SelectionChanged({
-        $selectedTheme = $themeComboBox.SelectedItem
-        if ($null -ne $selectedTheme) {
-            $null = Set-QiehaoTheme -Theme $selectedTheme -Persist
+        if ($null -ne $themeComboBox.SelectedItem) {
+            $null = Set-QiehaoTheme -Theme $themeComboBox.SelectedItem -Persist
         }
     })
 
@@ -397,41 +770,67 @@ try {
         $snapshot = Get-QiehaoGuiSnapshot `
             -ListProvider { $fakeProfiles }.GetNewClosure() `
             -ActiveProvider { [pscustomobject]@{ ActiveProfile = 'Plus' } } `
-            -ProcessProvider {
-                [pscustomobject]@{ ReasonCode = 'CODEX_PROCESSES_STOPPED' }
-            }
+            -ProcessProvider { [pscustomobject]@{ ReasonCode = 'CODEX_PROCESSES_STOPPED' } }
         Set-QiehaoSnapshot -Snapshot $snapshot
-        if (@($profilesGrid.ItemsSource).Count -ne 2) {
-            throw 'GUI_SELFTEST_PROFILE_BINDING_FAILED'
+        if (@($profilesGrid.ItemsSource).Count -ne 2 -or
+            $codexStatusText.Text -cne '已退出' -or
+            $activeProfileText.Text -cne 'Plus' -or
+            $themes.Count -ne 5 -or -not $startupImageResult.Loaded) {
+            throw 'GUI_SELFTEST_BINDING_FAILED'
         }
-        if ($codexStatusText.Text -cne '已退出') {
-            throw 'GUI_SELFTEST_CODEX_STATUS_FAILED'
+        $profileSearchTextBox.Text = 'team'
+        Update-QiehaoProfileFilter
+        if (@($profilesGrid.ItemsSource).Count -ne 1 -or
+            [string]$profilesGrid.ItemsSource[0].Name -cne 'Team') {
+            throw 'GUI_SELFTEST_SEARCH_FAILED'
         }
-        if ($activeProfileText.Text -cne 'Plus') {
-            throw 'GUI_SELFTEST_ACTIVE_PROFILE_FAILED'
-        }
-        if ($themes.Count -ne 5) {
-            throw 'GUI_SELFTEST_THEME_COUNT_FAILED'
-        }
-        if (-not $startupImageResult.Loaded) {
-            throw ('GUI_SELFTEST_THEME_LOAD_FAILED_' + `
-                [string]$startupImageResult.FailureStage + '_' + `
-                [string]$startupImageResult.FailureType)
-        }
-        $alternateTheme = Get-QiehaoBackgroundTheme -Id '03-ice-glass'
-        $alternateImageResult = Set-QiehaoTheme -Theme $alternateTheme
-        if (-not $alternateImageResult.Loaded -or
-            $alternateImageResult.ThemeId -cne '03-ice-glass') {
-            throw 'GUI_SELFTEST_THEME_SWITCH_FAILED'
-        }
+        $alternateImageResult = Set-QiehaoTheme `
+            -Theme (Get-QiehaoBackgroundTheme -Id '03-ice-glass')
+        if (-not $alternateImageResult.Loaded) { throw 'GUI_SELFTEST_THEME_SWITCH_FAILED' }
         Write-Output 'GUI_SELFTEST_READY'
         return
     }
 
     $profilesGrid.Add_SelectionChanged({ Update-QiehaoActionButtons })
+    $profileSearchTextBox.Add_TextChanged({ Update-QiehaoProfileFilter })
     $refreshButton.Add_Click({ Invoke-QiehaoReadOnlyRefresh })
+    $switchButton.Add_Click({ Invoke-QiehaoSwitchSelectedProfile })
     $verifyButton.Add_Click({ Invoke-QiehaoVerifySelectedProfile })
-    $exitCodexButton.Add_Click({ Invoke-QiehaoSafeCodexExit })
+    $addButton.Add_Click({ Invoke-QiehaoAddAccount })
+    $renameButton.Add_Click({ Invoke-QiehaoRenameSelectedProfile })
+    $deleteButton.Add_Click({ Invoke-QiehaoDeleteSelectedProfile })
+    $exitCodexButton.Add_Click({
+        if (-not $script:guiIsWriteOperationBusy) { Request-QiehaoNormalExit }
+    })
+    $contextSwitchMenuItem.Add_Click({ Invoke-QiehaoSwitchSelectedProfile })
+    $contextVerifyMenuItem.Add_Click({ Invoke-QiehaoVerifySelectedProfile })
+    $contextRenameMenuItem.Add_Click({ Invoke-QiehaoRenameSelectedProfile })
+    $contextDeleteMenuItem.Add_Click({ Invoke-QiehaoDeleteSelectedProfile })
+    $profilesGrid.Add_PreviewMouseRightButtonDown({
+        param($sender, $eventArgs)
+        $row = Get-QiehaoDataGridRowFromSource -Source $eventArgs.OriginalSource
+        if ($null -eq $row) { $eventArgs.Handled = $true; return }
+        $profilesGrid.SelectedItem = $row.Item
+        Update-QiehaoActionButtons
+    })
+    $profilesGrid.Add_MouseDoubleClick({
+        param($sender, $eventArgs)
+        $row = Get-QiehaoDataGridRowFromSource -Source $eventArgs.OriginalSource
+        if ($null -eq $row) { return }
+        $profilesGrid.SelectedItem = $row.Item
+        Invoke-QiehaoSwitchSelectedProfile
+        $eventArgs.Handled = $true
+    })
+    $profilesGrid.Add_PreviewKeyDown({
+        param($sender, $eventArgs)
+        if ($eventArgs.Key -eq [System.Windows.Input.Key]::F2 -and
+            $null -ne $profilesGrid.SelectedItem -and
+            -not $script:guiIsWriteOperationBusy) {
+            $eventArgs.Handled = $true
+            Invoke-QiehaoRenameSelectedProfile
+        }
+    })
+    $profileContextMenu.Add_Opened({ Update-QiehaoActionButtons })
     $window.Add_Loaded({ Invoke-QiehaoReadOnlyRefresh })
     $window.Add_Closed({
         if ($null -ne $script:guiExitTimer) {
@@ -442,10 +841,6 @@ try {
     [void]$window.ShowDialog()
 }
 finally {
-    if ($null -ne $window -and $SelfTest) {
-        $window.Close()
-    }
-    if ($null -ne $lease) {
-        Exit-QiehaoGuiSingleInstance -Lease $lease
-    }
+    if ($null -ne $window -and $SelfTest) { $window.Close() }
+    if ($null -ne $lease) { Exit-QiehaoGuiSingleInstance -Lease $lease }
 }
