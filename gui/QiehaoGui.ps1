@@ -11,7 +11,7 @@ $projectRoot = Split-Path -Parent $guiRoot
 $coreModulePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 $helperModulePath = Join-Path -Path $guiRoot -ChildPath 'GuiHelpers.psm1'
 $xamlPath = Join-Path -Path $guiRoot -ChildPath 'MainWindow.xaml'
-$stateDirectory = Join-Path -Path $projectRoot -ChildPath 'state'
+$stateDirectory = $null
 $backgroundDirectory = Join-Path -Path $guiRoot -ChildPath 'assets\backgrounds'
 $guiMutexName = 'Qiehaoqu.CodexAccountSwitcher.Gui.v1'
 
@@ -21,6 +21,7 @@ Add-Type -AssemblyName WindowsBase -ErrorAction Stop
 
 Import-Module -Name $coreModulePath -Force -ErrorAction Stop
 Import-Module -Name $helperModulePath -Force -ErrorAction Stop
+$stateDirectory = Resolve-QiehaoProjectStateDirectory -GuiScriptRoot $guiRoot
 
 function Read-QiehaoMainWindow {
     $xamlText = [System.IO.File]::ReadAllText($xamlPath)
@@ -116,13 +117,18 @@ try {
     $script:guiIsWriteOperationBusy = $false
     $script:guiExitInProgress = $false
     $script:guiExitTimer = $null
+    $script:guiExitTimerTickHandler = $null
     $script:guiLaunchTimer = $null
+    $script:guiLaunchTimerTickHandler = $null
     $script:guiProcessTimer = $null
+    $script:guiProcessTimerTickHandler = $null
     $script:guiPendingAfterExit = $null
     $script:guiLaunchTarget = $null
     $script:guiLaunchSettings = $null
     $script:guiAllProfileRows = @()
     $script:guiVerificationStates = @{}
+    $script:guiIsClosing = $false
+    $script:guiThemePersistenceReady = $false
 
     function Get-QiehaoSelectedProfileName {
         if ($null -eq $profilesGrid.SelectedItem) { return $null }
@@ -518,18 +524,58 @@ try {
     }
 
     function Update-QiehaoProcessOnlyStatus {
+        if ($script:guiIsClosing) { return '未知' }
         $status = Get-QiehaoLiveCodexStatus
         Set-QiehaoCodexStatusVisual -Status $status
         Update-QiehaoActionButtons
         return $status
     }
 
+    function Stop-QiehaoProcessMonitor {
+        $null = Stop-QiehaoDispatcherTimer `
+            -Timer $script:guiProcessTimer `
+            -TickHandler $script:guiProcessTimerTickHandler
+        $script:guiProcessTimer = $null
+        $script:guiProcessTimerTickHandler = $null
+    }
+
     function Start-QiehaoProcessMonitor {
-        if ($null -ne $script:guiProcessTimer) { return }
+        if ($script:guiIsClosing -or $null -ne $script:guiProcessTimer) { return }
         $script:guiProcessTimer = New-Object System.Windows.Threading.DispatcherTimer
-        $script:guiProcessTimer.Interval = [TimeSpan]::FromSeconds(2)
-        $script:guiProcessTimer.Add_Tick({ $null = Update-QiehaoProcessOnlyStatus })
+        $script:guiProcessTimer.Interval = [TimeSpan]::FromSeconds(5)
+        $script:guiProcessTimerTickHandler = [System.EventHandler]{
+            param($sender, $eventArgs)
+            if (-not $script:guiIsClosing) {
+                $null = Update-QiehaoProcessOnlyStatus
+            }
+        }
+        $script:guiProcessTimer.Add_Tick($script:guiProcessTimerTickHandler)
         $script:guiProcessTimer.Start()
+    }
+
+    function Stop-QiehaoLaunchWaitTimer {
+        $null = Stop-QiehaoDispatcherTimer `
+            -Timer $script:guiLaunchTimer `
+            -TickHandler $script:guiLaunchTimerTickHandler
+        $script:guiLaunchTimer = $null
+        $script:guiLaunchTimerTickHandler = $null
+    }
+
+    function Stop-QiehaoExitWaitTimer {
+        $null = Stop-QiehaoDispatcherTimer `
+            -Timer $script:guiExitTimer `
+            -TickHandler $script:guiExitTimerTickHandler
+        $script:guiExitTimer = $null
+        $script:guiExitTimerTickHandler = $null
+    }
+
+    function Stop-QiehaoAllTimers {
+        $script:guiIsClosing = $true
+        Stop-QiehaoProcessMonitor
+        Stop-QiehaoLaunchWaitTimer
+        Stop-QiehaoExitWaitTimer
+        $script:guiPendingAfterExit = $null
+        $script:guiExitInProgress = $false
     }
 
     function Get-QiehaoInstalledCodexApplications {
@@ -734,10 +780,8 @@ try {
             [ValidateSet('Running', 'Stopped', 'Unknown')]
             [string]$FinalState
         )
-        if ($null -ne $script:guiLaunchTimer) {
-            $script:guiLaunchTimer.Stop()
-            $script:guiLaunchTimer = $null
-        }
+        Stop-QiehaoLaunchWaitTimer
+        if (-not $script:guiIsClosing) { Start-QiehaoProcessMonitor }
         Set-QiehaoWriteBusy -Value $false
         if ($FinalState -ceq 'Running') {
             $refreshStatusText.Text = 'Codex 已启动'
@@ -757,9 +801,16 @@ try {
 
     function Start-QiehaoLaunchWait {
         $startedAt = [DateTime]::UtcNow
+        Stop-QiehaoProcessMonitor
+        Stop-QiehaoLaunchWaitTimer
         $script:guiLaunchTimer = New-Object System.Windows.Threading.DispatcherTimer
         $script:guiLaunchTimer.Interval = [TimeSpan]::FromMilliseconds(500)
-        $script:guiLaunchTimer.Add_Tick({
+        $script:guiLaunchTimerTickHandler = [System.EventHandler]{
+            param($sender, $eventArgs)
+            if ($script:guiIsClosing) {
+                Stop-QiehaoLaunchWaitTimer
+                return
+            }
             $status = Get-QiehaoLiveCodexStatus
             if ($status -ceq '运行中') {
                 Complete-QiehaoLaunchWait -FinalState 'Running'; return
@@ -770,7 +821,8 @@ try {
             if (([DateTime]::UtcNow - $startedAt).TotalSeconds -ge 10) {
                 Complete-QiehaoLaunchWait -FinalState 'Stopped'
             }
-        })
+        }
+        $script:guiLaunchTimer.Add_Tick($script:guiLaunchTimerTickHandler)
         $script:guiLaunchTimer.Start()
     }
 
@@ -829,10 +881,8 @@ try {
             [ValidateSet('Stopped', 'Running', 'Unknown')]
             [string]$FinalState
         )
-        if ($null -ne $script:guiExitTimer) {
-            $script:guiExitTimer.Stop()
-            $script:guiExitTimer = $null
-        }
+        Stop-QiehaoExitWaitTimer
+        if (-not $script:guiIsClosing) { Start-QiehaoProcessMonitor }
         $script:guiExitInProgress = $false
         $pending = $script:guiPendingAfterExit
         $script:guiPendingAfterExit = $null
@@ -869,9 +919,16 @@ try {
         $script:guiPendingAfterExit = $OnStopped
         $script:guiExitInProgress = $true
         Set-QiehaoWriteBusy -Value $true -StatusText '正在等待 Codex 正常退出…'
+        Stop-QiehaoProcessMonitor
+        Stop-QiehaoExitWaitTimer
         $script:guiExitTimer = New-Object System.Windows.Threading.DispatcherTimer
         $script:guiExitTimer.Interval = [TimeSpan]::FromMilliseconds(500)
-        $script:guiExitTimer.Add_Tick({
+        $script:guiExitTimerTickHandler = [System.EventHandler]{
+            param($sender, $eventArgs)
+            if ($script:guiIsClosing) {
+                Stop-QiehaoExitWaitTimer
+                return
+            }
             $status = Get-QiehaoLiveCodexStatus
             if ($status -ceq '已退出') {
                 Complete-QiehaoExitWait -FinalState 'Stopped'; return
@@ -882,7 +939,8 @@ try {
             if (([DateTime]::UtcNow - $startedAt).TotalSeconds -ge 10) {
                 Complete-QiehaoExitWait -FinalState 'Running'
             }
-        })
+        }
+        $script:guiExitTimer.Add_Tick($script:guiExitTimerTickHandler)
         $script:guiExitTimer.Start()
     }
 
@@ -914,7 +972,7 @@ try {
             return
         }
         Set-QiehaoWriteBusy -Value $true -StatusText '正在请求 Codex 正常退出…'
-        try { $result = Request-CodexDesktopClose }
+        try { $result = Request-CodexDesktopClose -CallerProcessId $PID }
         catch {
             Set-QiehaoWriteBusy -Value $false
             Show-QiehaoSafeMessage `
@@ -1175,15 +1233,23 @@ try {
     $preference = if ($SelfTest) {
         [pscustomobject]@{ Background = '01-blue-glass'; IsValid = $true; UsedDefault = $true }
     } else { Read-QiehaoUiPreferences -StateDirectory $stateDirectory }
-    $startupTheme = Get-QiehaoBackgroundTheme -Id $preference.Background
-    if ($null -eq $startupTheme) {
-        $startupTheme = Get-QiehaoBackgroundTheme -Id '01-blue-glass'
+    $startupTheme = @($themes | Where-Object {
+        [string]$_.Id -ceq [string]$preference.Background
+    } | Select-Object -First 1)
+    if ($startupTheme.Count -ne 1) {
+        $startupTheme = @($themes | Where-Object {
+            [string]$_.Id -ceq '01-blue-glass'
+        } | Select-Object -First 1)
     }
-    $themeComboBox.SelectedValue = $startupTheme.Id
+    if ($startupTheme.Count -ne 1) { throw 'GUI_DEFAULT_THEME_NOT_FOUND' }
+    $startupTheme = $startupTheme[0]
+    $themeComboBox.SelectedItem = $startupTheme
     $startupImageResult = Set-QiehaoTheme -Theme $startupTheme
     $themeComboBox.Add_SelectionChanged({
-        if ($null -ne $themeComboBox.SelectedItem) {
-            $null = Set-QiehaoTheme -Theme $themeComboBox.SelectedItem -Persist
+        if ($script:guiThemePersistenceReady -and
+            $null -ne $themeComboBox.SelectedItem) {
+            $selectedTheme = $themeComboBox.SelectedItem
+            $null = Set-QiehaoTheme -Theme $selectedTheme -Persist
         }
     })
 
@@ -1256,7 +1322,16 @@ try {
     $launchCodexButton.Add_Click({ Invoke-QiehaoLaunchCodex })
     $launchSettingsButton.Add_Click({ Show-QiehaoLaunchSettingsDialog })
     $exitCodexButton.Add_Click({
-        if (-not $script:guiIsWriteOperationBusy) { Request-QiehaoNormalExit }
+        if (-not $script:guiIsWriteOperationBusy) {
+            $dispatch = Invoke-QiehaoExitButtonAction `
+                -ExitAction { Request-QiehaoNormalExit }
+            if ($dispatch.Failed) {
+                Set-QiehaoWriteBusy -Value $false
+                Show-QiehaoSafeMessage `
+                    -Message '正常退出请求失败，账号管理器将继续运行。' `
+                    -Severity Warning
+            }
+        }
     })
     $contextSwitchMenuItem.Add_Click({ Invoke-QiehaoSwitchSelectedProfile })
     $contextVerifyMenuItem.Add_Click({ Invoke-QiehaoVerifySelectedProfile })
@@ -1290,24 +1365,22 @@ try {
     $window.Add_Loaded({
         Invoke-QiehaoReadOnlyRefresh
         Start-QiehaoProcessMonitor
+        $script:guiThemePersistenceReady = $true
     })
+    $window.Add_Closing({ Stop-QiehaoAllTimers })
     $window.Add_Closed({
-        if ($null -ne $script:guiExitTimer) {
-            $script:guiExitTimer.Stop()
-            $script:guiExitTimer = $null
-        }
-        if ($null -ne $script:guiLaunchTimer) {
-            $script:guiLaunchTimer.Stop()
-            $script:guiLaunchTimer = $null
-        }
-        if ($null -ne $script:guiProcessTimer) {
-            $script:guiProcessTimer.Stop()
-            $script:guiProcessTimer = $null
-        }
+        Stop-QiehaoAllTimers
     })
     [void]$window.ShowDialog()
 }
 finally {
+    try {
+        if ($null -ne (Get-Command -Name Stop-QiehaoAllTimers `
+            -CommandType Function -ErrorAction SilentlyContinue)) {
+            Stop-QiehaoAllTimers
+        }
+    }
+    catch { }
     if ($null -ne $window -and $SelfTest) { $window.Close() }
     if ($null -ne $lease) { Exit-QiehaoGuiSingleInstance -Lease $lease }
 }

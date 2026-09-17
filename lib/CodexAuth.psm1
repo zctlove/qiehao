@@ -1080,7 +1080,13 @@ function Request-CodexDesktopClose {
         [object[]]$ProcessData,
 
         [Parameter()]
-        [scriptblock]$CloseMainWindowAction
+        [scriptblock]$CloseMainWindowAction,
+
+        [Parameter()]
+        [int]$CallerProcessId = $PID,
+
+        [Parameter()]
+        [scriptblock]$WindowOwnerProcessIdProvider
     )
 
     $useProvidedProcessData = $PSBoundParameters.ContainsKey('ProcessData')
@@ -1139,7 +1145,8 @@ function Request-CodexDesktopClose {
         }
 
         $processId = [int]$idProperty.Value
-        if (-not $blockingIds.ContainsKey([string]$processId) -or
+        if ($processId -le 0 -or $processId -eq $CallerProcessId -or
+            -not $blockingIds.ContainsKey([string]$processId) -or
             (Get-NormalizedProcessName -Name ([string]$nameProperty.Value)) `
                 -ine 'ChatGPT' -or
             [string]$pathStatusProperty.Value -cne 'Readable' -or
@@ -1153,6 +1160,29 @@ function Request-CodexDesktopClose {
             if ($null -eq $handleProperty -or
                 [int64]$handleProperty.Value -eq 0 -or
                 $null -eq $CloseMainWindowAction) {
+                continue
+            }
+            $windowHandle = [int64]$handleProperty.Value
+            $ownerProcessId = 0
+            try {
+                if ($null -ne $WindowOwnerProcessIdProvider) {
+                    $ownerProcessId = [int](& $WindowOwnerProcessIdProvider `
+                        $windowHandle $item)
+                }
+                else {
+                    $ownerProperty = $item.PSObject.Properties[
+                        'MainWindowOwnerProcessId'
+                    ]
+                    if ($null -ne $ownerProperty) {
+                        $ownerProcessId = [int]$ownerProperty.Value
+                    }
+                }
+            }
+            catch {
+                $ownerProcessId = 0
+            }
+            if ($ownerProcessId -ne $processId -or
+                $ownerProcessId -eq $CallerProcessId) {
                 continue
             }
             try {
@@ -1170,8 +1200,47 @@ function Request-CodexDesktopClose {
         try {
             $liveProcess = Get-Process -Id $processId -ErrorAction Stop
             $livePath = [string]$liveProcess.Path
-            if (-not (Test-NativeCodexChatGptPath -Path $livePath) -or
-                [int64]$liveProcess.MainWindowHandle -eq 0) {
+            $liveName = Get-NormalizedProcessName -Name ([string]$liveProcess.ProcessName)
+            $liveWindowHandle = [int64]$liveProcess.MainWindowHandle
+            if ([int]$liveProcess.Id -eq $CallerProcessId -or
+                $liveName -ine 'ChatGPT' -or
+                -not (Test-NativeCodexChatGptPath -Path $livePath) -or
+                $liveWindowHandle -eq 0) {
+                continue
+            }
+            $ownerProcessId = 0
+            try {
+                if ($null -ne $WindowOwnerProcessIdProvider) {
+                    $ownerProcessId = [int](& $WindowOwnerProcessIdProvider `
+                        $liveWindowHandle $liveProcess)
+                }
+                else {
+                    if ($null -eq ('QiehaoquNativeWindow' -as [type])) {
+                        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class QiehaoquNativeWindow {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint GetWindowThreadProcessId(
+        IntPtr hWnd,
+        out uint processId
+    );
+}
+'@ -ErrorAction Stop
+                    }
+                    [uint32]$nativeOwnerProcessId = 0
+                    $null = [QiehaoquNativeWindow]::GetWindowThreadProcessId(
+                        [IntPtr]$liveWindowHandle,
+                        [ref]$nativeOwnerProcessId
+                    )
+                    $ownerProcessId = [int]$nativeOwnerProcessId
+                }
+            }
+            catch {
+                $ownerProcessId = 0
+            }
+            if ($ownerProcessId -ne $processId -or
+                $ownerProcessId -eq $CallerProcessId) {
                 continue
             }
             if ([bool]$liveProcess.CloseMainWindow()) {

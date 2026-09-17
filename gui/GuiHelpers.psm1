@@ -935,6 +935,82 @@ function Get-QiehaoBackgroundTheme {
     return $null
 }
 
+function Resolve-QiehaoProjectStateDirectory {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$GuiScriptRoot
+    )
+
+    if ([string]::IsNullOrWhiteSpace($GuiScriptRoot) -or
+        -not [System.IO.Path]::IsPathRooted($GuiScriptRoot)) {
+        throw 'GUI_SCRIPT_ROOT_INVALID'
+    }
+    $guiRoot = [System.IO.Path]::GetFullPath($GuiScriptRoot).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $projectRoot = [System.IO.Path]::GetFullPath(
+        (Join-Path -Path $guiRoot -ChildPath '..')
+    )
+    return [System.IO.Path]::GetFullPath(
+        (Join-Path -Path $projectRoot -ChildPath 'state')
+    )
+}
+
+function Invoke-QiehaoExitButtonAction {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ExitAction
+    )
+
+    try {
+        $null = & $ExitAction
+        return [pscustomobject]@{
+            Completed = $true
+            Failed = $false
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Completed = $false
+            Failed = $true
+        }
+    }
+}
+
+function Stop-QiehaoDispatcherTimer {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$Timer,
+
+        [AllowNull()]
+        [object]$TickHandler
+    )
+
+    if ($null -eq $Timer) {
+        return [pscustomobject]@{ Stopped = $false; HandlerRemoved = $false }
+    }
+    $handlerRemoved = $false
+    if ($null -ne $TickHandler) {
+        try {
+            $Timer.Remove_Tick($TickHandler)
+            $handlerRemoved = $true
+        }
+        catch {
+            $handlerRemoved = $false
+        }
+    }
+    try { $Timer.Stop() }
+    catch { }
+    return [pscustomobject]@{
+        Stopped = $true
+        HandlerRemoved = $handlerRemoved
+    }
+}
+
 function Read-QiehaoUiPreferences {
     [CmdletBinding()]
     param(
@@ -1466,6 +1542,9 @@ Export-ModuleMember -Function @(
     'Get-QiehaoGuiSnapshot',
     'Get-QiehaoBackgroundThemes',
     'Get-QiehaoBackgroundTheme',
+    'Resolve-QiehaoProjectStateDirectory',
+    'Invoke-QiehaoExitButtonAction',
+    'Stop-QiehaoDispatcherTimer',
     'Read-QiehaoUiPreferences',
     'Write-QiehaoUiPreferences',
     'Test-QiehaoCustomLaunchPath',

@@ -241,13 +241,54 @@ try {
 
     $writtenPreference = Write-QiehaoUiPreferences `
         -StateDirectory $fakeStateDirectory -Background '03-ice-glass'
+    $writtenPreferenceBackground = [string]$writtenPreference.Background
+    $writtenPreference = $null
     $restoredPreference = Read-QiehaoUiPreferences `
         -StateDirectory $fakeStateDirectory
+    $preferenceData = ConvertFrom-Json -InputObject (
+        [System.IO.File]::ReadAllText((Join-Path $fakeStateDirectory `
+            'ui-preferences.json'))
+    )
     Assert-GuiTest -Condition (
-        $writtenPreference.Background -ceq '03-ice-glass' -and
+        $writtenPreferenceBackground -ceq '03-ice-glass' -and
         $restoredPreference.Background -ceq '03-ice-glass' -and
-        -not $restoredPreference.UsedDefault
+        -not $restoredPreference.UsedDefault -and
+        (@($preferenceData.PSObject.Properties.Name) -join '|') -ceq
+            'schema_version|background' -and
+        [int]$preferenceData.schema_version -eq 1
     ) -Code 'GUI_THEME_PREFERENCE_RESTORE_FAILED'
+
+    $fakeProjectRoot = Join-Path $themeTestRoot 'project-from-any-cwd'
+    $fakeGuiRoot = Join-Path $fakeProjectRoot 'gui'
+    $otherWorkingDirectory = Join-Path $themeTestRoot 'other-working-directory'
+    [System.IO.Directory]::CreateDirectory($fakeGuiRoot) | Out-Null
+    [System.IO.Directory]::CreateDirectory($otherWorkingDirectory) | Out-Null
+    $resolvedStateBefore = Resolve-QiehaoProjectStateDirectory `
+        -GuiScriptRoot $fakeGuiRoot
+    Push-Location -LiteralPath $otherWorkingDirectory
+    try {
+        $resolvedStateFromOtherCwd = Resolve-QiehaoProjectStateDirectory `
+            -GuiScriptRoot $fakeGuiRoot
+        $null = Write-QiehaoUiPreferences `
+            -StateDirectory $resolvedStateFromOtherCwd `
+            -Background '04-purple-tech'
+    }
+    finally { Pop-Location }
+    $newInstancePreference = Read-QiehaoUiPreferences `
+        -StateDirectory $resolvedStateBefore
+    $expectedFakeState = [System.IO.Path]::GetFullPath(
+        (Join-Path $fakeProjectRoot 'state')
+    )
+    $persistedPreferenceText = [System.IO.File]::ReadAllText(
+        (Join-Path $expectedFakeState 'ui-preferences.json')
+    )
+    Assert-GuiTest -Condition (
+        $resolvedStateBefore -ceq $expectedFakeState -and
+        $resolvedStateFromOtherCwd -ceq $expectedFakeState -and
+        $newInstancePreference.Background -ceq '04-purple-tech' -and
+        $persistedPreferenceText -notmatch
+            '(?i)account|auth|identity|token|email|credential|secret'
+    ) -Code 'GUI_THEME_PREFERENCE_CWD_OR_SCHEMA_FAILED'
 
     $preferencePath = Join-Path -Path $fakeStateDirectory `
         -ChildPath 'ui-preferences.json'
@@ -779,6 +820,7 @@ $runningCodexSnapshot = @(
         ExecutablePath=$nativeCodexPath; PathReadStatus='Readable'
         ParentProcessId=0; ParentReadStatus='Readable'
         MainWindowHandle=12345
+        MainWindowOwnerProcessId=9101
     }
 )
 $closeCapture = [pscustomobject]@{ Count=0; LastPid=0 }
@@ -795,6 +837,88 @@ Assert-GuiTest -Condition (
     $closeCapture.Count -eq 1 -and
     $closeCapture.LastPid -eq 9101
 ) -Code 'GUI_NORMAL_CLOSE_REQUEST_FAILED'
+
+$selfCloseCalls = [pscustomobject]@{ Count=0 }
+$selfWindowExit = Request-CodexDesktopClose -CallerProcessId 9401 `
+    -ProcessData @([pscustomobject]@{
+        ProcessName='ChatGPT.exe'; Id=9401
+        ExecutablePath=$nativeCodexPath; PathReadStatus='Readable'
+        ParentProcessId=0; ParentReadStatus='Readable'
+        MainWindowHandle=44001; MainWindowOwnerProcessId=9401
+    }) -CloseMainWindowAction ({
+        param($ProcessItem)
+        $selfCloseCalls.Count++
+        return $true
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    $selfWindowExit.Result -ceq 'CODEX_MAIN_WINDOW_NOT_FOUND' -and
+    -not $selfWindowExit.CloseRequested -and
+    $selfCloseCalls.Count -eq 0
+) -Code 'GUI_EXIT_SELF_WINDOW_NOT_EXCLUDED'
+
+$mixedCloseCapture = [pscustomobject]@{ Pids=@() }
+$mixedExit = Request-CodexDesktopClose -CallerProcessId 9599 `
+    -ProcessData @(
+        [pscustomobject]@{
+            ProcessName='ChatGPT.exe'; Id=9501
+            ExecutablePath=$nativeCodexPath; PathReadStatus='Readable'
+            ParentProcessId=0; ParentReadStatus='Readable'
+            MainWindowHandle=45001; MainWindowOwnerProcessId=9501
+        },
+        [pscustomobject]@{
+            ProcessName='ChatGPT.exe'; Id=9502
+            ExecutablePath=$nativeCodexPath; PathReadStatus='Readable'
+            ParentProcessId=0; ParentReadStatus='Readable'
+            MainWindowHandle=0; MainWindowOwnerProcessId=9502
+        },
+        [pscustomobject]@{
+            ProcessName='ChatGPT.exe'; Id=9503
+            ExecutablePath=$nativeCodexPath; PathReadStatus='Readable'
+            ParentProcessId=0; ParentReadStatus='Readable'
+            MainWindowHandle=45003; MainWindowOwnerProcessId=9999
+        },
+        [pscustomobject]@{
+            ProcessName='codex-code-mode-host.exe'; Id=9504
+            ExecutablePath='C:\Fake\.codex\bin\codex-code-mode-host.exe'
+            PathReadStatus='Readable'; ParentProcessId=0
+            ParentReadStatus='Readable'; MainWindowHandle=45004
+            MainWindowOwnerProcessId=9504
+        },
+        [pscustomobject]@{
+            ProcessName='ChatGPT.exe'; Id=9505
+            ExecutablePath='C:\Fake\Unrelated\ChatGPT.exe'
+            PathReadStatus='Readable'; ParentProcessId=0
+            ParentReadStatus='Readable'; MainWindowHandle=45005
+            MainWindowOwnerProcessId=9505
+        }
+    ) -CloseMainWindowAction ({
+        param($ProcessItem)
+        $mixedCloseCapture.Pids += [int]$ProcessItem.Id
+        return $true
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    $mixedExit.Result -ceq 'CODEX_CLOSE_REQUESTED' -and
+    $mixedExit.RequestedCount -eq 1 -and
+    @($mixedCloseCapture.Pids).Count -eq 1 -and
+    $mixedCloseCapture.Pids[0] -eq 9501
+) -Code 'GUI_EXIT_MIXED_PROCESS_TARGET_UNSAFE'
+
+$ownerProviderCalls = [pscustomobject]@{ Count=0 }
+$ownerProviderExit = Request-CodexDesktopClose -CallerProcessId 9699 `
+    -ProcessData @([pscustomobject]@{
+        ProcessName='ChatGPT.exe'; Id=9601
+        ExecutablePath=$nativeCodexPath; PathReadStatus='Readable'
+        ParentProcessId=0; ParentReadStatus='Readable'
+        MainWindowHandle=46001
+    }) -WindowOwnerProcessIdProvider ({
+        param($WindowHandle, $ProcessItem)
+        $ownerProviderCalls.Count++
+        return [int]$ProcessItem.Id
+    }.GetNewClosure()) -CloseMainWindowAction { param($ProcessItem) $true }
+Assert-GuiTest -Condition (
+    $ownerProviderExit.Result -ceq 'CODEX_CLOSE_REQUESTED' -and
+    $ownerProviderCalls.Count -eq 1
+) -Code 'GUI_EXIT_WINDOW_OWNER_PROVIDER_NOT_USED'
 
 $postCloseStopped = Test-CodexProcessesStopped -ProcessData @()
 Assert-GuiTest -Condition (
@@ -856,6 +980,33 @@ Assert-GuiTest -Condition (
     $browserCloseCalls.Count -eq 0
 ) -Code 'GUI_EXIT_BROWSER_PROCESS_TARGETED'
 
+$failedCloseCalls = [pscustomobject]@{ Count=0 }
+$failedNormalExit = Request-CodexDesktopClose -CallerProcessId 9799 `
+    -ProcessData @([pscustomobject]@{
+        ProcessName='ChatGPT.exe'; Id=9701
+        ExecutablePath=$nativeCodexPath; PathReadStatus='Readable'
+        ParentProcessId=0; ParentReadStatus='Readable'
+        MainWindowHandle=47001; MainWindowOwnerProcessId=9701
+    }) -CloseMainWindowAction ({
+        param($ProcessItem)
+        $failedCloseCalls.Count++
+        throw 'FAKE_CLOSE_FAILURE'
+    }.GetNewClosure())
+$fakeManagerState = [pscustomobject]@{ Alive=$true; Attempts=0 }
+$safeExitDispatch = Invoke-QiehaoExitButtonAction -ExitAction ({
+    $fakeManagerState.Attempts++
+    throw 'FAKE_EXIT_HANDLER_FAILURE'
+}.GetNewClosure())
+Assert-GuiTest -Condition (
+    $failedNormalExit.Result -ceq 'CODEX_MAIN_WINDOW_NOT_FOUND' -and
+    -not $failedNormalExit.CloseRequested -and
+    $failedCloseCalls.Count -eq 1 -and
+    $safeExitDispatch.Failed -and
+    -not $safeExitDispatch.Completed -and
+    $fakeManagerState.Alive -and
+    $fakeManagerState.Attempts -eq 1
+) -Code 'GUI_EXIT_FAILURE_CLOSED_MANAGER'
+
 $providerCalls = [pscustomobject]@{ List=0; Active=0; Process=0; Identity=0 }
 $null = Get-QiehaoGuiSnapshot `
     -ListProvider ({ $providerCalls.List++; @() }.GetNewClosure()) `
@@ -878,7 +1029,44 @@ Assert-GuiTest -Condition (
     $providerCalls.Identity -eq 1
 ) -Code 'GUI_REFRESH_PROVIDER_COUNT_FAILED'
 
+$timerProbe = [pscustomobject]@{ Count=0 }
+$fakeTimer = New-Object psobject
+$fakeTimer | Add-Member -NotePropertyName Active -NotePropertyValue $true
+$fakeTimer | Add-Member -NotePropertyName Handler -NotePropertyValue $null
+$fakeTimer | Add-Member -NotePropertyName StopCount -NotePropertyValue 0
+$fakeTimer | Add-Member -NotePropertyName RemoveCount -NotePropertyValue 0
+$fakeTimer | Add-Member -MemberType ScriptMethod -Name Stop -Value {
+    $this.StopCount++
+    $this.Active = $false
+}
+$fakeTimer | Add-Member -MemberType ScriptMethod -Name Remove_Tick -Value {
+    param($Handler)
+    $this.RemoveCount++
+    $this.Handler = $null
+}
+$fakeTimer | Add-Member -MemberType ScriptMethod -Name Fire -Value {
+    if ($this.Active -and $null -ne $this.Handler) {
+        $null = & $this.Handler $null $null
+    }
+}
+$fakeTickHandler = {
+    param($sender, $eventArgs)
+    $timerProbe.Count++
+}.GetNewClosure()
+$fakeTimer.Handler = $fakeTickHandler
+$fakeTimer.Fire()
+$timerStopResult = Stop-QiehaoDispatcherTimer `
+    -Timer $fakeTimer -TickHandler $fakeTickHandler
+$fakeTimer.Fire()
+Assert-GuiTest -Condition (
+    $timerStopResult.Stopped -and $timerStopResult.HandlerRemoved -and
+    $fakeTimer.StopCount -eq 1 -and $fakeTimer.RemoveCount -eq 1 -and
+    -not $fakeTimer.Active -and $null -eq $fakeTimer.Handler -and
+    $timerProbe.Count -eq 1
+) -Code 'GUI_TIMER_STOP_OR_HANDLER_DETACH_FAILED'
+
 $guiSource = [System.IO.File]::ReadAllText($guiScriptPath)
+$helperSource = [System.IO.File]::ReadAllText($helperModulePath)
 foreach ($requiredBackendCommand in @(
     'Save-CodexActiveProfile',
     'Switch-CodexAccountProfile',
@@ -1028,9 +1216,35 @@ $processMonitorSection = [regex]::Match(
 Assert-GuiTest -Condition (
     -not [string]::IsNullOrWhiteSpace($processMonitorSection) -and
     $processMonitorSection -match 'Get-QiehaoLiveCodexStatus' -and
-    $processMonitorSection -match 'FromSeconds\(2\)' -and
+    $processMonitorSection -match 'FromSeconds\(5\)' -and
+    $processMonitorSection -match 'Stop-QiehaoDispatcherTimer' -and
     $processMonitorSection -notmatch '(?i)auth|identity|Get-CodexActiveProfile|Get-CodexAccountSlot'
 ) -Code 'GUI_PROCESS_MONITOR_NOT_READONLY_ISOLATED'
+
+$timerWaitAndCloseSection = [regex]::Match(
+    $guiSource,
+    '(?s)function Complete-QiehaoLaunchWait\s*\{.*?\[void\]\$window\.ShowDialog\(\)'
+).Value
+Assert-GuiTest -Condition (
+    -not [string]::IsNullOrWhiteSpace($timerWaitAndCloseSection) -and
+    ([regex]::Matches($timerWaitAndCloseSection,
+        'FromMilliseconds\(500\)')).Count -eq 2 -and
+    $timerWaitAndCloseSection -match '\.TotalSeconds -ge 10' -and
+    $timerWaitAndCloseSection -match 'Stop-QiehaoProcessMonitor' -and
+    $timerWaitAndCloseSection -match 'Start-QiehaoProcessMonitor' -and
+    $timerWaitAndCloseSection -match 'Add_Closing\(\{ Stop-QiehaoAllTimers \}\)' -and
+    $timerWaitAndCloseSection -match 'Add_Closed\(' -and
+    $helperSource -match 'Remove_Tick' -and
+    $guiSource -match 'guiIsClosing'
+) -Code 'GUI_TIMER_WAIT_OR_WINDOW_CLOSE_CLEANUP_MISSING'
+
+Assert-GuiTest -Condition (
+    $guiSource -match 'Resolve-QiehaoProjectStateDirectory -GuiScriptRoot \$guiRoot' -and
+    $guiSource -match '\$themeComboBox\.SelectedItem = \$startupTheme' -and
+    $guiSource -match 'guiThemePersistenceReady' -and
+    $guiSource -match 'Request-CodexDesktopClose -CallerProcessId \$PID' -and
+    $guiSource -match 'Invoke-QiehaoExitButtonAction'
+) -Code 'GUI_PREF_OR_SAFE_EXIT_WIRING_MISSING'
 
 $launchSection = [regex]::Match(
     $guiSource,
@@ -1089,6 +1303,7 @@ finally {
     BackgroundUniformToFill = 'PASS'
     ImmediateThemeSwitch = 'PASS'
     ThemePreferenceRestore = 'PASS'
+    ThemePreferenceDifferentWorkingDirectory = 'PASS'
     CorruptPreferenceFallback = 'PASS'
     ChineseTextEncoding = 'PASS'
     DynamicPlusTeam = 'PASS'
@@ -1115,11 +1330,17 @@ finally {
     ExitStillRunningNoForce = 'PASS'
     ExitUnknownNoRequest = 'PASS'
     ExitBrowserIsolation = 'PASS'
+    ExitSelfWindowExcluded = 'PASS'
+    ExitMixedProcessesOfficialOnly = 'PASS'
+    ExitWindowOwnerValidated = 'PASS'
+    ExitFailureKeepsManagerRunning = 'PASS'
     LaunchAutoDetection = 'PASS'
     LaunchCustomSettings = 'PASS'
     LaunchProviderContract = 'PASS'
     LaunchExitButtonStates = 'PASS'
     ProcessMonitorReadOnly = 'PASS'
+    ProcessMonitorFiveSeconds = 'PASS'
+    WindowCloseStopsAllTimers = 'PASS'
     GlassCardsAndButtons = 'PASS'
     ActiveRowDistinct = 'PASS'
     RefreshReadOnly = 'PASS'

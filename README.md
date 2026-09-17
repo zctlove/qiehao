@@ -178,7 +178,7 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\gui\QiehaoGui.ps1
 GUI 提供统一的手动账号管理流程：
 
 - 顶部“当前身份确认”与列表“槽位验证”是两个不同概念。手动“刷新”在 Codex 已退出时调用只读 `Test-CodexActiveIdentity`，仅显示“已确认 / 不匹配 / 尚未初始化 / 无法确认”；Codex 运行中显示“待退出后确认”，不会读取当前 auth。
-- GUI 每 2 秒只检测一次 Codex 进程状态，用于及时更新“启动 Codex / 正常退出 Codex”按钮；这个计时器不读取 auth、identity marker、profile 列表或 active 状态。完整资料刷新只在启动、正常退出完成或用户点击“刷新”时执行。
+- GUI 每 5 秒只检测一次 Codex 进程状态，用于更新“启动 Codex / 正常退出 Codex”按钮；这个计时器不读取 auth、identity marker、profile 列表或 active 状态。用户点击启动、正常退出、切换或刷新时仍立即重新检测；启动/退出的最长 10 秒有界等待使用 500ms 局部检测。关闭账号管理器会停止计时器并解除 Tick handler，不留下后台探测。完整资料刷新只在启动、正常退出完成或用户点击“刷新”时执行。
 - “启动 Codex”默认从 AppX manifest 或 Windows Start Apps 自动检测官方 AUMID；特殊安装可在“启动设置”中选择现有的本地 `.exe`。自定义路径拒绝不存在文件、非 `.exe` 和 reparse point；启动不附加任意参数、不提权、不更改配置或环境变量。
 - “启动 Codex”只在进程闸确认“已退出”且启动目标有效时可用；“正常退出 Codex”只在确认“运行中”时可用。点击时还会即时复核，状态未知时两者都不会继续。
 - “切换账号”按钮、账号整行双击和右键“切换到此账号”共用同一个 Switch handler；当前账号不会调用后端。
