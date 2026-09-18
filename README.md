@@ -183,7 +183,9 @@ GUI 提供统一的手动账号管理流程：
 - “启动 Codex”只在进程闸确认“已退出”且启动目标有效时可用，点击时还会即时复核；状态未知时不会继续。账号管理器没有“退出 Codex”按钮，也不会操作 Codex 菜单、托盘或窗口。
 - 当前 Codex Desktop 的官方应用级 Quit 无法通过稳定、安全的 Windows automation API 可靠调用，因此本工具不会伪装成能够自动退出。用户需要使用 Codex 自己的“文件 → 退出”或系统托盘“Quit Codex”；不建议把任务管理器强杀作为正常工作流。
 - “切换账号”按钮、账号整行双击和右键“切换到此账号”共用同一个 Switch handler；当前账号不会调用后端。
-- Codex 正在运行时，Switch 会显示目标账号并提示用户从 Codex 菜单“文件 → 退出”或系统托盘选择“退出”。用户选择“开始等待并继续切换”后，GUI 只做 500ms 进程检测；检测到完全退出便立即清理等待状态并调用完整 Switch 后端，后端仍会二次执行进程门禁。状态变为未知、用户取消、窗口关闭或 90 秒超时都不会切换。关闭 Codex 主窗口不等于完全退出，本工具不会强杀。
+- 三个切号入口（按钮、整行双击、右键菜单）共用同一个 handler。用户只需点击一次；Codex 已退出时立即进入安全 Switch，Codex 正在运行时则自动打开只有“取消”的等待窗口，并在窗口 Loaded 后立即启动 500ms 进程检测。用户不需要再次点击“开始等待”“开始检测”或“继续切换”。检测到完全退出后，GUI 先清理 timer/handler/pending 状态，再调用完整 Switch 后端；后端仍会二次执行进程门禁。状态变为未知、用户取消、关闭等待窗口或 90 秒超时都不会切换。关闭 Codex 主窗口不等于完全退出，本工具不会强杀。
+- Switch 成功后等待窗口自动关闭，GUI 立即刷新当前账号与 Active 行，并显示“切换成功，当前账号：<目标账号>”；不会自动启动 Codex。
+- 五套主题分别提供 Running 红色警告、Unknown 警告、DataGrid 表头、Current“是/否”、Active 行、Selected 行和 Active+Selected 行语义色。Active 行不依赖鼠标选中，始终保持蓝色系高亮；普通 Selected 行使用不同样式。
 - 右键账号行会先选中该行；当前账号的 Switch/Delete 禁用，Rename 仍允许。
 - `F2`、按钮和右键重命名共用同一对话框与 handler；DataGrid 始终只读，不做内联编辑。
 - Delete 必须显示本地槽位删除说明并要求确认，后端调用始终显式传递 `-ConfirmDelete`。
@@ -328,7 +330,7 @@ mutex 名称包含当前 Windows 用户 SID，使同一用户在不同桌面/RDP
 - `init-active` 逐字节不一致时拒绝标记；
 - 删除测试产生的临时文件和目录。
 
-GUI 自测试在 Windows PowerShell 5.1 与 PowerShell 7 中解析 XAML，并通过 dependency injection 覆盖 Switch、人工退出等待后自动续切、取消/超时/Unknown/窗口关闭清理、受约束启动目标、刷新身份语义、进程计时器隔离、回滚结果映射、Add/Rename/Delete、整行双击、右键、F2、搜索、Busy 门禁、五套玻璃主题、活动账号行、中文编码以及 Chrome/Edge extension-host 隔离。它不会显示真实 GUI，不会启动或关闭真实 Codex，也不会调用真实账号后端。
+GUI 自测试在 Windows PowerShell 5.1 与 PowerShell 7 中解析 XAML，并通过 dependency injection 覆盖一次点击 Switch、等待窗自动检测与自动续切、取消/超时/Unknown/窗口关闭清理、成功后的 Refresh/Active 行迁移/目标账号提示、受约束启动目标、刷新身份语义、进程计时器隔离、回滚结果映射、Add/Rename/Delete、整行双击、右键、F2、搜索、Busy 门禁、五套主题的表头与警告色可读性、Active/Selected 四状态、中文编码以及 Chrome/Edge extension-host 隔离。它不会显示真实 GUI，不会启动或关闭真实 Codex，也不会调用真实账号后端。
 
 自测试不会调用 `Get-CodexHome`，不会读取真实 `.codex/auth.json`，不会写入正式 `profiles`，也不会改变 `CODEX_HOME`。
 

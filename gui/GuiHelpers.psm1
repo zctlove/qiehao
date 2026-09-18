@@ -522,8 +522,6 @@ function Get-QiehaoActionState {
 
         [switch]$IsWriteOperationBusy,
 
-        [switch]$ManualSwitchWaitInProgress,
-
         [bool]$LaunchTargetAvailable = $true
     )
 
@@ -539,7 +537,6 @@ function Get-QiehaoActionState {
         Add = $available
         Rename = $available -and $hasSelection
         Delete = $available -and $hasSelection -and -not $isActive
-        CancelSwitchWait = [bool]$ManualSwitchWaitInProgress
         ContextSwitch = $available -and $hasSelection -and -not $isActive
         ContextVerify = $available -and $hasSelection -and
             $CodexStatus -ceq '已退出'
@@ -565,8 +562,6 @@ function Invoke-QiehaoSwitchRequest {
 
         [Parameter(Mandatory = $true)]
         [scriptblock]$SwitchProvider,
-
-        [scriptblock]$ConfirmWaitProvider = { $false },
 
         [scriptblock]$ManualWaitProvider = { param($TargetProfile) $null },
 
@@ -604,12 +599,6 @@ function Invoke-QiehaoSwitchRequest {
     }
 
     if ($status -ceq '运行中') {
-        if (-not [bool](& $ConfirmWaitProvider)) {
-            $mapped = ConvertTo-QiehaoOperationResult -ResultCode 'OPERATION_CANCELLED'
-            $mapped | Add-Member -NotePropertyName CoreCalled -NotePropertyValue $false
-            $mapped | Add-Member -NotePropertyName WaitStarted -NotePropertyValue $false
-            return $mapped
-        }
         try {
             $null = & $ManualWaitProvider $SelectedProfile
         }
@@ -823,9 +812,17 @@ function Get-QiehaoBackgroundThemes {
             ButtonBottom = '#E02B4E73'
             ButtonHover = '#F06087B1'
             ButtonPressed = '#E023405F'
-            ActiveRowTint = '#B83B7F5C'
-            ActiveSelectedRowTint = '#D445956A'
-            SelectedRowTint = '#C54A69A0'
+            ActiveRowTint = '#C03B6FA8'
+            ActiveSelectedRowTint = '#E04487CF'
+            SelectedRowTint = '#B85C4B7D'
+            ActiveBorderTint = '#FF7EC8FF'
+            RunningWarningTint = '#FFFFAAA4'
+            UnknownWarningTint = '#FFFFB84D'
+            ColumnHeaderBackgroundTint = '#FF233B55'
+            ColumnHeaderForegroundTint = '#FFF7FBFF'
+            ColumnHeaderBorderTint = '#FF6F91B2'
+            CurrentYesTint = '#FF72E6A6'
+            CurrentNoTint = '#FFFFC56B'
             AccentTint = '#FF5CC58A'
             DangerTop = '#E08F5D68'
             DangerBottom = '#E06F3F4A'
@@ -845,9 +842,17 @@ function Get-QiehaoBackgroundThemes {
             ButtonBottom = '#E0464350'
             ButtonHover = '#F0837960'
             ButtonPressed = '#E0353442'
-            ActiveRowTint = '#B8467654'
-            ActiveSelectedRowTint = '#D4538B61'
-            SelectedRowTint = '#C56E624B'
+            ActiveRowTint = '#C035659A'
+            ActiveSelectedRowTint = '#E0437DB8'
+            SelectedRowTint = '#B86B5940'
+            ActiveBorderTint = '#FF79BFFF'
+            RunningWarningTint = '#FFFF7D73'
+            UnknownWarningTint = '#FFFFC857'
+            ColumnHeaderBackgroundTint = '#FF212736'
+            ColumnHeaderForegroundTint = '#FFFFF9EB'
+            ColumnHeaderBorderTint = '#FF8F8058'
+            CurrentYesTint = '#FF78D99A'
+            CurrentNoTint = '#FFFFC857'
             AccentTint = '#FFD2B86E'
             DangerTop = '#E0945F63'
             DangerBottom = '#E0713D45'
@@ -867,9 +872,17 @@ function Get-QiehaoBackgroundThemes {
             ButtonBottom = '#E8BFD9E7'
             ButtonHover = '#F4F5FCFF'
             ButtonPressed = '#E8ABCBD9'
-            ActiveRowTint = '#B8BFE8D1'
-            ActiveSelectedRowTint = '#D49DD9BA'
-            SelectedRowTint = '#C5BAD9EE'
+            ActiveRowTint = '#D6A9D6F5'
+            ActiveSelectedRowTint = '#E78BC3EC'
+            SelectedRowTint = '#C9D9C5EA'
+            ActiveBorderTint = '#FF246FAD'
+            RunningWarningTint = '#FFB42318'
+            UnknownWarningTint = '#FF9A5A00'
+            ColumnHeaderBackgroundTint = '#FFD6EAF5'
+            ColumnHeaderForegroundTint = '#FF173047'
+            ColumnHeaderBorderTint = '#FF799DB5'
+            CurrentYesTint = '#FF146C43'
+            CurrentNoTint = '#FF9C3B2F'
             AccentTint = '#FF27845A'
             DangerTop = '#E8F2D4D8'
             DangerBottom = '#E8DDAEB5'
@@ -889,9 +902,17 @@ function Get-QiehaoBackgroundThemes {
             ButtonBottom = '#E0473B75'
             ButtonHover = '#F0846DB4'
             ButtonPressed = '#E0382E5E'
-            ActiveRowTint = '#B8407B60'
-            ActiveSelectedRowTint = '#D44E9270'
-            SelectedRowTint = '#C5675798'
+            ActiveRowTint = '#C03E70B2'
+            ActiveSelectedRowTint = '#E0528DD2'
+            SelectedRowTint = '#BF6B4F91'
+            ActiveBorderTint = '#FF91C8FF'
+            RunningWarningTint = '#FFFF7F91'
+            UnknownWarningTint = '#FFFFC56B'
+            ColumnHeaderBackgroundTint = '#FF2E254B'
+            ColumnHeaderForegroundTint = '#FFF8F3FF'
+            ColumnHeaderBorderTint = '#FF9C83C9'
+            CurrentYesTint = '#FF7BE0A7'
+            CurrentNoTint = '#FFFFC56B'
             AccentTint = '#FF70D09B'
             DangerTop = '#E095627C'
             DangerBottom = '#E070405D'
@@ -911,9 +932,17 @@ function Get-QiehaoBackgroundThemes {
             ButtonBottom = '#EACBD9E1'
             ButtonHover = '#F8FFFFFF'
             ButtonPressed = '#EAB7C9D3'
-            ActiveRowTint = '#B8C4E8D3'
-            ActiveSelectedRowTint = '#D4A5DDBD'
-            SelectedRowTint = '#C5C1D7E5'
+            ActiveRowTint = '#D6B2D9F3'
+            ActiveSelectedRowTint = '#E794C7E8'
+            SelectedRowTint = '#C9DCC8E5'
+            ActiveBorderTint = '#FF286FA7'
+            RunningWarningTint = '#FFB3261E'
+            UnknownWarningTint = '#FF925B00'
+            ColumnHeaderBackgroundTint = '#FFDCE8EF'
+            ColumnHeaderForegroundTint = '#FF1F2E3A'
+            ColumnHeaderBorderTint = '#FF8399A8'
+            CurrentYesTint = '#FF176C45'
+            CurrentNoTint = '#FF96392F'
             AccentTint = '#FF2F865E'
             DangerTop = '#EAF2D9DC'
             DangerBottom = '#EADDB5BB'

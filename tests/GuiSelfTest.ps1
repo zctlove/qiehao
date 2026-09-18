@@ -27,6 +27,41 @@ function Assert-GuiTest {
     }
 }
 
+function Get-TestColorLuminance {
+    param([Parameter(Mandatory = $true)][string]$Color)
+    if ($Color -notmatch '^#[0-9A-Fa-f]{8}$') {
+        throw 'GUI_TEST_COLOR_FORMAT_INVALID'
+    }
+    $channels = @(
+        [Convert]::ToInt32($Color.Substring(3, 2), 16),
+        [Convert]::ToInt32($Color.Substring(5, 2), 16),
+        [Convert]::ToInt32($Color.Substring(7, 2), 16)
+    )
+    $linear = @()
+    foreach ($channel in $channels) {
+        $normalized = [double]$channel / 255.0
+        $linear += if ($normalized -le 0.04045) {
+            $normalized / 12.92
+        }
+        else {
+            [Math]::Pow(($normalized + 0.055) / 1.055, 2.4)
+        }
+    }
+    return 0.2126 * $linear[0] + 0.7152 * $linear[1] +
+        0.0722 * $linear[2]
+}
+
+function Get-TestContrastRatio {
+    param(
+        [Parameter(Mandatory = $true)][string]$Foreground,
+        [Parameter(Mandatory = $true)][string]$Background
+    )
+    $first = Get-TestColorLuminance -Color $Foreground
+    $second = Get-TestColorLuminance -Color $Background
+    return ([Math]::Max($first, $second) + 0.05) /
+        ([Math]::Min($first, $second) + 0.05)
+}
+
 function Read-TestWindow {
     Add-Type -AssemblyName PresentationCore -ErrorAction Stop
     Add-Type -AssemblyName PresentationFramework -ErrorAction Stop
@@ -222,6 +257,9 @@ foreach ($theme in $themes) {
         'OverlayColor','CardTop','CardBottom','BorderTint','TextPrimary',
         'TextSecondary','ButtonTop','ButtonBottom','ButtonHover','ButtonPressed',
         'ActiveRowTint','ActiveSelectedRowTint','SelectedRowTint','AccentTint',
+        'ActiveBorderTint','RunningWarningTint','UnknownWarningTint',
+        'ColumnHeaderBackgroundTint','ColumnHeaderForegroundTint',
+        'ColumnHeaderBorderTint','CurrentYesTint','CurrentNoTint',
         'DangerTop','DangerBottom'
     )) {
         Assert-GuiTest -Condition (
@@ -230,6 +268,28 @@ foreach ($theme in $themes) {
         ) -Code ('GUI_THEME_GLASS_PROPERTY_MISSING_' + $theme.Id + '_' +
             $requiredThemeProperty)
     }
+    $runningRed = [Convert]::ToInt32(
+        ([string]$theme.RunningWarningTint).Substring(3, 2), 16
+    )
+    $runningGreen = [Convert]::ToInt32(
+        ([string]$theme.RunningWarningTint).Substring(5, 2), 16
+    )
+    $runningBlue = [Convert]::ToInt32(
+        ([string]$theme.RunningWarningTint).Substring(7, 2), 16
+    )
+    Assert-GuiTest -Condition (
+        ([string]$theme.ColumnHeaderBackgroundTint).StartsWith('#FF') -and
+        (Get-TestContrastRatio `
+            -Foreground ([string]$theme.ColumnHeaderForegroundTint) `
+            -Background ([string]$theme.ColumnHeaderBackgroundTint)) -ge 4.5 -and
+        $runningRed -gt $runningGreen -and $runningRed -gt $runningBlue -and
+        (Get-TestContrastRatio `
+            -Foreground ([string]$theme.RunningWarningTint) `
+            -Background ([string]$theme.CardTop)) -ge 4.5 -and
+        (Get-TestContrastRatio `
+            -Foreground ([string]$theme.RunningWarningTint) `
+            -Background ([string]$theme.CardBottom)) -ge 4.5
+    ) -Code ('GUI_THEME_SEMANTIC_CONTRAST_FAILED_' + $theme.Id)
     $loadResult = Get-QiehaoBackgroundImage -Theme $theme `
         -BackgroundDirectory (Join-Path -Path $guiRoot `
             -ChildPath 'assets\backgrounds')
@@ -474,6 +534,29 @@ Assert-GuiTest -Condition (
     $activeRows[0].Name -ceq 'Account7'
 ) -Code 'GUI_ACTIVE_PROFILE_MARK_FAILED'
 
+$beforeSwitchRows = New-FakeSnapshot -Profiles @(
+    (New-FakeProfileRow -Name 'Plus'),
+    (New-FakeProfileRow -Name 'Team')
+) -Active 'Plus'
+$afterSwitchRows = New-FakeSnapshot -Profiles @(
+    (New-FakeProfileRow -Name 'Plus'),
+    (New-FakeProfileRow -Name 'Team')
+) -Active 'Team'
+Assert-GuiTest -Condition (
+    [string](@($beforeSwitchRows.Profiles | Where-Object {
+        $_.Name -ceq 'Plus'
+    })[0].Active) -ceq '是' -and
+    [string](@($beforeSwitchRows.Profiles | Where-Object {
+        $_.Name -ceq 'Team'
+    })[0].Active) -ceq '否' -and
+    [string](@($afterSwitchRows.Profiles | Where-Object {
+        $_.Name -ceq 'Plus'
+    })[0].Active) -ceq '否' -and
+    [string](@($afterSwitchRows.Profiles | Where-Object {
+        $_.Name -ceq 'Team'
+    })[0].Active) -ceq '是'
+) -Code 'GUI_ACTIVE_ROW_DID_NOT_MIGRATE_AFTER_REFRESH'
+
 $runningSnapshot = New-FakeSnapshot -Profiles @() `
     -Active 'A' -ReasonCode 'CODEX_PROCESS_RUNNING'
 $stoppedSnapshot = New-FakeSnapshot -Profiles @() `
@@ -598,13 +681,10 @@ Assert-GuiTest -Condition (
     $switchCalls.Count -eq 1
 ) -Code 'GUI_SWITCH_UNKNOWN_EXECUTED'
 
-$runningFlow = [pscustomobject]@{
-    Confirm=0; Wait=0; Switch=0; Target=''; Order=@()
-}
+$runningFlow = [pscustomobject]@{ Wait=0; Switch=0; Target=''; Order=@() }
 $runningSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' `
     -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESS_RUNNING' } } `
-    -ConfirmWaitProvider ({ $runningFlow.Confirm++; $true }.GetNewClosure()) `
     -ManualWaitProvider ({
         param($TargetProfile)
         $runningFlow.Wait++
@@ -620,30 +700,15 @@ $runningSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
 Assert-GuiTest -Condition (
     $runningSwitch.WaitStarted -and -not $runningSwitch.CoreCalled -and
     $runningSwitch.ResultCode -ceq 'CODEX_MANUAL_EXIT_WAIT_STARTED' -and
-    $runningFlow.Confirm -eq 1 -and $runningFlow.Wait -eq 1 -and
+    $runningFlow.Wait -eq 1 -and
     $runningFlow.Switch -eq 0 -and $runningFlow.Target -ceq 'Team' -and
     (@($runningFlow.Order) -join '|') -ceq 'ManualWait'
-) -Code 'GUI_RUNNING_MANUAL_WAIT_NOT_STARTED'
-
-$cancelledWaitFlow = [pscustomobject]@{ Wait=0; Switch=0 }
-$cancelledWaitSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
-    -ActiveProfile 'Plus' `
-    -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESS_RUNNING' } } `
-    -ConfirmWaitProvider { $false } `
-    -ManualWaitProvider ({ $cancelledWaitFlow.Wait++ }.GetNewClosure()) `
-    -SwitchProvider ({ $cancelledWaitFlow.Switch++ }.GetNewClosure())
-Assert-GuiTest -Condition (
-    -not $cancelledWaitSwitch.CoreCalled -and
-    -not $cancelledWaitSwitch.WaitStarted -and
-    $cancelledWaitSwitch.ResultCode -ceq 'OPERATION_CANCELLED' -and
-    $cancelledWaitFlow.Wait -eq 0 -and $cancelledWaitFlow.Switch -eq 0
-) -Code 'GUI_MANUAL_WAIT_CANCELLED_BUT_STARTED'
+) -Code 'GUI_ONE_CLICK_MANUAL_WAIT_NOT_STARTED'
 
 $failedWaitFlow = [pscustomobject]@{ Switch=0 }
 $failedWait = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' `
     -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESS_RUNNING' } } `
-    -ConfirmWaitProvider { $true } `
     -ManualWaitProvider { throw 'FAKE_WAIT_START_FAILURE' } `
     -SwitchProvider ({ $failedWaitFlow.Switch++ }.GetNewClosure())
 Assert-GuiTest -Condition (
@@ -683,8 +748,7 @@ $otherRunningActions = Get-QiehaoActionState -SelectedProfile 'Team' `
 $busyActions = Get-QiehaoActionState -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' -CodexStatus '已退出' -IsWriteOperationBusy
 $waitingActions = Get-QiehaoActionState -SelectedProfile 'Team' `
-    -ActiveProfile 'Plus' -CodexStatus '运行中' `
-    -IsWriteOperationBusy -ManualSwitchWaitInProgress
+    -ActiveProfile 'Plus' -CodexStatus '运行中' -IsWriteOperationBusy
 $unavailableLaunchActions = Get-QiehaoActionState -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' -CodexStatus '已退出' -LaunchTargetAvailable:$false
 Assert-GuiTest -Condition (
@@ -697,13 +761,11 @@ Assert-GuiTest -Condition (
     $otherRunningActions.Switch -and
     -not $otherRunningActions.Verify -and
     -not $otherRunningActions.LaunchCodex -and
-    -not $otherRunningActions.CancelSwitchWait -and
     $busyActions.Refresh -and
     -not $busyActions.Switch -and -not $busyActions.Add -and
     -not $busyActions.Rename -and -not $busyActions.Delete -and
     -not $busyActions.LaunchCodex -and
     -not $busyActions.ContextSwitch -and -not $busyActions.ContextRename -and
-    $waitingActions.CancelSwitchWait -and
     -not $waitingActions.Switch -and -not $waitingActions.Verify -and
     -not $waitingActions.Add -and -not $waitingActions.Rename -and
     -not $waitingActions.Delete -and -not $waitingActions.LaunchCodex -and
@@ -1547,6 +1609,12 @@ function New-TestManualSwitchRuntime {
         SwitchCalls = 0
         Result = 'Pending'
         CleanupBeforeSwitch = $false
+        WaitWindowOpen = $true
+        SwitchSawWaitWindowOpen = $false
+        RefreshCalls = 0
+        ActiveProfile = 'Plus'
+        SuccessMessage = ''
+        Order = @()
         Runtime = $null
     }
     $probe = {
@@ -1567,7 +1635,20 @@ function New-TestManualSwitchRuntime {
                 [bool]$Runtime.Stopped -and [bool]$Runtime.HandlerRemoved -and
                 $null -eq $manualState.PendingAction -and
                 $null -eq $manualState.PendingTarget
+            $manualState.SwitchSawWaitWindowOpen = $manualState.WaitWindowOpen
             $manualState.SwitchCalls++
+            $manualState.Order += 'Switch'
+            $manualState.WaitWindowOpen = $false
+            $manualState.Order += 'WindowClosed'
+            $manualState.RefreshCalls++
+            $manualState.ActiveProfile = 'Team'
+            $manualState.Order += 'Refresh'
+            $manualState.SuccessMessage =
+                '切换成功。' + [Environment]::NewLine + '当前账号：Team'
+            $manualState.Order += 'Success'
+        }
+        else {
+            $manualState.WaitWindowOpen = $false
         }
     }.GetNewClosure()
     $manualState.Runtime = New-QiehaoWaitTimerRuntime `
@@ -1587,6 +1668,7 @@ function Stop-TestManualSwitchRuntime {
     $State.PendingAction = $null
     $State.PendingTarget = $null
     $State.Busy = $false
+    $State.WaitWindowOpen = $false
     return $cleanup
 }
 
@@ -1605,6 +1687,13 @@ Assert-GuiTest -Condition (
     $manualStoppedWait.Result -ceq 'Succeeded' -and
     $manualStoppedWait.SwitchCalls -eq 1 -and
     $manualStoppedWait.CleanupBeforeSwitch -and
+    $manualStoppedWait.SwitchSawWaitWindowOpen -and
+    -not $manualStoppedWait.WaitWindowOpen -and
+    $manualStoppedWait.RefreshCalls -eq 1 -and
+    $manualStoppedWait.ActiveProfile -ceq 'Team' -and
+    $manualStoppedWait.SuccessMessage -match '当前账号：Team' -and
+    (@($manualStoppedWait.Order) -join '|') -ceq
+        'Switch|WindowClosed|Refresh|Success' -and
     $manualStoppedWait.Runtime.Stopped -and
     $manualStoppedWait.Runtime.HandlerRemoved -and
     -not $manualStoppedWait.Runtime.Active -and
@@ -1624,6 +1713,7 @@ Assert-GuiTest -Condition (
     $manualUnknownWait.Runtime.HandlerRemoved -and
     $null -eq $manualUnknownWait.PendingAction -and
     $null -eq $manualUnknownWait.PendingTarget -and
+    -not $manualUnknownWait.WaitWindowOpen -and
     -not $manualUnknownWait.Busy
 ) -Code 'GUI_MANUAL_WAIT_UNKNOWN_DID_NOT_FAIL_CLOSED'
 
@@ -1636,6 +1726,7 @@ Assert-GuiTest -Condition (
     $manualTimeoutWait.Runtime.HandlerRemoved -and
     $null -eq $manualTimeoutWait.PendingAction -and
     $null -eq $manualTimeoutWait.PendingTarget -and
+    -not $manualTimeoutWait.WaitWindowOpen -and
     -not $manualTimeoutWait.Busy
 ) -Code 'GUI_MANUAL_WAIT_TIMEOUT_DID_NOT_CLEANUP'
 
@@ -1650,6 +1741,7 @@ Assert-GuiTest -Condition (
     $manualCancelCleanup.Stopped -and $manualCancelCleanup.HandlerRemoved -and
     $null -eq $manualCancelledWait.PendingAction -and
     $null -eq $manualCancelledWait.PendingTarget -and
+    -not $manualCancelledWait.WaitWindowOpen -and
     -not $manualCancelledWait.Busy
 ) -Code 'GUI_MANUAL_WAIT_CANCEL_DID_NOT_CLEANUP'
 
@@ -1666,6 +1758,7 @@ Assert-GuiTest -Condition (
     $manualClosingWait.Runtime.TickCount -eq $manualCloseTicks -and
     $null -eq $manualClosingWait.PendingAction -and
     $null -eq $manualClosingWait.PendingTarget -and
+    -not $manualClosingWait.WaitWindowOpen -and
     -not $manualClosingWait.Busy
 ) -Code 'GUI_MANUAL_WAIT_WINDOW_CLOSE_DID_NOT_CLEANUP'
 
@@ -1729,7 +1822,6 @@ foreach ($requiredChineseText in @(
     '切换账号',
     '启动 Codex',
     '启动设置',
-    '取消等待',
     '正在检测 Codex 进程状态……'
 )) {
     Assert-GuiTest -Condition (
@@ -1789,7 +1881,7 @@ Assert-GuiTest -Condition (
     $null -ne $xamlDocument.SelectSingleNode(
         "//*[@x:Name='CodexSafetyHintText']", $namespaceManager
     ) -and
-    $null -ne $xamlDocument.SelectSingleNode(
+    $null -eq $xamlDocument.SelectSingleNode(
         "//*[@x:Name='CancelSwitchWaitButton']", $namespaceManager
     )
 ) -Code 'GUI_MANUAL_QUIT_CONTROLS_INVALID'
@@ -1807,8 +1899,17 @@ Assert-GuiTest -Condition (
     $xamlTextForEncoding -match 'Property="IsPressed"' -and
     $xamlTextForEncoding -match 'DynamicResource ActiveRowBrush' -and
     $xamlTextForEncoding -match 'DynamicResource ActiveSelectedRowBrush' -and
+    $xamlTextForEncoding -match 'DynamicResource SelectedRowBrush' -and
+    $xamlTextForEncoding -match 'DynamicResource ActiveBorderBrush' -and
     $xamlTextForEncoding -match 'MultiDataTrigger' -and
-    $xamlTextForEncoding -match 'BorderThickness" Value="4,0,1,0"'
+    $xamlTextForEncoding -match 'BorderThickness" Value="4,0,1,0"' -and
+    $xamlTextForEncoding -match 'TargetType="DataGridColumnHeader"' -and
+    $xamlTextForEncoding -match 'DynamicResource ColumnHeaderBackgroundBrush' -and
+    $xamlTextForEncoding -match 'DynamicResource ColumnHeaderForegroundBrush' -and
+    $xamlTextForEncoding -match 'DynamicResource ColumnHeaderBorderBrush' -and
+    $xamlTextForEncoding -match 'Property="VerticalContentAlignment" Value="Center"' -and
+    $xamlTextForEncoding -match 'DynamicResource CurrentYesBrush' -and
+    $xamlTextForEncoding -match 'DynamicResource CurrentNoBrush'
 ) -Code 'GUI_GLASS_OR_ACTIVE_ROW_STYLE_MISSING'
 
 $coreAndGuiSource = $guiSource + [System.IO.File]::ReadAllText($coreModulePath)
@@ -1817,7 +1918,8 @@ Assert-GuiTest -Condition (
 ) -Code 'GUI_FORCE_TERMINATION_API_PRESENT'
 Assert-GuiTest -Condition (
     $guiSource -match 'Test-CodexProfile' -and
-    $guiSource -match 'Start-QiehaoManualSwitchWait' -and
+    $guiSource -match 'Start-QiehaoManualSwitchWaitTimer' -and
+    $guiSource -match 'Show-QiehaoManualSwitchWaitDialog' -and
     $guiSource -match 'Cancel-QiehaoManualSwitchWait' -and
     $guiSource -match 'DispatcherTimer' -and
     $guiSource -match 'Invoke-QiehaoReadOnlyRefresh' -and
@@ -1852,7 +1954,7 @@ Assert-GuiTest -Condition (
     ([regex]::Matches($timerWaitAndCloseSection,
         'TimeoutSeconds 10')).Count -eq 1 -and
     ([regex]::Matches($timerWaitAndCloseSection,
-        'TimeoutSeconds = 90')).Count -eq 1 -and
+        'TimeoutSeconds = 90')).Count -eq 2 -and
     $timerWaitAndCloseSection -match 'guiPendingAction = ''Switch''' -and
     $timerWaitAndCloseSection -match 'guiPendingTargetProfile = \$TargetProfile' -and
     $timerWaitAndCloseSection -match 'Stop-QiehaoProcessMonitor' -and
@@ -1885,11 +1987,42 @@ Assert-GuiTest -Condition (
     $manualWaitSection -match 'IntervalMilliseconds 500' -and
     $manualWaitSection -match 'TimeoutSeconds \$TimeoutSeconds' -and
     $manualWaitSection -match 'Test-CodexProcessesStopped' -and
-    $manualWaitSection -match 'Invoke-QiehaoSwitchCore -TargetProfile \$targetProfile' -and
+    $manualWaitSection -match 'Invoke-QiehaoSwitchCore' -and
+    $manualWaitSection -match 'TargetProfile \$capturedTarget -DeferPresentation' -and
     $manualWaitSection -match 'Stop-QiehaoManualSwitchWaitTimer' -and
     $manualWaitSection -notmatch 'Request-CodexDesktopNativeQuit|Request-CodexDesktopClose|CloseMainWindow' -and
     $manualWaitSection -notmatch '(?i)Get-CodexActiveProfile|Get-CodexAccountSlot|Test-CodexActiveIdentity|Save-CodexActiveProfile|Set-Content|Out-File|WriteAll|Invoke-WebRequest|Invoke-RestMethod'
 ) -Code 'GUI_MANUAL_WAIT_IMPLEMENTATION_INVALID'
+$waitDialogSection = [regex]::Match(
+    $guiSource,
+    '(?s)function Show-QiehaoManualSwitchWaitDialog\s*\{.*?function Show-QiehaoSwitchResult'
+).Value
+Assert-GuiTest -Condition (
+    -not [string]::IsNullOrWhiteSpace($waitDialogSection) -and
+    ([regex]::Matches($waitDialogSection,
+        'New-Object System\.Windows\.Controls\.Button')).Count -eq 1 -and
+    $waitDialogSection -match '\$cancelButton\.Content = ''取消''' -and
+    $waitDialogSection -match 'Add_Loaded' -and
+    $waitDialogSection -match 'Start-QiehaoManualSwitchWaitTimer' -and
+    $waitDialogSection -match 'Add_Closing' -and
+    $waitDialogSection -notmatch "Button\.Content\s*=\s*'(开始等待|开始检测|继续切换)" -and
+    $waitDialogSection -notmatch 'ConfirmText'
+) -Code 'GUI_WAIT_DIALOG_SECOND_STAGE_ACTION_PRESENT'
+$oneClickSwitchSection = [regex]::Match(
+    $guiSource,
+    '(?s)function Invoke-QiehaoSwitchSelectedProfile\s*\{.*?function Invoke-QiehaoVerifySelectedProfile'
+).Value
+Assert-GuiTest -Condition (
+    -not [string]::IsNullOrWhiteSpace($oneClickSwitchSection) -and
+    $oneClickSwitchSection -match 'Show-QiehaoManualSwitchWaitDialog -TargetProfile \$targetProfile' -and
+    $oneClickSwitchSection -match "ResultCode 'CODEX_EXIT_STATE_UNKNOWN'" -and
+    $oneClickSwitchSection -notmatch 'Show-QiehaoChoiceDialog|ConfirmText'
+) -Code 'GUI_SWITCH_STILL_REQUIRES_SECOND_CLICK'
+Assert-GuiTest -Condition (
+    $guiSource -match '切换成功。`n`n当前账号：\$TargetProfile' -and
+    $guiSource -match 'Show-QiehaoSwitchResult -Result \$switchResult' -and
+    $guiSource -match 'Invoke-QiehaoReadOnlyRefresh'
+) -Code 'GUI_SWITCH_SUCCESS_PRESENTATION_INCOMPLETE'
 Assert-GuiTest -Condition (
     $guiSource -notmatch 'Request-CodexDesktopNativeQuit|Request-CodexDesktopClose|CloseMainWindow|ExitCodexButton|Request-QiehaoNormalExit' -and
     $xamlTextForEncoding -notmatch '正常退出 Codex'

@@ -33,9 +33,17 @@
             <GradientStop Color="#E08F5D68" Offset="0" />
             <GradientStop Color="#E06F3F4A" Offset="1" />
         </LinearGradientBrush>
-        <SolidColorBrush x:Key="ActiveRowBrush" Color="#B83B7F5C" />
-        <SolidColorBrush x:Key="ActiveSelectedRowBrush" Color="#D445956A" />
-        <SolidColorBrush x:Key="SelectedRowBrush" Color="#C54A69A0" />
+        <SolidColorBrush x:Key="ActiveRowBrush" Color="#C03B6FA8" />
+        <SolidColorBrush x:Key="ActiveSelectedRowBrush" Color="#E04487CF" />
+        <SolidColorBrush x:Key="SelectedRowBrush" Color="#B85C4B7D" />
+        <SolidColorBrush x:Key="ActiveBorderBrush" Color="#FF7EC8FF" />
+        <SolidColorBrush x:Key="RunningWarningBrush" Color="#FFFFAAA4" />
+        <SolidColorBrush x:Key="UnknownWarningBrush" Color="#FFFFB84D" />
+        <SolidColorBrush x:Key="ColumnHeaderBackgroundBrush" Color="#FF233B55" />
+        <SolidColorBrush x:Key="ColumnHeaderForegroundBrush" Color="#FFF7FBFF" />
+        <SolidColorBrush x:Key="ColumnHeaderBorderBrush" Color="#FF6F91B2" />
+        <SolidColorBrush x:Key="CurrentYesBrush" Color="#FF72E6A6" />
+        <SolidColorBrush x:Key="CurrentNoBrush" Color="#FFFFC56B" />
         <SolidColorBrush x:Key="AccentBrush" Color="#FF5CC58A" />
         <SolidColorBrush x:Key="GridBackgroundBrush" Color="#4AFFFFFF" />
         <SolidColorBrush x:Key="GridRowBrush" Color="#34FFFFFF" />
@@ -117,6 +125,16 @@
         <Style x:Key="SecondaryTextStyle" TargetType="TextBlock">
             <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
         </Style>
+        <Style TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="{DynamicResource ColumnHeaderBackgroundBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource ColumnHeaderForegroundBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource ColumnHeaderBorderBrush}" />
+            <Setter Property="BorderThickness" Value="0,0,1,1" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="HorizontalContentAlignment" Value="Left" />
+            <Setter Property="Padding" Value="8,6" />
+        </Style>
     </Window.Resources>
 
     <Grid>
@@ -175,17 +193,10 @@
                         </StackPanel>
                     </Grid>
                     <Grid Grid.Row="4">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <TextBlock x:Name="CodexSafetyHintText" Grid.Column="0"
+                        <TextBlock x:Name="CodexSafetyHintText"
                                    VerticalAlignment="Center" TextWrapping="Wrap"
-                                   Foreground="#FFFFC857"
+                                   Foreground="{DynamicResource UnknownWarningBrush}"
                                    Text="正在检测 Codex 进程状态……" />
-                        <Button x:Name="CancelSwitchWaitButton" Grid.Column="1"
-                                Content="取消等待" Visibility="Collapsed"
-                                MinHeight="30" Padding="12,4" Margin="12,0,0,0" />
                     </Grid>
                 </Grid>
             </Border>
@@ -236,7 +247,7 @@
                                     </Trigger>
                                     <DataTrigger Binding="{Binding Active}" Value="是">
                                         <Setter Property="Background" Value="{DynamicResource ActiveRowBrush}" />
-                                        <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                                        <Setter Property="BorderBrush" Value="{DynamicResource ActiveBorderBrush}" />
                                         <Setter Property="BorderThickness" Value="4,0,1,0" />
                                         <Setter Property="FontWeight" Value="SemiBold" />
                                     </DataTrigger>
@@ -252,7 +263,24 @@
                         </DataGrid.RowStyle>
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" MinWidth="105" Width="*" />
-                            <DataGridTextColumn Header="当前" Binding="{Binding Active}" Width="60" />
+                            <DataGridTextColumn Header="当前" Binding="{Binding Active}" Width="60">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Padding" Value="6,2" />
+                                        <Setter Property="FontWeight" Value="SemiBold" />
+                                        <Setter Property="Foreground" Value="{DynamicResource CurrentNoBrush}" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Active}" Value="是">
+                                                <Setter Property="Foreground" Value="{DynamicResource CurrentYesBrush}" />
+                                                <Setter Property="FontWeight" Value="Bold" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding Active}" Value="否">
+                                                <Setter Property="Foreground" Value="{DynamicResource CurrentNoBrush}" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
                             <DataGridTextColumn Header="槽位验证" Binding="{Binding Verification}" Width="82" />
                             <DataGridTextColumn Header="状态" Binding="{Binding Health}" MinWidth="105" Width="Auto">
                                 <DataGridTextColumn.ElementStyle>
