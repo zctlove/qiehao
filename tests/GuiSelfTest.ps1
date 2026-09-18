@@ -12,6 +12,8 @@ $guiRoot = Join-Path -Path $projectRoot -ChildPath 'gui'
 $xamlPath = Join-Path -Path $guiRoot -ChildPath 'MainWindow.xaml'
 $guiScriptPath = Join-Path -Path $guiRoot -ChildPath 'QiehaoGui.ps1'
 $helperModulePath = Join-Path -Path $guiRoot -ChildPath 'GuiHelpers.psm1'
+$localizationModulePath = Join-Path -Path $guiRoot `
+    -ChildPath 'Localization.psm1'
 $quotaGuiSelfTestPath = Join-Path -Path $PSScriptRoot `
     -ChildPath 'QuotaGuiSelfTest.ps1'
 $quotaImportContractPath = Join-Path -Path $PSScriptRoot `
@@ -22,6 +24,8 @@ $quotaChildCleanupTestPath = Join-Path -Path $PSScriptRoot `
     -ChildPath 'QuotaChildCleanupSelfTest.ps1'
 $switchBeforeQuotaTestPath = Join-Path -Path $PSScriptRoot `
     -ChildPath 'SwitchBeforeQuotaSelfTest.ps1'
+$localizationSelfTestPath = Join-Path -Path $PSScriptRoot `
+    -ChildPath 'LocalizationSelfTest.ps1'
 $coreModulePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 
 function Assert-GuiTest {
@@ -128,6 +132,13 @@ if ($XamlOnly) {
         Assert-GuiTest -Condition (
             $null -ne $testWindow.FindName('ProfilesGrid')
         ) -Code 'GUI_XAML_PROFILE_GRID_MISSING'
+        Assert-GuiTest -Condition (
+            $null -ne $testWindow.FindName('LanguageComboBox') -and
+            [double]$testWindow.FindName('LanguageComboBox').Width -ge 105 -and
+            $null -ne $testWindow.FindName('ThemeComboBox') -and
+            [double]$testWindow.FindName('ThemeComboBox').Width -ge 132 -and
+            [double]$testWindow.MinWidth -ge 920
+        ) -Code 'GUI_XAML_LOCALIZATION_LAYOUT_CONTRACT_MISSING'
         Write-Output 'XAML_PARSE_PASS'
     }
     finally {
@@ -410,14 +421,20 @@ function Invoke-PowerShellFileTest {
         $ScriptPath
     ) + @($AdditionalArguments)
     $previousLocation = Get-Location
+    $previousErrorActionPreference = $ErrorActionPreference
     try {
         if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
             Set-Location -LiteralPath $WorkingDirectory
         }
+        # Windows PowerShell 5.1 promotes a native process' stderr to an
+        # ErrorRecord. Capture it with stdout so the child exit code and the
+        # original assertion remain diagnosable by the caller.
+        $ErrorActionPreference = 'Continue'
         $output = @(& $HostPath @arguments 2>&1)
         $exitCode = $LASTEXITCODE
     }
     finally {
+        $ErrorActionPreference = $previousErrorActionPreference
         Set-Location -LiteralPath $previousLocation.Path
     }
     return [pscustomobject]@{
@@ -428,6 +445,41 @@ function Invoke-PowerShellFileTest {
 
 $ps51Command = Get-Command -Name 'powershell.exe' -ErrorAction Stop
 $ps7Command = Get-Command -Name 'pwsh.exe' -ErrorAction Stop
+
+$requiredLocalizationOutput = @(
+    'SupportedLanguagesExactlyZhCnEnUs=True',
+    'DefaultLanguageZhCn=True',
+    'UnknownLanguageFallsBackZhCn=True',
+    'AllProductionKeysExistZhCn=True',
+    'AllProductionKeysExistEnUs=True',
+    'NoDuplicateKeys=True',
+    'LanguagePreferencePersists=True',
+    'OldPreferencesWithoutLanguageDefaultsZhCn=True',
+    'ChangingLanguagePreservesTheme=True',
+    'ChangingThemePreservesLanguage=True',
+    'CorruptPreferencesFailOpen=True',
+    'AtomicPreferenceWrite=True',
+    'PowerShell51NullStringReplaceContract=True',
+    'LocalizationForeignCwd=True',
+    'LOCALIZATION_SELFTEST_PASS'
+)
+$localization51 = Invoke-PowerShellFileTest `
+    -HostPath $ps51Command.Source -ScriptPath $localizationSelfTestPath
+Assert-GuiTest -Condition (
+    $localization51.ExitCode -eq 0 -and
+    @($requiredLocalizationOutput | Where-Object {
+        $localization51.Output -cnotcontains $_
+    }).Count -eq 0
+) -Code 'GUI_LOCALIZATION_CONTRACT_PS51_FAILED'
+
+$localization7 = Invoke-PowerShellFileTest `
+    -HostPath $ps7Command.Source -ScriptPath $localizationSelfTestPath
+Assert-GuiTest -Condition (
+    $localization7.ExitCode -eq 0 -and
+    @($requiredLocalizationOutput | Where-Object {
+        $localization7.Output -cnotcontains $_
+    }).Count -eq 0
+) -Code 'GUI_LOCALIZATION_CONTRACT_PS7_FAILED'
 
 $productionImport51 = Invoke-PowerShellFileTest `
     -HostPath $ps51Command.Source -ScriptPath $quotaImportContractPath
@@ -1051,10 +1103,12 @@ try {
         $immediatePreference.Background -ceq '03-ice-glass' -and
         $immediateWriteTime -gt $initialWriteTime -and
         $restoredPreference.Background -ceq '03-ice-glass' -and
+        $restoredPreference.Language -ceq 'zh-CN' -and
         $secondSelectedThemeId -ceq '03-ice-glass' -and
         (@($preferenceData.PSObject.Properties.Name) -join '|') -ceq
-            'schema_version|background' -and
-        [int]$preferenceData.schema_version -eq 1
+            'schema_version|background|language' -and
+        [int]$preferenceData.schema_version -eq 2 -and
+        [string]$preferenceData.language -ceq 'zh-CN'
     ) -Code 'GUI_WPF_THEME_PERSISTENCE_LIFECYCLE_FAILED'
 
     $fakeProjectRoot = Join-Path $themeTestRoot 'project-from-any-cwd'
@@ -1087,6 +1141,7 @@ try {
         $resolvedStateBefore -ceq $expectedFakeState -and
         $resolvedStateFromOtherCwd -ceq $expectedFakeState -and
         $newInstancePreference.Background -ceq '04-purple-tech' -and
+        $newInstancePreference.Language -ceq 'zh-CN' -and
         $persistedPreferenceText -notmatch
             '(?i)account|auth|identity|token|email|credential|secret'
     ) -Code 'GUI_THEME_PREFERENCE_CWD_OR_SCHEMA_FAILED'
@@ -1098,6 +1153,7 @@ try {
         -StateDirectory $fakeStateDirectory
     Assert-GuiTest -Condition (
         $corruptPreference.Background -ceq '01-blue-glass' -and
+        $corruptPreference.Language -ceq 'zh-CN' -and
         -not $corruptPreference.IsValid -and
         $corruptPreference.UsedDefault
     ) -Code 'GUI_CORRUPT_PREFERENCE_DID_NOT_FALL_BACK'
@@ -2431,6 +2487,9 @@ Assert-GuiTest -Condition (
 
 $guiSource = [System.IO.File]::ReadAllText($guiScriptPath)
 $helperSource = [System.IO.File]::ReadAllText($helperModulePath)
+$localizationSource = [System.IO.File]::ReadAllText($localizationModulePath)
+$localizedGuiSource = $guiSource + [Environment]::NewLine +
+    $localizationSource
 foreach ($requiredBackendCommand in @(
     'Save-CodexActiveProfile',
     'Switch-CodexAccountProfile',
@@ -2468,8 +2527,8 @@ Assert-GuiTest -Condition (
     $guiSource -match 'DataGridRow' -and
     $guiSource -match 'OriginalSource' -and
     $guiSource -match 'ConfirmDelete' -and
-    $guiSource -match '我已登录新账号并退出' -and
-    $guiSource -match '本工具不会自动操作 OAuth' -and
+    $localizedGuiSource -match '我已登录新账号并退出' -and
+    $localizedGuiSource -match '本工具不会自动操作 OAuth' -and
     $guiSource -match 'liveStatus -ceq ''运行中''' -and
     $guiSource -match 'liveStatus -cne ''已退出'''
 ) -Code 'GUI_ACCOUNT_MANAGEMENT_GUARDS_MISSING'
@@ -2615,25 +2674,24 @@ Assert-GuiTest -Condition (
     $quotaAsyncSourceSection -match
         '\$script:guiQuotaWorkerOutputCount = \$output\.Count' -and
     $quotaAsyncSourceSection -match '\$output\.Count -eq 1' -and
+    $quotaAsyncSourceSection -match 'Set-QiehaoLocalizedStatus' -and
     $quotaAsyncSourceSection -match
-        'Format-QiehaoQuotaFailureStatus' -and
-    $quotaAsyncSourceSection -match
-        'Get-QiehaoQuotaUiTextSafe -Key ''UpdateFailedRetry''' -and
+        'Quota\.UpdateFailedRetryWithCode' -and
     $quotaAsyncSourceSection -notmatch
         'Get-QiehaoCurrentQuotaSnapshot -TimeoutSeconds 10' -and
     $quotaAsyncSourceSection -notmatch 'GetNewClosure'
 ) -Code 'GUI_QUOTA_ASYNC_SOURCE_LIFECYCLE_INVALID'
 Assert-GuiTest -Condition (
-    $quotaAsyncSourceSection -match '额度服务响应较慢，仍在等待' -and
-    $guiSource -match 'Codex 已安全退出。' -and
-    $guiSource -match '额度快照已保存，正在切换账号' -and
-    $guiSource -match '已保留上次缓存，正在继续切换' -and
+    $localizedGuiSource -match '额度服务响应较慢，仍在等待' -and
+    $localizedGuiSource -match 'Codex 已安全退出。' -and
+    $localizedGuiSource -match '额度快照已保存，正在切换账号' -and
+    $localizedGuiSource -match '已保留上次缓存，正在继续切换' -and
     $quotaAsyncSourceSection -notmatch '(?:20|50|80)%'
 ) -Code 'GUI_SWITCH_QUOTA_STATUS_CONTRACT_INVALID'
 Assert-GuiTest -Condition (
-    $guiSource -match 'Codex 已安全退出，可以切换账号。' -and
-    $guiSource -match '文件 → 退出' -and
-    $guiSource -match '无法确认 Codex 是否完全退出，请先检查 Codex 状态'
+    $localizedGuiSource -match 'Codex 已安全退出，可以切换账号。' -and
+    $localizedGuiSource -match '文件 → 退出' -and
+    $localizedGuiSource -match '无法确认 Codex 是否完全退出，请先检查 Codex 状态'
 ) -Code 'GUI_DYNAMIC_SAFE_EXIT_HINTS_MISSING'
 
 $processMonitorSection = [regex]::Match(
@@ -2706,7 +2764,7 @@ Assert-GuiTest -Condition (
     -not [string]::IsNullOrWhiteSpace($waitDialogSection) -and
     ([regex]::Matches($waitDialogSection,
         'New-Object System\.Windows\.Controls\.Button')).Count -eq 1 -and
-    $waitDialogSection -match '\$cancelButton\.Content = ''取消''' -and
+    $waitDialogSection -match "-Key 'Button.Cancel'" -and
     $waitDialogSection -match 'Add_Loaded' -and
     $waitDialogSection -match 'Start-QiehaoManualSwitchWaitTimer' -and
     $waitDialogSection -match 'Add_Closing' -and
@@ -2734,11 +2792,12 @@ Assert-GuiTest -Condition (
     $oneClickSwitchSection -notmatch 'Show-QiehaoChoiceDialog|ConfirmText'
 ) -Code 'GUI_SWITCH_STILL_REQUIRES_SECOND_CLICK'
 Assert-GuiTest -Condition (
-    $guiSource -match '切换成功。`n`n当前账号：\$TargetProfile' -and
+    $guiSource -match "-Key 'Switch.SuccessCurrent'" -and
     $guiSource -match 'Complete-QiehaoSwitchUiAfterBackend' -and
     $guiSource -match 'ExpectedActiveProfile \$ExpectedProfile -PassThru' -and
     $guiSource -match "'SwitchSucceededUiRefreshFailed'" -and
-    $guiSource -match '账号切换已经成功，但界面状态刷新失败' -and
+    $guiSource -match "-Key 'Switch.RefreshFailed'" -and
+    $localizationSource -match '账号切换已经成功，但界面状态刷新失败' -and
     $helperSource -match 'function Invoke-QiehaoSwitchUiCompletion' -and
     $helperSource -match "'SwitchSucceeded'" -and
     $helperSource -match "'SwitchSucceededUiRefreshFailed'"
@@ -2801,6 +2860,8 @@ finally {
 
 [pscustomobject]@{
     Result = 'PASS'
+    LocalizationContractPowerShell51 = 'PASS'
+    LocalizationContractPowerShell7 = 'PASS'
     ProductionImportOrderPowerShell51 = 'PASS'
     ProductionImportOrderPowerShell7 = 'PASS'
     BackgroundWorkerContractPowerShell51 = 'PASS'

@@ -1,6 +1,9 @@
 ﻿Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+$localizationModulePath = Join-Path -Path $PSScriptRoot -ChildPath 'Localization.psm1'
+Import-Module -Name $localizationModulePath -ErrorAction Stop
+
 $script:QuotaUiStrings = [ordered]@{
     RefreshButton = '刷新额度'
     ColumnHeader = '额度快照'
@@ -28,13 +31,33 @@ $script:QuotaUiStrings = [ordered]@{
     SwitchNewFailed = '切换成功；额度更新失败，保留原缓存。'
 }
 
+$script:QuotaLocalizationKeys = [ordered]@{
+    RefreshButton = 'Button.RefreshQuota'; ColumnHeader = 'Column.QuotaSnapshot'
+    RefreshCurrentOnly = 'Quota.RefreshCurrentOnly'; Updating = 'Quota.Updating'
+    Updated = 'Quota.Updated'; UpdateFailedRetry = 'Quota.UpdateFailedRetry'
+    UpdateFailedCached = 'Quota.UpdateFailedCached'; UpdateFailedNoCache = 'Quota.UpdateFailedNoCache'
+    CacheUnavailable = 'Quota.CacheUnavailable'; NoSnapshot = 'Quota.NoSnapshot'
+    NoWindows = 'Quota.NoWindows'; JustQueried = 'Quota.JustQueried'
+    CachedPrefix = 'Quota.CachedPrefix'; UsageAvailable = 'Quota.UsageAvailable'
+    UsageUnavailable = 'Quota.UsageUnavailable'; UsageUnknown = 'Quota.UsageUnknown'
+    CurrentTooltip = 'Quota.CurrentTooltip'; CurrentNoSnapshotTooltip = 'Quota.CurrentNoSnapshotTooltip'
+    InactiveTooltip = 'Quota.InactiveTooltip'; InactiveNoSnapshotTooltip = 'Quota.InactiveNoSnapshotTooltip'
+    RenameCacheFailed = 'Quota.RenameCacheFailed'; DeleteCacheFailed = 'Quota.DeleteCacheFailed'
+    SwitchOldFailed = 'Quota.SwitchOldFailed'; SwitchNewFailed = 'Quota.SwitchNewFailed'
+}
+
 function Get-QiehaoQuotaUiText {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$Key)
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [string]$Language = 'zh-CN'
+    )
     if (-not $script:QuotaUiStrings.Contains($Key)) {
         throw 'QUOTA_UI_STRING_NOT_FOUND'
     }
-    return [string]$script:QuotaUiStrings[$Key]
+    return Get-QiehaoLocalizedString `
+        -Key ([string]$script:QuotaLocalizationKeys[$Key]) `
+        -Language $Language
 }
 
 function New-QiehaoEmptyQuotaCache {
@@ -676,13 +699,14 @@ function Get-QiehaoQuotaSnapshotTooltip {
         [Parameter(Mandatory = $true)][object]$Entry,
         [Parameter(Mandatory = $true)][bool]$IsActive,
         [Parameter(Mandatory = $true)][DateTimeOffset]$Now,
-        [Parameter(Mandatory = $true)][string]$Availability
+        [Parameter(Mandatory = $true)][string]$Availability,
+        [string]$Language = 'zh-CN'
     )
 
     $lines = New-Object 'System.Collections.Generic.List[string]'
-    $null = $lines.Add($(if ($IsActive) {
-        '当前账号额度'
-    } else { '额度快照' }))
+    $null = $lines.Add((Get-QiehaoLocalizedString -Language $Language `
+        -Key $(if ($IsActive) { 'Quota.CurrentTitle' } `
+            else { 'Quota.SnapshotTitle' })))
     $null = $lines.Add('')
     foreach ($window in @($Entry.windows)) {
         $label = [string]$window.label
@@ -691,20 +715,22 @@ function Get-QiehaoQuotaSnapshotTooltip {
                 -DurationMinutes $window.duration_minutes
         }
         $null = $lines.Add($label)
-        $null = $lines.Add(
-            '剩余：' + (Format-QiehaoQuotaPercent `
-                -Value $window.remaining_percent) + '%'
-        )
+        $null = $lines.Add((Format-QiehaoLocalizedString `
+            -Key 'Quota.Remaining' -Language $Language -Arguments @(
+                (Format-QiehaoQuotaPercent -Value $window.remaining_percent)
+            )))
         $reset = Format-QiehaoQuotaReset `
             -ResetsAt $window.resets_at -Now $Now
         if (-not [string]::IsNullOrWhiteSpace($reset)) {
-            $null = $lines.Add('重置：' + $reset)
+            $null = $lines.Add((Format-QiehaoLocalizedString `
+                -Key 'Quota.Resets' -Language $Language -Arguments @($reset)))
         }
         $null = $lines.Add('')
     }
     $null = $lines.Add($Availability)
     $null = $lines.Add('')
-    $null = $lines.Add('查询于：')
+    $null = $lines.Add((Get-QiehaoLocalizedString `
+        -Key 'Quota.QueriedAt' -Language $Language))
     $queried = [DateTimeOffset]::Parse(
         [string]$Entry.queried_at,
         [Globalization.CultureInfo]::InvariantCulture,
@@ -713,10 +739,8 @@ function Get-QiehaoQuotaSnapshotTooltip {
     $null = $lines.Add($queried.ToString('yyyy-MM-dd HH:mm'))
     if (-not $IsActive) {
         $null = $lines.Add('')
-        $null = $lines.Add(
-            '这是该账号上次作为当前账号时保存的额度快照。'
-        )
-        $null = $lines.Add('切换为当前账号后可刷新。')
+        $null = $lines.Add((Get-QiehaoLocalizedString `
+            -Key 'Quota.InactiveTooltip' -Language $Language))
     }
     return $lines.ToArray() -join [Environment]::NewLine
 }
@@ -728,7 +752,8 @@ function Update-QiehaoQuotaProfileRows {
         [Parameter(Mandatory = $true)][object]$Cache,
         [AllowNull()][string]$ActiveProfile,
         [AllowNull()][string]$JustUpdatedProfile,
-        [DateTimeOffset]$Now = [DateTimeOffset]::Now
+        [DateTimeOffset]$Now = [DateTimeOffset]::Now,
+        [string]$Language = 'zh-CN'
     )
     foreach ($row in @($Rows)) {
         if ($null -eq $row) { continue }
@@ -738,7 +763,7 @@ function Update-QiehaoQuotaProfileRows {
             $name.Equals($ActiveProfile, [StringComparison]::OrdinalIgnoreCase)
         )
         $entry = Get-QiehaoQuotaCacheSnapshot -Cache $Cache -ProfileName $name
-        $summary = Get-QiehaoQuotaUiText -Key 'NoSnapshot'
+        $summary = Get-QiehaoQuotaUiText -Key 'NoSnapshot' -Language $Language
         $freshness = ''
         $availability = ''
         if ($null -ne $entry) {
@@ -758,24 +783,26 @@ function Update-QiehaoQuotaProfileRows {
                 $null = $summaryParts.Add('+' + [string]($windowCount - 3))
             }
             $summary = if ($summaryParts.Count -eq 0) {
-                Get-QiehaoQuotaUiText -Key 'NoWindows'
+                Get-QiehaoQuotaUiText -Key 'NoWindows' -Language $Language
             } else { $summaryParts.ToArray() -join ' · ' }
             if ($null -ne $entry.ordinary_usage_allowed) {
                 $availability = if ([bool]$entry.ordinary_usage_allowed) {
-                    Get-QiehaoQuotaUiText -Key 'UsageAvailable'
+                    Get-QiehaoQuotaUiText -Key 'UsageAvailable' -Language $Language
                 } else {
-                    Get-QiehaoQuotaUiText -Key 'UsageUnavailable'
+                    Get-QiehaoQuotaUiText -Key 'UsageUnavailable' -Language $Language
                 }
             }
             else {
-                $availability = Get-QiehaoQuotaUiText -Key 'UsageUnknown'
+                $availability = Get-QiehaoQuotaUiText -Key 'UsageUnknown' `
+                    -Language $Language
             }
             if (-not [string]::IsNullOrWhiteSpace($JustUpdatedProfile) -and
                 $name.Equals(
                     $JustUpdatedProfile,
                     [StringComparison]::OrdinalIgnoreCase
                 )) {
-                $freshness = Get-QiehaoQuotaUiText -Key 'JustQueried'
+                $freshness = Get-QiehaoQuotaUiText -Key 'JustQueried' `
+                    -Language $Language
             }
             else {
                 $queried = [DateTimeOffset]::Parse(
@@ -786,19 +813,23 @@ function Update-QiehaoQuotaProfileRows {
                 $stamp = if ($queried.Date -eq $Now.ToLocalTime().Date) {
                     $queried.ToString('HH:mm')
                 } else { $queried.ToString('yyyy-MM-dd HH:mm') }
-                $freshness = (Get-QiehaoQuotaUiText -Key 'CachedPrefix') +
+                $freshness = (Get-QiehaoQuotaUiText -Key 'CachedPrefix' `
+                    -Language $Language) +
                     ' · ' + $stamp
             }
         }
         $tooltip = if ($null -ne $entry) {
             Get-QiehaoQuotaSnapshotTooltip -Entry $entry `
-                -IsActive $isActive -Now $Now -Availability $availability
+                -IsActive $isActive -Now $Now -Availability $availability `
+                -Language $Language
         }
         elseif ($isActive) {
-            Get-QiehaoQuotaUiText -Key 'CurrentNoSnapshotTooltip'
+            Get-QiehaoQuotaUiText -Key 'CurrentNoSnapshotTooltip' `
+                -Language $Language
         }
         else {
-            Get-QiehaoQuotaUiText -Key 'InactiveNoSnapshotTooltip'
+            Get-QiehaoQuotaUiText -Key 'InactiveNoSnapshotTooltip' `
+                -Language $Language
         }
         $row | Add-Member -NotePropertyName QuotaSummary `
             -NotePropertyValue $summary -Force

@@ -3,9 +3,9 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     x:Name="MainWindow"
     Title="Codex 账号管理器"
-    Width="900"
+    Width="1040"
     Height="690"
-    MinWidth="780"
+    MinWidth="920"
     MinHeight="560"
     WindowStartupLocation="CenterScreen"
     Background="#FF172436"
@@ -177,10 +177,12 @@
                     </Grid.RowDefinitions>
                     <Grid Grid.Row="0">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" Text="Codex 账号管理器" />
+                        <TextBlock x:Name="HeaderTitleText" Grid.Column="0" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" Text="Codex 账号管理器" />
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock Margin="0,0,8,0" VerticalAlignment="Center" Style="{StaticResource SecondaryTextStyle}" Text="皮肤：" />
+                            <TextBlock x:Name="ThemeLabelText" Margin="0,0,8,0" VerticalAlignment="Center" Style="{StaticResource SecondaryTextStyle}" Text="皮肤：" />
                             <ComboBox x:Name="ThemeComboBox" Width="132" MinHeight="30" DisplayMemberPath="Name" SelectedValuePath="Id" />
+                            <TextBlock x:Name="LanguageLabelText" Margin="14,0,8,0" VerticalAlignment="Center" Style="{StaticResource SecondaryTextStyle}" Text="语言：" />
+                            <ComboBox x:Name="LanguageComboBox" Width="105" MinHeight="30" DisplayMemberPath="NativeName" SelectedValuePath="Code" />
                         </StackPanel>
                     </Grid>
                     <Grid Grid.Row="2">
@@ -189,21 +191,21 @@
                             <ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Margin="0,0,12,0">
-                            <TextBlock Style="{StaticResource SecondaryTextStyle}" Text="Codex 客户端" />
+                            <TextBlock x:Name="CodexClientLabelText" Style="{StaticResource SecondaryTextStyle}" Text="Codex 客户端" />
                             <TextBlock x:Name="CodexStatusText" Style="{StaticResource StatusValueStyle}" Text="未知" />
                         </StackPanel>
                         <StackPanel Grid.Column="1" Margin="0,0,12,0">
-                            <TextBlock Style="{StaticResource SecondaryTextStyle}" Text="当前账号" />
+                            <TextBlock x:Name="CurrentAccountLabelText" Style="{StaticResource SecondaryTextStyle}" Text="当前账号" />
                             <TextBlock x:Name="ActiveProfileText" Style="{StaticResource StatusValueStyle}" Text="未初始化" TextTrimming="CharacterEllipsis" />
                         </StackPanel>
                         <StackPanel Grid.Column="2" Margin="0,0,12,0">
-                            <TextBlock Style="{StaticResource SecondaryTextStyle}" Text="当前身份确认" />
+                            <TextBlock x:Name="CurrentIdentityLabelText" Style="{StaticResource SecondaryTextStyle}" Text="当前身份确认" />
                             <TextBlock x:Name="IdentityStatusText" Style="{StaticResource StatusValueStyle}" Text="无法确认" />
                         </StackPanel>
                         <StackPanel Grid.Column="3">
-                            <TextBlock Style="{StaticResource SecondaryTextStyle}" Text="网页 ChatGPT" />
+                            <TextBlock x:Name="WebChatGPTLabelText" Style="{StaticResource SecondaryTextStyle}" Text="网页 ChatGPT" />
                             <TextBlock x:Name="WebChatGPTText" Style="{StaticResource StatusValueStyle}" Text="不受影响" />
-                            <TextBlock Margin="0,3,0,0" FontSize="11" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Text="浏览器 / PWA 登录状态不会被本工具修改" />
+                            <TextBlock x:Name="WebChatGPTHintText" Margin="0,3,0,0" FontSize="11" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Text="浏览器 / PWA 登录状态不会被本工具修改" />
                         </StackPanel>
                     </Grid>
                     <Grid Grid.Row="4">
@@ -222,12 +224,12 @@
                         <RowDefinition Height="Auto" /><RowDefinition Height="8" /><RowDefinition Height="*" />
                     </Grid.RowDefinitions>
                     <DockPanel Grid.Row="0">
-                        <TextBlock FontSize="17" FontWeight="SemiBold" Text="已保存账号" />
+                        <TextBlock x:Name="SavedAccountsHeadingText" FontSize="17" FontWeight="SemiBold" Text="已保存账号" />
                         <TextBlock x:Name="ProfileCountText" DockPanel.Dock="Right" Style="{StaticResource SecondaryTextStyle}" VerticalAlignment="Center" Text="0 个账号" />
                     </DockPanel>
                     <Grid Grid.Row="2">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="260" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Margin="0,0,8,0" VerticalAlignment="Center" Text="搜索账号：" />
+                        <TextBlock x:Name="SearchAccountsLabelText" Grid.Column="0" Margin="0,0,8,0" VerticalAlignment="Center" Text="搜索账号：" />
                         <TextBox x:Name="ProfileSearchTextBox" Grid.Column="1" MinHeight="30" Padding="7,4" ToolTip="仅按本地 Profile 名称搜索，不访问凭证或身份内容" />
                     </Grid>
                     <DataGrid
@@ -261,7 +263,7 @@
                                     <Trigger Property="IsSelected" Value="True">
                                         <Setter Property="Background" Value="{DynamicResource SelectedRowBrush}" />
                                     </Trigger>
-                                    <DataTrigger Binding="{Binding Active}" Value="是">
+                                    <DataTrigger Binding="{Binding ActiveCode}" Value="Yes">
                                         <Setter Property="Background" Value="{DynamicResource ActiveRowBrush}" />
                                         <Setter Property="BorderBrush" Value="{DynamicResource ActiveBorderBrush}" />
                                         <Setter Property="BorderThickness" Value="4,0,1,0" />
@@ -269,7 +271,7 @@
                                     </DataTrigger>
                                     <MultiDataTrigger>
                                         <MultiDataTrigger.Conditions>
-                                            <Condition Binding="{Binding Active}" Value="是" />
+                                            <Condition Binding="{Binding ActiveCode}" Value="Yes" />
                                             <Condition Binding="{Binding RelativeSource={RelativeSource Self}, Path=IsSelected}" Value="True" />
                                         </MultiDataTrigger.Conditions>
                                         <Setter Property="Background" Value="{DynamicResource ActiveSelectedRowBrush}" />
@@ -278,43 +280,43 @@
                             </Style>
                         </DataGrid.RowStyle>
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" MinWidth="105" Width="*" />
-                            <DataGridTextColumn Header="当前" Binding="{Binding Active}" Width="60">
+                            <DataGridTextColumn x:Name="ProfileColumn" Header="名称" Binding="{Binding Name}" MinWidth="105" Width="*" />
+                            <DataGridTextColumn x:Name="CurrentColumn" Header="当前" Binding="{Binding Active}" MinWidth="72" Width="Auto">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="Padding" Value="6,2" />
                                         <Setter Property="FontWeight" Value="SemiBold" />
                                         <Setter Property="Foreground" Value="{DynamicResource CurrentNoBrush}" />
                                         <Style.Triggers>
-                                            <DataTrigger Binding="{Binding Active}" Value="是">
+                                            <DataTrigger Binding="{Binding ActiveCode}" Value="Yes">
                                                 <Setter Property="Foreground" Value="{DynamicResource CurrentYesBrush}" />
                                                 <Setter Property="FontWeight" Value="Bold" />
                                             </DataTrigger>
-                                            <DataTrigger Binding="{Binding Active}" Value="否">
+                                            <DataTrigger Binding="{Binding ActiveCode}" Value="No">
                                                 <Setter Property="Foreground" Value="{DynamicResource CurrentNoBrush}" />
                                             </DataTrigger>
                                         </Style.Triggers>
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="槽位验证" Binding="{Binding Verification}" Width="82" />
-                            <DataGridTextColumn Header="状态" Binding="{Binding Health}" MinWidth="105" Width="Auto">
+                            <DataGridTextColumn x:Name="VerificationColumn" Header="槽位验证" Binding="{Binding Verification}" MinWidth="100" Width="Auto" />
+                            <DataGridTextColumn x:Name="HealthColumn" Header="状态" Binding="{Binding Health}" MinWidth="105" Width="Auto">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="Padding" Value="6,2" /><Setter Property="FontWeight" Value="SemiBold" />
                                         <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
                                         <Style.Triggers>
-                                            <DataTrigger Binding="{Binding Health}" Value="正常"><Setter Property="Foreground" Value="#FF59D48B" /></DataTrigger>
-                                            <DataTrigger Binding="{Binding Health}" Value="不完整"><Setter Property="Foreground" Value="#FFFFC857" /></DataTrigger>
-                                            <DataTrigger Binding="{Binding Health}" Value="元数据异常"><Setter Property="Foreground" Value="#FFFF7B72" /></DataTrigger>
+                                            <DataTrigger Binding="{Binding HealthCode}" Value="READY"><Setter Property="Foreground" Value="#FF59D48B" /></DataTrigger>
+                                            <DataTrigger Binding="{Binding HealthCode}" Value="INCOMPLETE_PROFILE"><Setter Property="Foreground" Value="#FFFFC857" /></DataTrigger>
+                                            <DataTrigger Binding="{Binding HealthCode}" Value="INVALID_METADATA"><Setter Property="Foreground" Value="#FFFF7B72" /></DataTrigger>
                                         </Style.Triggers>
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="凭证" Binding="{Binding Auth}" Width="72" />
-                            <DataGridTextColumn Header="身份标记" Binding="{Binding Identity}" Width="82" />
-                            <DataGridTextColumn Header="元数据" Binding="{Binding Metadata}" Width="72" />
-                            <DataGridTextColumn Header="更新时间" Binding="{Binding Updated}" MinWidth="170" Width="Auto" />
+                            <DataGridTextColumn x:Name="AuthColumn" Header="凭证" Binding="{Binding Auth}" MinWidth="82" Width="Auto" />
+                            <DataGridTextColumn x:Name="IdentityColumn" Header="身份标记" Binding="{Binding Identity}" MinWidth="88" Width="Auto" />
+                            <DataGridTextColumn x:Name="MetadataColumn" Header="元数据" Binding="{Binding Metadata}" MinWidth="82" Width="Auto" />
+                            <DataGridTextColumn x:Name="UpdatedColumn" Header="更新时间" Binding="{Binding Updated}" MinWidth="170" Width="Auto" />
                             <DataGridTemplateColumn x:Name="QuotaColumn" Header="" MinWidth="190" Width="220">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
@@ -366,7 +368,7 @@
 
             <DockPanel Grid.Row="6">
                 <TextBlock x:Name="RefreshStatusText" Foreground="{DynamicResource TextPrimaryBrush}" FontWeight="SemiBold" Text="准备就绪" />
-                <TextBlock DockPanel.Dock="Right" Foreground="{DynamicResource TextSecondaryBrush}" Text="不访问浏览器或网页登录状态" />
+                <TextBlock x:Name="BrowserSafetyFooterText" DockPanel.Dock="Right" Foreground="{DynamicResource TextSecondaryBrush}" Text="不访问浏览器或网页登录状态" />
             </DockPanel>
         </Grid>
     </Grid>

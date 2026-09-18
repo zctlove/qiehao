@@ -3,11 +3,12 @@ param(
     [switch]$SelfTest,
     [switch]$SimulateQuotaModuleUnavailable,
     [switch]$SimulateQuotaQueryFailure,
-    [switch]$QuotaAsyncLifecycleSelfTest
+    [switch]$QuotaAsyncLifecycleSelfTest,
+    [switch]$LocalizationLifecycleSelfTest
 )
 
 if (($SimulateQuotaModuleUnavailable -or $SimulateQuotaQueryFailure -or
-    $QuotaAsyncLifecycleSelfTest) -and
+    $QuotaAsyncLifecycleSelfTest -or $LocalizationLifecycleSelfTest) -and
     -not $SelfTest) {
     throw 'SIMULATED_QUOTA_FAILURE_REQUIRES_SELFTEST'
 }
@@ -19,6 +20,8 @@ $guiRoot = $PSScriptRoot
 $projectRoot = Split-Path -Parent $guiRoot
 $coreModulePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 $helperModulePath = Join-Path -Path $guiRoot -ChildPath 'GuiHelpers.psm1'
+$localizationModulePath = Join-Path -Path $guiRoot `
+    -ChildPath 'Localization.psm1'
 $quotaParserModulePath = Join-Path -Path $projectRoot `
     -ChildPath 'tools\QuotaParser.psm1'
 $quotaHelperModulePath = Join-Path -Path $guiRoot -ChildPath 'QuotaHelpers.psm1'
@@ -51,6 +54,24 @@ function Test-QiehaoModuleExportContract {
 
 Import-Module -Name $coreModulePath -Force -ErrorAction Stop
 Import-Module -Name $helperModulePath -Force -ErrorAction Stop
+$script:guiLocalizationAvailable = $false
+try {
+    $localizationModule = @(Import-Module -Name $localizationModulePath `
+        -PassThru -Force -ErrorAction Stop | Select-Object -Last 1)[0]
+    $script:guiLocalizationAvailable = Test-QiehaoModuleExportContract `
+        -Module $localizationModule -RequiredCommands @(
+            'Get-QiehaoSupportedLanguages',
+            'Resolve-QiehaoLanguage',
+            'Get-QiehaoLocalizedString',
+            'Format-QiehaoLocalizedString',
+            'Get-QiehaoLocalizedThemeName'
+        )
+}
+catch {
+    # Localization is optional presentation infrastructure. The existing
+    # Chinese XAML and GUI text remain a fail-open fallback for Core.
+    $script:guiLocalizationAvailable = $false
+}
 $script:guiQuotaModulesAvailable = $false
 $script:guiQuotaInitializationFailureCode = $null
 if ($SimulateQuotaModuleUnavailable) {
@@ -123,6 +144,49 @@ else {
     }
 }
 $stateDirectory = Resolve-QiehaoProjectStateDirectory -GuiScriptRoot $guiRoot
+$script:guiLanguage = 'zh-CN'
+
+function Get-QiehaoGuiText {
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [string]$Fallback = ''
+    )
+    if ($script:guiLocalizationAvailable) {
+        try {
+            $localized = Get-QiehaoLocalizedString -Key $Key `
+                -Language $script:guiLanguage
+            if (-not $localized.StartsWith(
+                '[Missing:', [StringComparison]::Ordinal
+            )) { return $localized }
+        }
+        catch { }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Fallback)) { return $Fallback }
+    return '[Missing:' + $Key + ']'
+}
+
+function Format-QiehaoGuiText {
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [AllowNull()][object[]]$Arguments = @(),
+        [string]$Fallback = ''
+    )
+    if ($script:guiLocalizationAvailable) {
+        try {
+            $localized = Format-QiehaoLocalizedString -Key $Key `
+                -Language $script:guiLanguage -Arguments $Arguments
+            if (-not $localized.StartsWith(
+                '[Missing:', [StringComparison]::Ordinal
+            )) { return $localized }
+        }
+        catch { }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Fallback)) {
+        try { return [string]::Format($Fallback, [object[]]$Arguments) }
+        catch { return $Fallback }
+    }
+    return '[Missing:' + $Key + ']'
+}
 
 $script:guiQuotaFallbackStrings = [ordered]@{
     RefreshButton = '刷新额度'
@@ -136,7 +200,10 @@ $script:guiQuotaFallbackStrings = [ordered]@{
 function Get-QiehaoQuotaUiTextSafe {
     param([Parameter(Mandatory = $true)][string]$Key)
     if ($script:guiQuotaModulesAvailable) {
-        try { return Get-QiehaoQuotaUiText -Key $Key }
+        try {
+            return Get-QiehaoQuotaUiText -Key $Key `
+                -Language $script:guiLanguage
+        }
         catch { }
     }
     if ($script:guiQuotaFallbackStrings.Contains($Key)) {
@@ -176,8 +243,10 @@ function Format-QiehaoQuotaFailureStatus {
         [Parameter(Mandatory = $true)][string]$BaseText,
         [Parameter(Mandatory = $true)][string]$FailureCode
     )
-    return ($BaseText + ' 错误代码：' +
-        (Get-QiehaoSafeQuotaFailureCode -Value $FailureCode))
+    return ($BaseText + ' ' + (Format-QiehaoGuiText `
+        -Key 'Quota.ErrorCode' `
+        -Arguments @((Get-QiehaoSafeQuotaFailureCode -Value $FailureCode)) `
+        -Fallback '错误代码：{0}'))
 }
 
 function Read-QiehaoMainWindow {
@@ -242,6 +311,26 @@ try {
 
     $window = Read-QiehaoMainWindow
     $profilesGrid = Get-RequiredControl -Window $window -Name 'ProfilesGrid'
+    $headerTitleText = Get-RequiredControl -Window $window -Name 'HeaderTitleText'
+    $themeLabelText = Get-RequiredControl -Window $window -Name 'ThemeLabelText'
+    $languageLabelText = Get-RequiredControl -Window $window -Name 'LanguageLabelText'
+    $languageComboBox = Get-RequiredControl -Window $window -Name 'LanguageComboBox'
+    $codexClientLabelText = Get-RequiredControl -Window $window -Name 'CodexClientLabelText'
+    $currentAccountLabelText = Get-RequiredControl -Window $window -Name 'CurrentAccountLabelText'
+    $currentIdentityLabelText = Get-RequiredControl -Window $window -Name 'CurrentIdentityLabelText'
+    $webChatGPTLabelText = Get-RequiredControl -Window $window -Name 'WebChatGPTLabelText'
+    $webChatGPTHintText = Get-RequiredControl -Window $window -Name 'WebChatGPTHintText'
+    $savedAccountsHeadingText = Get-RequiredControl -Window $window -Name 'SavedAccountsHeadingText'
+    $searchAccountsLabelText = Get-RequiredControl -Window $window -Name 'SearchAccountsLabelText'
+    $browserSafetyFooterText = Get-RequiredControl -Window $window -Name 'BrowserSafetyFooterText'
+    $profileColumn = Get-RequiredControl -Window $window -Name 'ProfileColumn'
+    $currentColumn = Get-RequiredControl -Window $window -Name 'CurrentColumn'
+    $verificationColumn = Get-RequiredControl -Window $window -Name 'VerificationColumn'
+    $healthColumn = Get-RequiredControl -Window $window -Name 'HealthColumn'
+    $authColumn = Get-RequiredControl -Window $window -Name 'AuthColumn'
+    $identityColumn = Get-RequiredControl -Window $window -Name 'IdentityColumn'
+    $metadataColumn = Get-RequiredControl -Window $window -Name 'MetadataColumn'
+    $updatedColumn = Get-RequiredControl -Window $window -Name 'UpdatedColumn'
     $quotaColumn = Get-RequiredControl -Window $window -Name 'QuotaColumn'
     $profileSearchTextBox = Get-RequiredControl -Window $window -Name 'ProfileSearchTextBox'
     $profileCountText = Get-RequiredControl -Window $window -Name 'ProfileCountText'
@@ -274,7 +363,13 @@ try {
     $contextDeleteMenuItem = Get-RequiredContextMenuItem -ContextMenu $profileContextMenu -Name 'ContextDeleteMenuItem'
 
     $script:guiCurrentCodexStatus = '未知'
+    $script:guiCurrentCodexState = 'Unknown'
     $script:guiCurrentActiveProfile = '未初始化'
+    $script:guiActiveProfileKnown = $false
+    $script:guiCurrentIdentityState = 'Unavailable'
+    $script:guiCurrentStatusKey = 'Status.Ready'
+    $script:guiCurrentStatusArguments = @()
+    $script:guiLanguagePersistenceReady = $false
     $script:guiIsWriteOperationBusy = $false
     $script:guiManualSwitchWaitInProgress = $false
     $script:guiManualSwitchWaitTimer = $null
@@ -300,6 +395,7 @@ try {
     $script:guiLaunchSettings = $null
     $script:guiAllProfileRows = @()
     $script:guiVerificationStates = @{}
+    $script:guiVerificationStateCodes = @{}
     $script:guiIsClosing = $false
     $script:guiThemePersistenceReady = $false
     $script:guiQuotaCacheRead = if (-not $script:guiQuotaModulesAvailable) {
@@ -389,6 +485,167 @@ try {
             $script:guiManualSwitchWaitStatusText.Foreground =
                 $window.Resources[$brushKey]
         }
+    }
+
+    function Set-QiehaoLocalizedStatus {
+        param(
+            [Parameter(Mandatory = $true)][string]$Key,
+            [AllowNull()][object[]]$Arguments = @(),
+            [string]$Fallback = ''
+        )
+        $script:guiCurrentStatusKey = $Key
+        $script:guiCurrentStatusArguments = @($Arguments)
+        $refreshStatusText.Text = Format-QiehaoGuiText -Key $Key `
+            -Arguments $Arguments -Fallback $Fallback
+    }
+
+    function Update-QiehaoLocalizedProfileRows {
+        foreach ($row in @($script:guiAllProfileRows)) {
+            if ($null -eq $row) { continue }
+            $activeKey = switch ([string]$row.ActiveCode) {
+                'Yes' { 'Profile.Active.Yes' }
+                'No' { 'Profile.Active.No' }
+                default { 'Profile.Active.Unknown' }
+            }
+            $verificationKey = switch ([string]$row.VerificationCode) {
+                'Verified' { 'Profile.Verification.Verified' }
+                'Failed' { 'Profile.Verification.Failed' }
+                default { 'Profile.Verification.Unverified' }
+            }
+            $healthKey = switch ([string]$row.HealthCode) {
+                'READY' { 'Profile.Health.Ready' }
+                'INCOMPLETE_PROFILE' { 'Profile.Health.Incomplete' }
+                'INVALID_METADATA' { 'Profile.Health.InvalidMetadata' }
+                default { 'Profile.Health.Unknown' }
+            }
+            $authKey = switch ([string]$row.AuthCode) {
+                'PRESENT' { 'Profile.Artifact.Present' }
+                'MISSING' { 'Profile.Artifact.Missing' }
+                default { 'Profile.Artifact.Unknown' }
+            }
+            $identityKey = switch ([string]$row.IdentityCode) {
+                'PRESENT' { 'Profile.Artifact.Present' }
+                'MISSING' { 'Profile.Artifact.Missing' }
+                default { 'Profile.Artifact.Unknown' }
+            }
+            $metadataKey = switch ([string]$row.MetadataCode) {
+                'VALID' { 'Profile.Metadata.Valid' }
+                'MISSING' { 'Profile.Metadata.Missing' }
+                'INVALID' { 'Profile.Metadata.Invalid' }
+                default { 'Profile.Metadata.Unknown' }
+            }
+            $row.Active = Get-QiehaoGuiText -Key $activeKey
+            $row.Verification = Get-QiehaoGuiText -Key $verificationKey
+            $row.Health = Get-QiehaoGuiText -Key $healthKey
+            $row.Auth = Get-QiehaoGuiText -Key $authKey
+            $row.Identity = Get-QiehaoGuiText -Key $identityKey
+            $row.Metadata = Get-QiehaoGuiText -Key $metadataKey
+            if ([string]$row.UpdatedCode -ceq 'Unavailable') {
+                $row.Updated = Get-QiehaoGuiText `
+                    -Key 'Profile.Updated.Unavailable'
+            }
+            elseif ([string]$row.UpdatedCode -ceq 'InvalidMetadata') {
+                $row.Updated = Get-QiehaoGuiText `
+                    -Key 'Profile.Updated.InvalidMetadata'
+            }
+        }
+    }
+
+    function Get-QiehaoLocalizedLaunchStatus {
+        if ($null -eq $script:guiLaunchTarget) {
+            return Get-QiehaoGuiText -Key 'Launch.Status.NotFound'
+        }
+        $key = switch ([string]$script:guiLaunchTarget.DisplayStatus) {
+            '已自动检测' { 'Launch.Status.AutoDetected' }
+            '已使用自定义文件' { 'Launch.Status.Custom' }
+            '自定义路径无效' { 'Launch.Status.InvalidCustom' }
+            default { 'Launch.Status.NotFound' }
+        }
+        return Get-QiehaoGuiText -Key $key
+    }
+
+    function Apply-QiehaoLocalization {
+        if (-not $script:guiLocalizationAvailable) { return }
+        $window.Title = Get-QiehaoGuiText -Key 'App.Title'
+        $headerTitleText.Text = Get-QiehaoGuiText -Key 'App.Title'
+        $themeLabelText.Text = Get-QiehaoGuiText -Key 'Theme.Label'
+        $languageLabelText.Text = Get-QiehaoGuiText -Key 'Language.Label'
+        $codexClientLabelText.Text = Get-QiehaoGuiText -Key 'Section.CodexClient'
+        $currentAccountLabelText.Text = Get-QiehaoGuiText -Key 'Section.CurrentAccount'
+        $currentIdentityLabelText.Text = Get-QiehaoGuiText -Key 'Section.CurrentIdentity'
+        $webChatGPTLabelText.Text = Get-QiehaoGuiText -Key 'Section.WebChatGPT'
+        $webChatGPTText.Text = Get-QiehaoGuiText -Key 'WebChatGPT.Unchanged'
+        $webChatGPTHintText.Text = Get-QiehaoGuiText -Key 'WebChatGPT.Hint'
+        $savedAccountsHeadingText.Text = Get-QiehaoGuiText -Key 'Section.SavedAccounts'
+        $searchAccountsLabelText.Text = Get-QiehaoGuiText -Key 'Search.Label'
+        $profileSearchTextBox.ToolTip = Get-QiehaoGuiText -Key 'Search.ToolTip'
+        $browserSafetyFooterText.Text = Get-QiehaoGuiText -Key 'Footer.BrowserSafe'
+        $profileColumn.Header = Get-QiehaoGuiText -Key 'Column.Profile'
+        $currentColumn.Header = Get-QiehaoGuiText -Key 'Column.Current'
+        $verificationColumn.Header = Get-QiehaoGuiText -Key 'Column.Verification'
+        $healthColumn.Header = Get-QiehaoGuiText -Key 'Column.Status'
+        $authColumn.Header = Get-QiehaoGuiText -Key 'Column.Auth'
+        $identityColumn.Header = Get-QiehaoGuiText -Key 'Column.Identity'
+        $metadataColumn.Header = Get-QiehaoGuiText -Key 'Column.Metadata'
+        $updatedColumn.Header = Get-QiehaoGuiText -Key 'Column.Updated'
+        $quotaColumn.Header = Get-QiehaoGuiText -Key 'Column.QuotaSnapshot'
+        $switchButton.Content = Get-QiehaoGuiText -Key 'Button.Switch'
+        $verifyButton.Content = Get-QiehaoGuiText -Key 'Button.Verify'
+        $refreshButton.Content = Get-QiehaoGuiText -Key 'Button.Refresh'
+        $refreshQuotaButton.Content = Get-QiehaoGuiText -Key 'Button.RefreshQuota'
+        $addButton.Content = Get-QiehaoGuiText -Key 'Button.Add'
+        $renameButton.Content = Get-QiehaoGuiText -Key 'Button.Rename'
+        $deleteButton.Content = Get-QiehaoGuiText -Key 'Button.Delete'
+        $launchCodexButton.Content = Get-QiehaoGuiText -Key 'Button.LaunchCodex'
+        $launchSettingsButton.Content = Get-QiehaoGuiText -Key 'Button.LaunchSettings'
+        $contextSwitchMenuItem.Header = Get-QiehaoGuiText -Key 'Context.Switch'
+        $contextVerifyMenuItem.Header = Get-QiehaoGuiText -Key 'Context.Verify'
+        $contextRenameMenuItem.Header = Get-QiehaoGuiText -Key 'Context.Rename'
+        $contextDeleteMenuItem.Header = Get-QiehaoGuiText -Key 'Context.Delete'
+        foreach ($theme in @($themeComboBox.ItemsSource)) {
+            if ($null -ne $theme) {
+                $theme.Name = Get-QiehaoLocalizedThemeName `
+                    -ThemeId ([string]$theme.Id) -Language $script:guiLanguage
+            }
+        }
+        $themeComboBox.Items.Refresh()
+        $codexStatusText.Text = Get-QiehaoGuiText -Key (
+            'Status.Codex.' + $script:guiCurrentCodexState
+        )
+        $activeProfileText.Text = if ($script:guiActiveProfileKnown) {
+            [string]$script:guiCurrentActiveProfile
+        }
+        else { Get-QiehaoGuiText -Key 'Status.Active.Uninitialized' }
+        $identityStatusText.Text = Get-QiehaoGuiText -Key (
+            'Status.Identity.' + $script:guiCurrentIdentityState
+        )
+        Update-QiehaoLocalizedProfileRows
+        if ($script:guiQuotaModulesAvailable) {
+            $rows = @(Update-QiehaoQuotaProfileRows `
+                -Rows $script:guiAllProfileRows `
+                -Cache $script:guiQuotaCache `
+                -ActiveProfile $script:guiCurrentActiveProfile `
+                -JustUpdatedProfile $script:guiQuotaJustUpdatedProfile `
+                -Language $script:guiLanguage)
+            $script:guiAllProfileRows = $rows
+        }
+        if ($null -ne $script:guiLaunchTarget) {
+            $launchTargetText.Text = Format-QiehaoGuiText `
+                -Key 'Launch.Target' `
+                -Arguments @((Get-QiehaoLocalizedLaunchStatus))
+        }
+        if ([bool]$script:guiQuotaCoordinator.QueryInProgress) {
+            $refreshStatusText.Text = Get-QiehaoGuiText -Key 'Quota.Updating'
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace(
+            [string]$script:guiCurrentStatusKey
+        )) {
+            $refreshStatusText.Text = Format-QiehaoGuiText `
+                -Key $script:guiCurrentStatusKey `
+                -Arguments $script:guiCurrentStatusArguments
+        }
+        Update-QiehaoCodexSafetyHint
+        Update-QiehaoProfileFilter
     }
 
     function Set-QiehaoQuotaUnavailableRows {
@@ -484,13 +741,15 @@ try {
             [string]$Severity = 'Information'
         )
         $icon = [System.Windows.MessageBoxImage]::Information
-        $title = 'Codex 账号管理器'
+        $title = Get-QiehaoGuiText -Key 'App.Title' `
+            -Fallback 'Codex 账号管理器'
         if ($Severity -ceq 'Warning') {
             $icon = [System.Windows.MessageBoxImage]::Warning
         }
         elseif ($Severity -ceq 'Critical') {
             $icon = [System.Windows.MessageBoxImage]::Error
-            $title = '严重安全错误 - Codex 账号管理器'
+            $title = Get-QiehaoGuiText -Key 'App.CriticalTitle' `
+                -Fallback '严重安全错误 - Codex 账号管理器'
         }
         [void][System.Windows.MessageBox]::Show(
             $window, $Message, $title,
@@ -501,7 +760,10 @@ try {
     function Show-QiehaoOperationResult {
         param([Parameter(Mandatory = $true)][object]$Result)
         if (-not [string]::IsNullOrWhiteSpace([string]$Result.Message)) {
-            Show-QiehaoSafeMessage -Message ([string]$Result.Message) `
+            $message = Get-QiehaoGuiText `
+                -Key ('Operation.' + [string]$Result.ResultCode) `
+                -Fallback ([string]$Result.Message)
+            Show-QiehaoSafeMessage -Message $message `
                 -Severity ([string]$Result.Severity)
         }
     }
@@ -511,8 +773,12 @@ try {
             [Parameter(Mandatory = $true)][string]$Title,
             [Parameter(Mandatory = $true)][string]$Message,
             [Parameter(Mandatory = $true)][string]$ConfirmText,
-            [string]$CancelText = '取消'
+            [string]$CancelText = ''
         )
+        if ([string]::IsNullOrWhiteSpace($CancelText)) {
+            $CancelText = Get-QiehaoGuiText -Key 'Button.Cancel' `
+                -Fallback '取消'
+        }
         $dialog = New-Object System.Windows.Window
         $dialog.Title = $Title
         $dialog.Width = 500
@@ -589,7 +855,9 @@ try {
         }
         if (-not [string]::IsNullOrWhiteSpace($CurrentName)) {
             $currentText = New-Object System.Windows.Controls.TextBlock
-            $currentText.Text = '当前名称：' + $CurrentName
+            $currentText.Text = Format-QiehaoGuiText `
+                -Key 'Dialog.Name.Current' -Arguments @($CurrentName) `
+                -Fallback '当前名称：{0}'
             $currentText.Margin = '0,0,0,12'
             [System.Windows.Controls.Grid]::SetRow($currentText, 0)
             $root.Children.Add($currentText) | Out-Null
@@ -611,13 +879,15 @@ try {
         $buttons.Margin = '0,18,0,0'
         [System.Windows.Controls.Grid]::SetRow($buttons, 4)
         $okButton = New-Object System.Windows.Controls.Button
-        $okButton.Content = '确定'
+        $okButton.Content = Get-QiehaoGuiText -Key 'Button.Confirm' `
+            -Fallback '确定'
         $okButton.MinWidth = 90
         $okButton.MinHeight = 34
         $okButton.Margin = '0,0,8,0'
         $okButton.IsDefault = $true
         $cancelButton = New-Object System.Windows.Controls.Button
-        $cancelButton.Content = '取消'
+        $cancelButton.Content = Get-QiehaoGuiText -Key 'Button.Cancel' `
+            -Fallback '取消'
         $cancelButton.MinWidth = 90
         $cancelButton.MinHeight = 34
         $cancelButton.IsCancel = $true
@@ -625,7 +895,10 @@ try {
             $candidate = ([string]$nameBox.Text).Trim()
             if ([string]::IsNullOrWhiteSpace($candidate)) {
                 [void][System.Windows.MessageBox]::Show(
-                    $dialog, '名称不能为空。', 'Codex 账号管理器',
+                    $dialog, (Get-QiehaoGuiText -Key 'Dialog.Name.Empty' `
+                        -Fallback '名称不能为空。'),
+                    (Get-QiehaoGuiText -Key 'App.Title' `
+                        -Fallback 'Codex 账号管理器'),
                     [System.Windows.MessageBoxButton]::OK,
                     [System.Windows.MessageBoxImage]::Warning
                 )
@@ -769,10 +1042,19 @@ try {
                 $null = Write-QiehaoUiPreferences -StateDirectory $stateDirectory `
                     -Background $Theme.Id
                 $refreshStatusText.Text = if ($imageResult.Loaded) {
-                    '皮肤已切换并保存'
-                } else { '背景图片不可用，已使用默认纯色并保存选择' }
+                    Get-QiehaoGuiText -Key 'Theme.Saved' `
+                        -Fallback '皮肤已切换并保存'
+                }
+                else {
+                    Get-QiehaoGuiText -Key 'Theme.SavedWithFallback' `
+                        -Fallback '背景图片不可用，已使用默认纯色并保存选择'
+                }
             }
-            catch { $refreshStatusText.Text = '皮肤已切换，但偏好保存失败' }
+            catch {
+                $refreshStatusText.Text = Get-QiehaoGuiText `
+                    -Key 'Theme.SaveFailed' `
+                    -Fallback '皮肤已切换，但偏好保存失败'
+            }
         }
         return $imageResult
     }
@@ -790,11 +1072,15 @@ try {
             if ($matching.Count -eq 1) { $profilesGrid.SelectedItem = $matching[0] }
         }
         if ($filteredRows.Count -eq $script:guiAllProfileRows.Count) {
-            $profileCountText.Text = [string]$filteredRows.Count + ' 个账号'
+            $profileCountText.Text = Format-QiehaoGuiText `
+                -Key 'Profile.Count' -Arguments @($filteredRows.Count) `
+                -Fallback '{0} 个账号'
         }
         else {
-            $profileCountText.Text = [string]$filteredRows.Count + ' / ' +
-                [string]$script:guiAllProfileRows.Count + ' 个账号'
+            $profileCountText.Text = Format-QiehaoGuiText `
+                -Key 'Profile.FilteredCount' `
+                -Arguments @($filteredRows.Count, $script:guiAllProfileRows.Count) `
+                -Fallback '{0} / {1} 个账号'
         }
         Update-QiehaoActionButtons
     }
@@ -806,17 +1092,33 @@ try {
             if ($script:guiVerificationStates.ContainsKey([string]$row.Name)) {
                 $row.Verification = [string]$script:guiVerificationStates[[string]$row.Name]
             }
+            if ($script:guiVerificationStateCodes.ContainsKey([string]$row.Name)) {
+                $row.VerificationCode = [string](
+                    $script:guiVerificationStateCodes[[string]$row.Name]
+                )
+            }
         }
         # Establish core state before optional quota enrichment. Quota failures
         # must never replace the profile population or core status fields.
         $script:guiAllProfileRows = @($rows)
-        $codexStatusText.Text = [string]$Snapshot.CodexDesktop
         $script:guiCurrentCodexStatus = [string]$Snapshot.CodexDesktop
-        $activeProfileText.Text = [string]$Snapshot.ActiveProfile
+        $script:guiCurrentCodexState = [string]$Snapshot.CodexState
         $script:guiCurrentActiveProfile = [string]$Snapshot.ActiveProfile
-        $identityStatusText.Text = [string]$Snapshot.IdentityStatus
-        $webChatGPTText.Text = [string]$Snapshot.WebChatGPT
+        $script:guiActiveProfileKnown = [bool]$Snapshot.ActiveProfileKnown
+        $script:guiCurrentIdentityState = [string]$Snapshot.IdentityState
         Set-QiehaoCodexStatusVisual -Status $script:guiCurrentCodexStatus
+        $activeProfileText.Text = if ($script:guiActiveProfileKnown) {
+            [string]$script:guiCurrentActiveProfile
+        }
+        else {
+            Get-QiehaoGuiText -Key 'Status.Active.Uninitialized' `
+                -Fallback '未初始化'
+        }
+        $identityStatusText.Text = Get-QiehaoGuiText `
+            -Key ('Status.Identity.' + $script:guiCurrentIdentityState) `
+            -Fallback ([string]$Snapshot.IdentityStatus)
+        $webChatGPTText.Text = Get-QiehaoGuiText -Key 'WebChatGPT.Unchanged' `
+            -Fallback ([string]$Snapshot.WebChatGPT)
         switch ([string]$Snapshot.IdentityStatus) {
             '已确认' { $identityStatusText.Foreground = '#FF59D48B' }
             '不匹配' { $identityStatusText.Foreground = '#FFFF7B72' }
@@ -833,7 +1135,8 @@ try {
                     -Rows $Context.Rows `
                     -Cache $Context.Cache `
                     -ActiveProfile ([string]$Context.ActiveProfile) `
-                    -JustUpdatedProfile $Context.JustUpdatedProfile)
+                    -JustUpdatedProfile $Context.JustUpdatedProfile `
+                    -Language $Context.Language)
                 if ($decoratedRows.Count -ne @($Context.Rows).Count) {
                     throw 'QUOTA_ENRICHMENT_CHANGED_PROFILE_POPULATION'
                 }
@@ -843,6 +1146,7 @@ try {
                 Cache = $script:guiQuotaCache
                 ActiveProfile = [string]$Snapshot.ActiveProfile
                 JustUpdatedProfile = $script:guiQuotaJustUpdatedProfile
+                Language = $script:guiLanguage
             })
         }
         $quotaResult = Invoke-QiehaoOptionalProfileRowEnrichment `
@@ -853,9 +1157,15 @@ try {
             Set-QiehaoQuotaUnavailableRows -Rows $script:guiAllProfileRows
             Disable-QiehaoQuotaFeature
         }
-        $refreshStatusText.Text = if (@($Snapshot.ReadOnlyErrors).Count -eq 0) {
-            '状态已刷新'
-        } else { '部分只读状态暂不可用' }
+        if (@($Snapshot.ReadOnlyErrors).Count -eq 0) {
+            Set-QiehaoLocalizedStatus -Key 'Status.Refreshed' `
+                -Fallback '状态已刷新'
+        }
+        else {
+            Set-QiehaoLocalizedStatus -Key 'Status.PartialReadOnly' `
+                -Fallback '部分只读状态暂不可用'
+        }
+        Update-QiehaoLocalizedProfileRows
         Update-QiehaoProfileFilter
     }
 
@@ -884,10 +1194,15 @@ try {
             )
         }
         catch {
-            $refreshStatusText.Text = '只读刷新失败'
-            $codexStatusText.Text = '未知'
+            Set-QiehaoLocalizedStatus -Key 'Status.RefreshFailed' `
+                -Fallback '只读刷新失败'
             $script:guiCurrentCodexStatus = '未知'
-            $identityStatusText.Text = '无法确认'
+            $script:guiCurrentCodexState = 'Unknown'
+            $script:guiCurrentIdentityState = 'Unavailable'
+            $codexStatusText.Text = Get-QiehaoGuiText `
+                -Key 'Status.Codex.Unknown' -Fallback '未知'
+            $identityStatusText.Text = Get-QiehaoGuiText `
+                -Key 'Status.Identity.Unavailable' -Fallback '无法确认'
             Update-QiehaoActionButtons
         }
         if ($PassThru) { return $refreshSucceeded }
@@ -904,7 +1219,8 @@ try {
                 -Rows $script:guiAllProfileRows `
                 -Cache $script:guiQuotaCache `
                 -ActiveProfile $script:guiCurrentActiveProfile `
-                -JustUpdatedProfile $script:guiQuotaJustUpdatedProfile)
+                -JustUpdatedProfile $script:guiQuotaJustUpdatedProfile `
+                -Language $script:guiLanguage)
             if ($rows.Count -ne $script:guiAllProfileRows.Count) {
                 throw 'QUOTA_ENRICHMENT_CHANGED_PROFILE_POPULATION'
             }
@@ -1086,18 +1402,23 @@ try {
                     $script:guiManualSwitchWaitInProgress -and
                     -not $script:guiManualSwitchCodexStopped
                 ) {
-                    "'$requestedProfile' 的额度快照已保存，" +
-                    '正在等待 Codex 安全退出……'
+                    Format-QiehaoGuiText `
+                        -Key 'Quota.SwitchBeforeSavedWaiting' `
+                        -Arguments @($requestedProfile) `
+                        -Fallback "'{0}' 的额度快照已保存，正在等待 Codex 安全退出……"
                 }
                 else {
-                    "'$requestedProfile' 的额度快照已保存，正在切换账号……"
+                    Format-QiehaoGuiText `
+                        -Key 'Quota.SwitchBeforeSaved' `
+                        -Arguments @($requestedProfile) `
+                        -Fallback "'{0}' 的额度快照已保存，正在切换账号……"
                 }
                 Set-QiehaoSwitchQuotaStatus -Tone Success `
                     -Text $switchQuotaSuccessText
             }
             else {
-                $refreshStatusText.Text =
-                    Get-QiehaoQuotaUiTextSafe -Key 'Updated'
+                Set-QiehaoLocalizedStatus -Key 'Quota.Updated' `
+                    -Fallback '当前账号额度已更新。'
             }
         }
         else {
@@ -1108,21 +1429,23 @@ try {
                 Get-QiehaoSafeQuotaFailureCode -Value $completionFailureCode
             if ($reason -ceq 'SwitchBefore') {
                 Set-QiehaoSwitchQuotaStatus -Text (
-                    "本次未能更新 '$requestedProfile' 的额度快照。" +
-                    '已保留上次缓存，正在继续切换……'
+                    Format-QiehaoGuiText `
+                        -Key 'Quota.SwitchBeforeFallback' `
+                        -Arguments @($requestedProfile) `
+                        -Fallback "本次未能更新 '{0}' 的额度快照。已保留上次缓存，正在继续切换……"
                 )
             }
             elseif ($reason -ceq 'SwitchAfter') {
-                $refreshStatusText.Text = Format-QiehaoQuotaFailureStatus `
-                    -BaseText (
-                        Get-QiehaoQuotaUiTextSafe -Key 'SwitchNewFailed'
-                    ) -FailureCode $script:guiQuotaLastFailureCode
+                Set-QiehaoLocalizedStatus `
+                    -Key 'Quota.SwitchNewFailedWithCode' `
+                    -Arguments @($script:guiQuotaLastFailureCode) `
+                    -Fallback '切换成功；额度更新失败，保留原缓存。 错误代码：{0}'
             }
             else {
-                $refreshStatusText.Text = Format-QiehaoQuotaFailureStatus `
-                    -BaseText (
-                        Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry'
-                    ) -FailureCode $script:guiQuotaLastFailureCode
+                Set-QiehaoLocalizedStatus `
+                    -Key 'Quota.UpdateFailedRetryWithCode' `
+                    -Arguments @($script:guiQuotaLastFailureCode) `
+                    -Fallback '额度更新失败，可稍后点击“刷新额度”重试。 错误代码：{0}'
             }
         }
         try {
@@ -1193,7 +1516,8 @@ try {
         $script:guiQuotaDeadlineUtc = [DateTime]::UtcNow.AddMilliseconds(
             $hardCeilingMilliseconds
         )
-        $refreshStatusText.Text = Get-QiehaoQuotaUiTextSafe -Key 'Updating'
+        Set-QiehaoLocalizedStatus -Key 'Quota.Updating' `
+            -Fallback '正在更新当前账号额度……'
         Update-QiehaoActionButtons
         try {
             $powerShell = [PowerShell]::Create()
@@ -1372,7 +1696,8 @@ try {
                         $script:guiQuotaSlowStatusShown = $true
                         if (-not $script:guiManualSwitchCodexStopped) {
                             Set-QiehaoSwitchQuotaStatus -Text (
-                                '额度服务响应较慢，仍在等待……'
+                                Get-QiehaoGuiText -Key 'Quota.SlowResponse' `
+                                    -Fallback '额度服务响应较慢，仍在等待……'
                             )
                         }
                     }
@@ -1387,11 +1712,10 @@ try {
                     $script:guiQuotaLastQueryFailed = $true
                     $script:guiQuotaLastFailureCode =
                         'QUOTA_BACKGROUND_WORKER_FAILED'
-                    $refreshStatusText.Text =
-                        Format-QiehaoQuotaFailureStatus -BaseText (
-                            Get-QiehaoQuotaUiTextSafe `
-                                -Key 'UpdateFailedRetry'
-                        ) -FailureCode $script:guiQuotaLastFailureCode
+                    Set-QiehaoLocalizedStatus `
+                        -Key 'Quota.UpdateFailedRetryWithCode' `
+                        -Arguments @($script:guiQuotaLastFailureCode) `
+                        -Fallback '额度更新失败，可稍后点击“刷新额度”重试。 错误代码：{0}'
                     try { Update-QiehaoQuotaRows }
                     finally { Update-QiehaoActionButtons }
                 }
@@ -1407,10 +1731,10 @@ try {
             $script:guiQuotaLastQueryFailed = $true
             $script:guiQuotaLastFailureCode =
                 'QUOTA_BACKGROUND_WORKER_FAILED'
-            $refreshStatusText.Text =
-                Format-QiehaoQuotaFailureStatus -BaseText (
-                    Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry'
-                ) -FailureCode $script:guiQuotaLastFailureCode
+            Set-QiehaoLocalizedStatus `
+                -Key 'Quota.UpdateFailedRetryWithCode' `
+                -Arguments @($script:guiQuotaLastFailureCode) `
+                -Fallback '额度更新失败，可稍后点击“刷新额度”重试。 错误代码：{0}'
             return $false
         }
     }
@@ -1481,51 +1805,78 @@ try {
         $script:guiSwitchUiState = $State
         switch ($State) {
             'WaitingForCodexExit' {
-                $refreshStatusText.Text =
-                    "正在等待 Codex 安全退出，随后自动切换到 '$TargetProfile'……"
+                Set-QiehaoLocalizedStatus `
+                    -Key 'Dialog.Switch.WaitingTarget' `
+                    -Arguments @($TargetProfile) `
+                    -Fallback "正在等待 Codex 安全退出，随后自动切换到 '{0}'……"
             }
             'Switching' {
-                $refreshStatusText.Text =
-                    "已检测到 Codex 完全退出，正在切换到 '$TargetProfile'……"
+                Set-QiehaoLocalizedStatus `
+                    -Key 'Switch.Status.SwitchingTarget' `
+                    -Arguments @($TargetProfile) `
+                    -Fallback "已检测到 Codex 完全退出，正在切换到 '{0}'……"
             }
             'SwitchSucceeded' {
-                $refreshStatusText.Text = "切换成功，当前账号：$TargetProfile"
+                Set-QiehaoLocalizedStatus `
+                    -Key 'Switch.Status.SuccessCurrent' `
+                    -Arguments @($TargetProfile) `
+                    -Fallback '切换成功，当前账号：{0}'
             }
             'SwitchSucceededUiRefreshFailed' {
-                $refreshStatusText.Text =
-                    '账号切换已经成功，但界面状态刷新失败。请点击“刷新”重新读取当前状态。'
+                Set-QiehaoLocalizedStatus -Key 'Switch.RefreshFailed' `
+                    -Fallback '账号切换已经成功，但界面状态刷新失败。请点击“刷新”重新读取当前状态。'
             }
-            'SwitchFailed' { $refreshStatusText.Text = '账号切换未完成' }
-            'Cancelled' { $refreshStatusText.Text = '已取消等待，本次未切换账号' }
-            'Unknown' { $refreshStatusText.Text = '进程状态未知，本次未切换账号' }
-            'TimedOut' { $refreshStatusText.Text = '等待超时，本次未切换账号' }
-            'Closing' { $refreshStatusText.Text = '切换等待已停止' }
+            'SwitchFailed' {
+                Set-QiehaoLocalizedStatus -Key 'Switch.Status.Failed' `
+                    -Fallback '账号切换未完成'
+            }
+            'Cancelled' {
+                Set-QiehaoLocalizedStatus -Key 'Switch.Status.Cancelled' `
+                    -Fallback '已取消等待，本次未切换账号'
+            }
+            'Unknown' {
+                Set-QiehaoLocalizedStatus -Key 'Switch.Status.Unknown' `
+                    -Fallback '进程状态未知，本次未切换账号'
+            }
+            'TimedOut' {
+                Set-QiehaoLocalizedStatus -Key 'Switch.Status.TimedOut' `
+                    -Fallback '等待超时，本次未切换账号'
+            }
+            'Closing' {
+                Set-QiehaoLocalizedStatus -Key 'Switch.Status.Closing' `
+                    -Fallback '切换等待已停止'
+            }
         }
     }
 
     function Update-QiehaoCodexSafetyHint {
         if ($script:guiManualSwitchWaitInProgress) {
-            $codexSafetyHintText.Text =
-                '等待用户正常退出 Codex；检测到完全退出后将自动继续切换。'
+            $codexSafetyHintText.Text = Get-QiehaoGuiText `
+                -Key 'Safety.WaitingForExit' `
+                -Fallback '等待用户正常退出 Codex；检测到完全退出后将自动继续切换。'
             $codexSafetyHintText.Foreground =
                 $window.Resources['RunningWarningBrush']
             return
         }
-        switch ($script:guiCurrentCodexStatus) {
-            '运行中' {
-                $codexSafetyHintText.Text =
-                    'Codex 正在运行。切换账号前，请在 Codex 中选择“文件 → 退出”，或从系统托盘选择“Quit Codex”。关闭主窗口不等于完全退出。'
+        switch ($script:guiCurrentCodexState) {
+            'Running' {
+                $codexSafetyHintText.Text = Get-QiehaoGuiText `
+                    -Key 'Safety.Running' `
+                    -Fallback 'Codex 正在运行。切换账号前请安全退出 Codex。'
                 $codexSafetyHintText.Foreground =
                     $window.Resources['RunningWarningBrush']
             }
-            '已退出' {
-                $codexSafetyHintText.Text = 'Codex 已安全退出，可以切换账号。'
+            'Stopped' {
+                $codexSafetyHintText.Text = Get-QiehaoGuiText `
+                    -Key 'Safety.Stopped' `
+                    -Fallback 'Codex 已安全退出，可以切换账号。'
                 $codexSafetyHintText.Foreground =
                     $window.Resources['CurrentYesBrush']
             }
             default {
-                $codexSafetyHintText.Text =
-                    '无法确认 Codex 是否完全退出，请先检查 Codex 状态；为保护账号状态，切换与写操作将安全停止。'
+                $codexSafetyHintText.Text = Get-QiehaoGuiText `
+                    -Key 'Safety.Unknown' `
+                    -Fallback '无法确认 Codex 是否完全退出；切换与写操作将安全停止。'
                 $codexSafetyHintText.Foreground =
                     $window.Resources['UnknownWarningBrush']
             }
@@ -1539,7 +1890,14 @@ try {
             [string]$Status
         )
         $script:guiCurrentCodexStatus = $Status
-        $codexStatusText.Text = $Status
+        $script:guiCurrentCodexState = switch ($Status) {
+            '运行中' { 'Running' }
+            '已退出' { 'Stopped' }
+            default { 'Unknown' }
+        }
+        $codexStatusText.Text = Get-QiehaoGuiText `
+            -Key ('Status.Codex.' + $script:guiCurrentCodexState) `
+            -Fallback $Status
         switch ($Status) {
             '运行中' { $codexStatusText.Foreground = '#FFFF7B72' }
             '已退出' { $codexStatusText.Foreground = '#FF59D48B' }
@@ -1644,7 +2002,10 @@ try {
         $script:guiSwitchUiState = 'Closing'
         $script:guiIsWriteOperationBusy = $false
         if ($hadActiveWait) {
-            try { $refreshStatusText.Text = '切换等待已停止' }
+            try {
+                Set-QiehaoLocalizedStatus -Key 'Switch.Status.Closing' `
+                    -Fallback '切换等待已停止'
+            }
             catch { }
         }
         try { Update-QiehaoActionButtons }
@@ -1708,15 +2069,18 @@ try {
                 DisplayStatus = '检测失败'; Source = 'None'
             }
         }
-        $launchTargetText.Text = 'Codex 启动目标：' +
-            [string]$script:guiLaunchTarget.DisplayStatus
+        $launchTargetText.Text = Format-QiehaoGuiText `
+            -Key 'Launch.Target' `
+            -Arguments @((Get-QiehaoLocalizedLaunchStatus)) `
+            -Fallback 'Codex 启动目标：{0}'
         Update-QiehaoActionButtons
         return $script:guiLaunchTarget
     }
 
     function Show-QiehaoLaunchSettingsDialog {
         $dialog = New-Object System.Windows.Window
-        $dialog.Title = 'Codex 启动设置'
+        $dialog.Title = Get-QiehaoGuiText -Key 'Launch.Settings.Title' `
+            -Fallback 'Codex 启动设置'
         $dialog.Width = 600
         $dialog.Height = 310
         $dialog.MinWidth = 520
@@ -1736,7 +2100,8 @@ try {
             $root.RowDefinitions.Add($row)
         }
         $intro = New-Object System.Windows.Controls.TextBlock
-        $intro.Text = '推荐使用自动检测。仅在便携版或特殊安装位置时选择自定义 EXE。'
+        $intro.Text = Get-QiehaoGuiText -Key 'Launch.Settings.Intro' `
+            -Fallback '推荐使用自动检测。仅在特殊安装位置时选择自定义 EXE。'
         $intro.TextWrapping = 'Wrap'
         [System.Windows.Controls.Grid]::SetRow($intro, 0)
         $root.Children.Add($intro) | Out-Null
@@ -1746,11 +2111,13 @@ try {
         $modePanel.Margin = '0,14,0,10'
         [System.Windows.Controls.Grid]::SetRow($modePanel, 1)
         $autoRadio = New-Object System.Windows.Controls.RadioButton
-        $autoRadio.Content = '自动检测（推荐）'
+        $autoRadio.Content = Get-QiehaoGuiText -Key 'Launch.Settings.Auto' `
+            -Fallback '自动检测（推荐）'
         $autoRadio.GroupName = 'LaunchMode'
         $autoRadio.Margin = '0,0,18,0'
         $customRadio = New-Object System.Windows.Controls.RadioButton
-        $customRadio.Content = '自定义 EXE'
+        $customRadio.Content = Get-QiehaoGuiText -Key 'Launch.Settings.Custom' `
+            -Fallback '自定义 EXE'
         $customRadio.GroupName = 'LaunchMode'
         $modePanel.Children.Add($autoRadio) | Out-Null
         $modePanel.Children.Add($customRadio) | Out-Null
@@ -1767,7 +2134,8 @@ try {
         $pathBox.Padding = '7,4'
         $pathBox.Text = [string]$script:guiLaunchSettings.CustomPath
         $browseButton = New-Object System.Windows.Controls.Button
-        $browseButton.Content = '浏览…'
+        $browseButton.Content = Get-QiehaoGuiText -Key 'Launch.Settings.Browse' `
+            -Fallback '浏览…'
         $browseButton.MinWidth = 82
         $browseButton.Margin = '8,0,0,0'
         [System.Windows.Controls.Grid]::SetColumn($browseButton, 1)
@@ -1778,7 +2146,8 @@ try {
         $hint = New-Object System.Windows.Controls.TextBlock
         $hint.Margin = '0,12,0,0'
         $hint.TextWrapping = 'Wrap'
-        $hint.Text = '不会附加命令行参数，不会更改环境变量、权限、Codex 配置或登录状态。'
+        $hint.Text = Get-QiehaoGuiText -Key 'Launch.Settings.Hint' `
+            -Fallback '不会附加命令行参数，不会更改 Codex 配置或登录状态。'
         [System.Windows.Controls.Grid]::SetRow($hint, 3)
         $root.Children.Add($hint) | Out-Null
 
@@ -1787,12 +2156,15 @@ try {
         $buttons.HorizontalAlignment = 'Right'
         [System.Windows.Controls.Grid]::SetRow($buttons, 4)
         $detectButton = New-Object System.Windows.Controls.Button
-        $detectButton.Content = '重新检测'
+        $detectButton.Content = Get-QiehaoGuiText -Key 'Launch.Settings.Detect' `
+            -Fallback '重新检测'
         $saveButton = New-Object System.Windows.Controls.Button
-        $saveButton.Content = '保存'
+        $saveButton.Content = Get-QiehaoGuiText -Key 'Launch.Settings.Save' `
+            -Fallback '保存'
         $saveButton.IsDefault = $true
         $cancelButton = New-Object System.Windows.Controls.Button
-        $cancelButton.Content = '取消'
+        $cancelButton.Content = Get-QiehaoGuiText -Key 'Button.Cancel' `
+            -Fallback '取消'
         $cancelButton.IsCancel = $true
         $cancelButton.Margin = '0'
         $buttons.Children.Add($detectButton) | Out-Null
@@ -1811,8 +2183,12 @@ try {
         & $setPathAvailability
         $browseButton.Add_Click({
             $picker = New-Object Microsoft.Win32.OpenFileDialog
-            $picker.Title = '选择 Codex 可执行文件'
-            $picker.Filter = '可执行文件 (*.exe)|*.exe'
+            $picker.Title = Get-QiehaoGuiText `
+                -Key 'Launch.Settings.PickerTitle' `
+                -Fallback '选择 Codex 可执行文件'
+            $picker.Filter = Get-QiehaoGuiText `
+                -Key 'Launch.Settings.FileFilter' `
+                -Fallback '可执行文件 (*.exe)|*.exe'
             $picker.CheckFileExists = $true
             $picker.Multiselect = $false
             if ($picker.ShowDialog($dialog) -eq $true) { $pathBox.Text = $picker.FileName }
@@ -1822,7 +2198,10 @@ try {
             $target = Find-QiehaoCodexLaunchTarget -Mode Auto `
                 -AppxApplications @(Get-QiehaoInstalledCodexApplications) `
                 -StartApps @(Get-QiehaoStartApplications)
-            $hint.Text = '检测结果：' + [string]$target.DisplayStatus
+            $hint.Text = Format-QiehaoGuiText `
+                -Key 'Launch.Settings.Result' `
+                -Arguments @([string]$target.DisplayStatus) `
+                -Fallback '检测结果：{0}'
         })
         $saveButton.Add_Click({
             $mode = if ([bool]$customRadio.IsChecked) { 'Custom' } else { 'Auto' }
@@ -1836,8 +2215,10 @@ try {
             catch {
                 [void][System.Windows.MessageBox]::Show(
                     $dialog,
-                    '自定义路径必须是现有的本地 .exe 文件，且不能是重解析链接。',
-                    'Codex 启动设置',
+                    (Get-QiehaoGuiText -Key 'Launch.Settings.InvalidPath' `
+                        -Fallback '自定义路径必须是现有的本地 .exe 文件。'),
+                    (Get-QiehaoGuiText -Key 'Launch.Settings.Title' `
+                        -Fallback 'Codex 启动设置'),
                     [System.Windows.MessageBoxButton]::OK,
                     [System.Windows.MessageBoxImage]::Warning
                 )
@@ -1859,18 +2240,23 @@ try {
         try {
             if (-not $script:guiIsClosing) { Start-QiehaoProcessMonitor }
             if ($FinalState -ceq 'Running') {
-                $refreshStatusText.Text = 'Codex 已启动'
+                $refreshStatusText.Text = Get-QiehaoGuiText `
+                    -Key 'Launch.Started' -Fallback 'Codex 已启动'
                 Invoke-QiehaoReadOnlyRefresh
                 return
             }
             if ($FinalState -ceq 'Unknown') {
                 Show-QiehaoSafeMessage `
-                    -Message '已请求启动，但无法确认 Codex 进程状态。' `
+                    -Message (Get-QiehaoGuiText `
+                        -Key 'Launch.StartStateUnknown' `
+                        -Fallback '已请求启动，但无法确认 Codex 进程状态。') `
                     -Severity Warning
             }
             else {
                 Show-QiehaoSafeMessage `
-                    -Message '已请求启动，但 10 秒内未检测到 Codex 运行。' `
+                    -Message (Get-QiehaoGuiText `
+                        -Key 'Launch.StartTimeout' `
+                        -Fallback '已请求启动，但 10 秒内未检测到 Codex 运行。') `
                     -Severity Warning
             }
             $null = Update-QiehaoProcessOnlyStatus
@@ -1878,7 +2264,8 @@ try {
         catch {
             $script:guiIsWriteOperationBusy = $false
             try {
-                $refreshStatusText.Text = '启动状态检测失败，已停止等待'
+                Set-QiehaoLocalizedStatus -Key 'Launch.WaitFailed' `
+                    -Fallback '启动状态检测失败，已停止等待'
                 Update-QiehaoActionButtons
             }
             catch { }
@@ -1922,12 +2309,15 @@ try {
         Set-QiehaoCodexStatusVisual -Status $liveStatus
         if ($liveStatus -ceq '运行中') {
             Update-QiehaoActionButtons
-            Show-QiehaoSafeMessage -Message 'Codex 已在运行。'
+            Show-QiehaoSafeMessage -Message (Get-QiehaoGuiText `
+                -Key 'Launch.AlreadyRunning' -Fallback 'Codex 已在运行。')
             return
         }
         if ($liveStatus -cne '已退出') {
             Update-QiehaoActionButtons
-            Show-QiehaoSafeMessage -Message '无法安全确认 Codex 是否已退出，本次未启动。' `
+            Show-QiehaoSafeMessage -Message (Get-QiehaoGuiText `
+                -Key 'Launch.UnsafeExitUnknown' `
+                -Fallback '无法安全确认 Codex 是否已退出，本次未启动。') `
                 -Severity Warning
             return
         }
@@ -1935,7 +2325,10 @@ try {
             -not [bool]$script:guiLaunchTarget.Available) {
             $null = Resolve-QiehaoLaunchTarget
         }
-        Set-QiehaoWriteBusy -Value $true -StatusText '正在请求启动 Codex…'
+        Set-QiehaoWriteBusy -Value $true -StatusText (
+            Get-QiehaoGuiText -Key 'Launch.Requesting' `
+                -Fallback '正在请求启动 Codex…'
+        )
         $result = Invoke-QiehaoCodexLaunchRequest -Target $script:guiLaunchTarget `
             -LaunchProvider {
                 param($Target)
@@ -2009,7 +2402,8 @@ try {
                 -TargetProfile $targetProfile
             if ($null -ne $script:guiManualSwitchWaitStatusText) {
                 $script:guiManualSwitchWaitStatusText.Text =
-                    '已检测到 Codex 完全退出，正在切换账号……'
+                    Get-QiehaoGuiText -Key 'Dialog.Switch.Stopped' `
+                        -Fallback '已检测到 Codex 完全退出，正在切换账号……'
                 $script:guiManualSwitchWaitStatusText.Foreground =
                     $window.Resources['DialogSuccessBrush']
             }
@@ -2149,7 +2543,8 @@ try {
         Stop-QiehaoManualSwitchWaitTimer -Result 'Restarted'
 
         $dialog = New-Object System.Windows.Window
-        $dialog.Title = '切换账号'
+        $dialog.Title = Get-QiehaoGuiText -Key 'Dialog.Switch.Title' `
+            -Fallback '切换账号'
         $dialog.Width = 540
         $dialog.Height = 340
         $dialog.MinWidth = 480
@@ -2183,7 +2578,9 @@ try {
             $root.RowDefinitions.Add($row)
         }
         $targetText = New-Object System.Windows.Controls.TextBlock
-        $targetText.Text = "目标账号：$TargetProfile"
+        $targetText.Text = Format-QiehaoGuiText `
+            -Key 'Dialog.Switch.Target' -Arguments @($TargetProfile) `
+            -Fallback '目标账号：{0}'
         $targetText.FontSize = 17
         $targetText.FontWeight = 'Bold'
         $targetText.Foreground = $dialog.Resources['DialogAccentBrush']
@@ -2193,16 +2590,17 @@ try {
         $instructionsPanel = New-Object System.Windows.Controls.StackPanel
         $instructionsPanel.Orientation = 'Vertical'
         $instructionHeading = New-Object System.Windows.Controls.TextBlock
-        $instructionHeading.Text = '请在 Codex 中安全退出'
+        $instructionHeading.Text = Get-QiehaoGuiText `
+            -Key 'Dialog.Switch.Heading' -Fallback '请在 Codex 中安全退出'
         $instructionHeading.FontSize = 16
         $instructionHeading.FontWeight = 'Bold'
         $instructionHeading.Foreground =
             $dialog.Resources['DialogForegroundBrush']
         $instructionHeading.Margin = '0,0,0,10'
         $instructionsText = New-Object System.Windows.Controls.TextBlock
-        $instructionsText.Text =
-            "「文件 → 退出」`n或`n系统托盘 →「Quit Codex」`n`n" +
-            '检测到完全退出后，本工具将自动继续切换。'
+        $instructionsText.Text = Get-QiehaoGuiText `
+            -Key 'Dialog.Switch.Instructions' `
+            -Fallback "「文件 → 退出」`n或`n系统托盘 → 「Quit Codex」`n`n检测到完全退出后，本工具将自动继续切换。"
         $instructionsText.TextWrapping = 'Wrap'
         $instructionsText.Foreground = $dialog.Resources['DialogForegroundBrush']
         $instructionsPanel.Children.Add($instructionHeading) | Out-Null
@@ -2214,15 +2612,20 @@ try {
         $statusText.Text = if (
             [string]$script:guiQuotaAsyncReason -ceq 'SwitchBefore'
         ) {
-            "正在保存 '$script:guiQuotaRequestedProfile' 的最新额度快照，" +
-            '同时等待 Codex 安全退出……'
+            Format-QiehaoGuiText -Key 'Quota.SwitchBeforeSavingWithExit' `
+                -Arguments @($script:guiQuotaRequestedProfile) `
+                -Fallback "正在保存 '{0}' 的最新额度快照，同时等待 Codex 安全退出……"
         }
-        else { '正在等待 Codex 安全退出……' }
+        else {
+            Get-QiehaoGuiText -Key 'Dialog.Switch.Waiting' `
+                -Fallback '正在等待 Codex 安全退出……'
+        }
         $statusText.FontWeight = 'Bold'
         $statusText.Foreground = $dialog.Resources['DialogWarningBrush']
         $statusText.VerticalAlignment = 'Center'
         $cancelButton = New-Object System.Windows.Controls.Button
-        $cancelButton.Content = '取消'
+        $cancelButton.Content = Get-QiehaoGuiText -Key 'Button.Cancel' `
+            -Fallback '取消'
         $cancelButton.MinWidth = 90
         $cancelButton.MinHeight = 34
         $cancelButton.HorizontalAlignment = 'Right'
@@ -2287,7 +2690,10 @@ try {
         $script:guiManualSwitchPresentation = $null
         $script:guiManualSwitchWaitInternalClose = $false
         Set-QiehaoWriteBusy -Value $true `
-            -StatusText "正在等待 Codex 安全退出，随后自动切换到 '$TargetProfile'……"
+            -StatusText (Format-QiehaoGuiText `
+                -Key 'Dialog.Switch.WaitingTarget' `
+                -Arguments @($TargetProfile) `
+                -Fallback "正在等待 Codex 安全退出，随后自动切换到 '{0}'……")
         Set-QiehaoSwitchUiState -State 'WaitingForCodexExit' `
             -TargetProfile $TargetProfile
         if ([string]$script:guiQuotaAsyncReason -ceq 'SwitchBefore') {
@@ -2339,13 +2745,15 @@ try {
             'TimedOut' {
                 Set-QiehaoCodexStatusVisual -Status '运行中'
                 Show-QiehaoSafeMessage `
-                    -Message '等待超时，尚未检测到 Codex 完全退出。未执行账号切换。' `
+                    -Message (Get-QiehaoGuiText -Key 'Switch.WaitTimeout' `
+                        -Fallback '等待超时，尚未检测到 Codex 完全退出。未执行账号切换。') `
                     -Severity Warning
             }
             'Unknown' {
                 Set-QiehaoCodexStatusVisual -Status '未知'
                 Show-QiehaoSafeMessage `
-                    -Message '无法确认 Codex 是否完全退出，本次未执行账号切换。' `
+                    -Message (Get-QiehaoGuiText -Key 'Switch.UnknownExit' `
+                        -Fallback '无法确认 Codex 是否完全退出，本次未执行账号切换。') `
                     -Severity Warning
             }
             'Cancelled' {
@@ -2410,12 +2818,17 @@ try {
         switch ([string]$Presentation.State) {
             'SwitchSucceeded' {
                 Show-QiehaoSafeMessage `
-                    -Message "切换成功。`n`n当前账号：$TargetProfile"
+                    -Message (Format-QiehaoGuiText `
+                        -Key 'Switch.SuccessCurrent' `
+                        -Arguments @($TargetProfile) `
+                        -Fallback "切换成功。`n`n当前账号：{0}")
                 $null = Start-QiehaoQuotaAsync -Reason SwitchAfter
             }
             'SwitchSucceededUiRefreshFailed' {
                 Show-QiehaoSafeMessage `
-                    -Message '账号切换已经成功，但界面状态刷新失败。请点击“刷新”重新读取当前状态。' `
+                    -Message (Get-QiehaoGuiText `
+                        -Key 'Switch.RefreshFailed' `
+                        -Fallback '账号切换已经成功，但界面状态刷新失败。请点击“刷新”重新读取当前状态。') `
                     -Severity Warning
             }
             default { Show-QiehaoOperationResult -Result $Result }
@@ -2514,21 +2927,24 @@ try {
                 Start-QiehaoProcessMonitor
                 Update-QiehaoActionButtons
                 Show-QiehaoSafeMessage `
-                    -Message '无法启动安全等待窗口，本次未执行账号切换。' `
+                    -Message (Get-QiehaoGuiText -Key 'Switch.DialogFailed' `
+                        -Fallback '无法启动安全等待窗口，本次未执行账号切换。') `
                     -Severity Warning
             }
             return
         }
         Set-QiehaoWriteBusy -Value $true `
-            -StatusText (
-                "正在保存 '$script:guiCurrentActiveProfile' 的最新额度快照……"
-            )
+            -StatusText (Format-QiehaoGuiText `
+                -Key 'Quota.SwitchBeforeSaving' `
+                -Arguments @($script:guiCurrentActiveProfile) `
+                -Fallback "正在保存 '{0}' 的最新额度快照……")
         $script:guiPendingAction = 'SwitchAfterQuota'
         $script:guiPendingTargetProfile = $targetProfile
         if (Start-QiehaoQuotaAsync -Reason SwitchBefore) {
-            Set-QiehaoSwitchQuotaStatus -Text (
-                "正在保存 '$script:guiCurrentActiveProfile' 的最新额度快照……"
-            )
+            Set-QiehaoSwitchQuotaStatus -Text (Format-QiehaoGuiText `
+                -Key 'Quota.SwitchBeforeSaving' `
+                -Arguments @($script:guiCurrentActiveProfile) `
+                -Fallback "正在保存 '{0}' 的最新额度快照……")
             return
         }
         Continue-QiehaoStoppedSwitchAfterQuota
@@ -2542,7 +2958,10 @@ try {
             return
         }
         $selectedProfile = Get-QiehaoSelectedProfileName
-        Set-QiehaoWriteBusy -Value $true -StatusText '正在验证账号…'
+        Set-QiehaoWriteBusy -Value $true -StatusText (
+            Get-QiehaoGuiText -Key 'Verify.Working' `
+                -Fallback '正在验证账号…'
+        )
         try {
             $verifyResult = Invoke-QiehaoVerifyRequest `
                 -SelectedProfile $selectedProfile `
@@ -2552,10 +2971,16 @@ try {
                 -not [string]::IsNullOrWhiteSpace($selectedProfile)) {
                 $script:guiVerificationStates[$selectedProfile] = `
                     [string]$verifyResult.VerificationStatus
+                $script:guiVerificationStateCodes[$selectedProfile] = if (
+                    [string]$verifyResult.ResultCode -ceq
+                        'PROFILE_VERIFY_SUCCESS'
+                ) { 'Verified' } else { 'Failed' }
             }
             $message = [string]$verifyResult.Message
             if ($verifyResult.ResultCode -ceq 'PROFILE_VERIFY_SUCCESS') {
-                $message = "账号：$selectedProfile`n状态：已验证"
+                $message = Format-QiehaoGuiText -Key 'Verify.Success' `
+                    -Arguments @($selectedProfile) `
+                    -Fallback "账号：{0}`n状态：已验证"
             }
             Show-QiehaoSafeMessage -Message $message
             if ($verifyResult.CoreCalled) { Invoke-QiehaoReadOnlyRefresh }
@@ -2567,11 +2992,17 @@ try {
         if ($script:guiIsWriteOperationBusy) { return }
         $oldName = Get-QiehaoSelectedProfileName
         if ([string]::IsNullOrWhiteSpace($oldName)) { return }
-        $newName = Show-QiehaoNameDialog -Title '重命名账号' `
-            -Prompt '新名称：' -CurrentName $oldName
+        $newName = Show-QiehaoNameDialog `
+            -Title (Get-QiehaoGuiText -Key 'Dialog.Rename.Title' `
+                -Fallback '重命名账号') `
+            -Prompt (Get-QiehaoGuiText -Key 'Dialog.Name.New' `
+                -Fallback '新名称：') -CurrentName $oldName
         if ([string]::IsNullOrWhiteSpace($newName)) { return }
         Stop-QiehaoQuotaAsync
-        Set-QiehaoWriteBusy -Value $true -StatusText '正在重命名账号…'
+        Set-QiehaoWriteBusy -Value $true -StatusText (
+            Get-QiehaoGuiText -Key 'Account.Renaming' `
+                -Fallback '正在重命名账号…'
+        )
         try {
             $quotaCacheWarning = $null
             $result = Invoke-QiehaoOperationProvider -Operation 'RENAME' `
@@ -2583,6 +3014,12 @@ try {
                 $script:guiVerificationStates.ContainsKey($oldName)) {
                 $script:guiVerificationStates[$newName] = $script:guiVerificationStates[$oldName]
                 $script:guiVerificationStates.Remove($oldName)
+            }
+            if ($result.IsSuccess -and
+                $script:guiVerificationStateCodes.ContainsKey($oldName)) {
+                $script:guiVerificationStateCodes[$newName] =
+                    $script:guiVerificationStateCodes[$oldName]
+                $script:guiVerificationStateCodes.Remove($oldName)
             }
             if ($result.IsSuccess -and $script:guiQuotaModulesAvailable) {
                 $quotaRename = Rename-QiehaoQuotaCacheProfile `
@@ -2620,13 +3057,20 @@ try {
         if ([string]::IsNullOrWhiteSpace($profileName) -or
             $profileName.Equals($script:guiCurrentActiveProfile,
                 [StringComparison]::OrdinalIgnoreCase)) { return }
-        $message = "确定删除本地账号 '$profileName' 吗？`n`n" +
-            "这只会删除本工具保存的本地账号槽位，`n" +
-            '不会删除 OpenAI 账号、订阅或网页登录状态。'
-        if (-not (Show-QiehaoChoiceDialog -Title '删除本地账号' `
-            -Message $message -ConfirmText '删除')) { return }
+        $message = Format-QiehaoGuiText -Key 'Dialog.Delete.Message' `
+            -Arguments @($profileName) `
+            -Fallback "确定删除本地账号 '{0}' 吗？"
+        if (-not (Show-QiehaoChoiceDialog `
+            -Title (Get-QiehaoGuiText -Key 'Dialog.Delete.Title' `
+                -Fallback '删除本地账号') `
+            -Message $message `
+            -ConfirmText (Get-QiehaoGuiText -Key 'Dialog.Delete.Confirm' `
+                -Fallback '删除'))) { return }
         Stop-QiehaoQuotaAsync
-        Set-QiehaoWriteBusy -Value $true -StatusText '正在删除本地账号…'
+        Set-QiehaoWriteBusy -Value $true -StatusText (
+            Get-QiehaoGuiText -Key 'Account.Deleting' `
+                -Fallback '正在删除本地账号…'
+        )
         try {
             $quotaCacheWarning = $null
             $result = Invoke-QiehaoOperationProvider -Operation 'DELETE' `
@@ -2634,6 +3078,7 @@ try {
                 -ArgumentList @($profileName)
             if ($result.IsSuccess) {
                 $script:guiVerificationStates.Remove($profileName)
+                $script:guiVerificationStateCodes.Remove($profileName)
             }
             if ($result.IsSuccess -and $script:guiQuotaModulesAvailable) {
                 $quotaDelete = Remove-QiehaoQuotaCacheProfile `
@@ -2670,7 +3115,9 @@ try {
                 }
                 else {
                     Show-QiehaoSafeMessage `
-                        -Message '无法安全读取当前账号状态，已停止添加流程。' `
+                        -Message (Get-QiehaoGuiText `
+                            -Key 'Account.AddReadActiveFailed' `
+                            -Fallback '无法安全读取当前账号状态，已停止添加流程。') `
                         -Severity Warning
                     return
                 }
@@ -2683,25 +3130,37 @@ try {
                     return
                 }
             }
-            $instructions = "请打开 Codex Desktop，使用官方登录流程登录要添加的新账号。`n`n" +
-                "登录完成后，请正常退出 Codex，然后返回本窗口继续。`n`n" +
-                '本工具不会自动操作 OAuth、网页、Cookie 或账号选择。'
-            $ready = Show-QiehaoChoiceDialog -Title '添加账号' `
-                -Message $instructions -ConfirmText '我已登录新账号并退出'
+            $instructions = Get-QiehaoGuiText `
+                -Key 'Account.AddInstructions' `
+                -Fallback '请使用 Codex Desktop 官方登录流程登录新账号，完成后正常退出 Codex。'
+            $ready = Show-QiehaoChoiceDialog `
+                -Title (Get-QiehaoGuiText -Key 'Dialog.Add.Title' `
+                    -Fallback '添加账号') `
+                -Message $instructions `
+                -ConfirmText (Get-QiehaoGuiText -Key 'Account.AddReady' `
+                    -Fallback '我已登录新账号并退出')
             if (-not $ready) { return }
             $liveStatus = Get-QiehaoLiveCodexStatus
             if ($liveStatus -ceq '运行中') {
-                Show-QiehaoSafeMessage -Message '请先正常退出 Codex，再采集新账号。' `
+                Show-QiehaoSafeMessage -Message (Get-QiehaoGuiText `
+                    -Key 'Account.AddQuitBeforeCapture' `
+                    -Fallback '请先正常退出 Codex，再采集新账号。') `
                     -Severity Warning
                 return
             }
             if ($liveStatus -cne '已退出') {
                 Show-QiehaoSafeMessage `
-                    -Message '无法确认 Codex 是否完全退出，本次未添加账号。' `
+                    -Message (Get-QiehaoGuiText `
+                        -Key 'Account.AddExitUnknown' `
+                        -Fallback '无法确认 Codex 是否完全退出，本次未添加账号。') `
                     -Severity Warning
                 return
             }
-            $profileName = Show-QiehaoNameDialog -Title '添加账号' -Prompt '本地名称：'
+            $profileName = Show-QiehaoNameDialog `
+                -Title (Get-QiehaoGuiText -Key 'Dialog.Add.Title' `
+                    -Fallback '添加账号') `
+                -Prompt (Get-QiehaoGuiText -Key 'Dialog.Name.Local' `
+                    -Fallback '本地名称：')
             if ([string]::IsNullOrWhiteSpace($profileName)) { return }
             $result = Invoke-QiehaoOperationProvider -Operation 'ADD' `
                 -Provider { param($Name) Add-CodexProfile -Name $Name } `
@@ -2716,16 +3175,23 @@ try {
         if ($script:guiIsWriteOperationBusy) { return }
         $liveStatus = Get-QiehaoLiveCodexStatus
         if ($liveStatus -ceq '未知') {
-            Show-QiehaoSafeMessage -Message '无法确认 Codex 进程状态，请重新检测。' `
+            Show-QiehaoSafeMessage -Message (Get-QiehaoGuiText `
+                -Key 'Common.CodexUnknown' `
+                -Fallback '无法确认 Codex 进程状态，请重新检测。') `
                 -Severity Warning
             return
         }
         Stop-QiehaoQuotaAsync
-        Set-QiehaoWriteBusy -Value $true -StatusText '准备添加账号…'
+        Set-QiehaoWriteBusy -Value $true -StatusText (
+            Get-QiehaoGuiText -Key 'Account.AddPreparing' `
+                -Fallback '准备添加账号…'
+        )
         if ($liveStatus -ceq '运行中') {
             Set-QiehaoWriteBusy -Value $false
             Show-QiehaoSafeMessage `
-                -Message '请先从 Codex 菜单“文件 → 退出”或系统托盘选择“退出”，确认状态变为“已退出”后再添加账号。' `
+                -Message (Get-QiehaoGuiText `
+                    -Key 'Account.AddQuitBeforeStart' `
+                    -Fallback '请先从 Codex 菜单“文件 → 退出”或系统托盘选择“退出”，确认状态变为“已退出”后再添加账号。') `
                 -Severity Warning
             return
         }
@@ -2744,11 +3210,28 @@ try {
         return $null
     }
 
+    $preference = if ($SelfTest) {
+        [pscustomobject]@{
+            Background = '01-blue-glass'; Language = 'zh-CN'
+            IsValid = $true; UsedDefault = $true
+        }
+    } else { Read-QiehaoUiPreferences -StateDirectory $stateDirectory }
+    $script:guiLanguage = if ($script:guiLocalizationAvailable) {
+        Resolve-QiehaoLanguage -Language ([string]$preference.Language)
+    }
+    else { 'zh-CN' }
+    if ($script:guiLocalizationAvailable) {
+        $languages = @(Get-QiehaoSupportedLanguages)
+        $languageComboBox.ItemsSource = $languages
+        $languageComboBox.SelectedItem = @($languages | Where-Object {
+            [string]$_.Code -ceq $script:guiLanguage
+        } | Select-Object -First 1)[0]
+    }
+    else {
+        $languageComboBox.IsEnabled = $false
+    }
     $themes = @(Get-QiehaoBackgroundThemes)
     $themeComboBox.ItemsSource = $themes
-    $preference = if ($SelfTest) {
-        [pscustomobject]@{ Background = '01-blue-glass'; IsValid = $true; UsedDefault = $true }
-    } else { Read-QiehaoUiPreferences -StateDirectory $stateDirectory }
     $startupTheme = @($themes | Where-Object {
         [string]$_.Id -ceq [string]$preference.Background
     } | Select-Object -First 1)
@@ -2768,6 +3251,23 @@ try {
             $null = Set-QiehaoTheme -Theme $selectedTheme -Persist
         }
     })
+    $languageComboBox.Add_SelectionChanged({
+        if ($script:guiLanguagePersistenceReady -and
+            $null -ne $languageComboBox.SelectedItem) {
+            $selectedLanguage = Resolve-QiehaoLanguage `
+                -Language ([string]$languageComboBox.SelectedItem.Code)
+            if ($selectedLanguage -cne $script:guiLanguage) {
+                $script:guiLanguage = $selectedLanguage
+                try {
+                    $null = Write-QiehaoUiPreferences `
+                        -StateDirectory $stateDirectory `
+                        -Language $script:guiLanguage
+                }
+                catch { }
+                Apply-QiehaoLocalization
+            }
+        }
+    })
 
     if ($SelfTest) {
         $script:guiLaunchSettings = [pscustomobject]@{
@@ -2778,14 +3278,17 @@ try {
                 PackageFamilyName = 'OpenAI.Codex_8wekyb3d8bbwe'
                 ApplicationId = 'App'
             })
-        $launchTargetText.Text = 'Codex 启动目标：' +
-            [string]$script:guiLaunchTarget.DisplayStatus
+        $launchTargetText.Text = Format-QiehaoGuiText `
+            -Key 'Launch.Target' `
+            -Arguments @([string]$script:guiLaunchTarget.DisplayStatus) `
+            -Fallback 'Codex 启动目标：{0}'
     }
     else {
         $script:guiLaunchSettings = Read-QiehaoLaunchSettings `
             -StateDirectory $stateDirectory
         $null = Resolve-QiehaoLaunchTarget
     }
+    Apply-QiehaoLocalization
 
     if ($SelfTest) {
         $fakeProfiles = @(
@@ -2832,6 +3335,201 @@ try {
             [string]$profilesGrid.ItemsSource[0].QuotaSummary -cne
                 (Get-QiehaoQuotaUiTextSafe -Key 'NoSnapshot')) {
             throw 'GUI_SELFTEST_NO_CACHE_PRESENTATION_FAILED'
+        }
+        if ($LocalizationLifecycleSelfTest) {
+            $initialNames = @($script:guiAllProfileRows | ForEach-Object {
+                [string]$_.Name
+            }) -join '|'
+            $initialActive = [string]$script:guiCurrentActiveProfile
+            $initialThemeId = [string]$themeComboBox.SelectedItem.Id
+            $initialQuotaJson = if ($null -eq $script:guiQuotaCache) {
+                'NULL'
+            }
+            else { $script:guiQuotaCache | ConvertTo-Json -Depth 12 -Compress }
+            $initialZhCnTextsCorrect = (
+                $window.Title -ceq 'Codex 账号管理器' -and
+                [string]$switchButton.Content -ceq '切换账号' -and
+                [string]$profileColumn.Header -ceq '名称' -and
+                $codexStatusText.Text -ceq '已退出'
+            )
+
+            $script:guiLanguage = 'en-US'
+            Apply-QiehaoLocalization
+            $switchToEnUsUpdatesWindowTitle =
+                $window.Title -ceq 'Codex Account Manager'
+            $switchToEnUsUpdatesButtons = (
+                [string]$switchButton.Content -ceq 'Switch Account' -and
+                [string]$refreshQuotaButton.Content -ceq 'Refresh Quota' -and
+                [string]$launchSettingsButton.Content -ceq 'Launch Settings'
+            )
+            $switchToEnUsUpdatesDataGridHeaders = (
+                [string]$profileColumn.Header -ceq 'Name' -and
+                [string]$currentColumn.Header -ceq 'Current' -and
+                [string]$quotaColumn.Header -ceq 'Quota Snapshot'
+            )
+            $switchToEnUsUpdatesStatus = (
+                $codexStatusText.Text -ceq 'Stopped' -and
+                $identityStatusText.Text -ceq 'Confirmed' -and
+                $refreshStatusText.Text -ceq 'Status refreshed.'
+            )
+            $switchToEnUsUpdatesQuotaTooltip = (
+                [string]$profilesGrid.ItemsSource[0].QuotaSummary -ceq
+                    'No quota snapshot' -and
+                [string]$profilesGrid.ItemsSource[0].QuotaToolTip -match
+                    '^The current account has no quota snapshot'
+            )
+
+            Set-QiehaoCodexStatusVisual -Status '运行中'
+            $runningEn = [string]$codexStatusText.Text
+            Set-QiehaoCodexStatusVisual -Status '已退出'
+            $stoppedEn = [string]$codexStatusText.Text
+            Set-QiehaoCodexStatusVisual -Status '未知'
+            $unknownEn = [string]$codexStatusText.Text
+            $dynamicCodexStatesEnUs = (
+                $runningEn -ceq 'Running' -and
+                $stoppedEn -ceq 'Stopped' -and
+                $unknownEn -ceq 'Unknown'
+            )
+            $switchWaitingEn = Format-QiehaoGuiText `
+                -Key 'Dialog.Switch.WaitingTarget' -Arguments @('Team')
+            $switchSuccessEn = Format-QiehaoGuiText `
+                -Key 'Switch.SuccessCurrent' -Arguments @('Team')
+            $quotaFailureEn = Format-QiehaoQuotaFailureStatus `
+                -BaseText (Get-QiehaoQuotaUiTextSafe `
+                    -Key 'UpdateFailedRetry') `
+                -FailureCode 'QUOTA_RATE_LIMITS_TIMEOUT'
+            Set-QiehaoSwitchUiState -State 'Cancelled'
+            $switchCancelledEn = [string]$refreshStatusText.Text
+            $dynamicWorkflowStatesEnUs = (
+                $switchWaitingEn -match 'switching to ''Team''' -and
+                $switchSuccessEn -match 'Current account: Team' -and
+                $switchCancelledEn -match 'Waiting was cancelled' -and
+                $quotaFailureEn -match
+                    'Error code: QUOTA_RATE_LIMITS_TIMEOUT'
+            )
+            Set-QiehaoLocalizedStatus `
+                -Key 'Quota.UpdateFailedRetryWithCode' `
+                -Arguments @('QUOTA_RATE_LIMITS_TIMEOUT')
+            $quotaFailureStatusEn = [string]$refreshStatusText.Text
+
+            $window.Measure((New-Object System.Windows.Size(1040, 690)))
+            $window.Arrange((New-Object System.Windows.Rect(0, 0, 1040, 690)))
+            $window.UpdateLayout()
+            $unboundedLayoutSize = New-Object System.Windows.Size(
+                [double]::PositiveInfinity,
+                [double]::PositiveInfinity
+            )
+            $headerTitleText.Measure($unboundedLayoutSize)
+            $englishHeaderFits = (
+                $headerTitleText.DesiredSize.Width -gt 0 -and
+                [double]$themeComboBox.Width -ge 132 -and
+                [double]$languageComboBox.Width -ge 105 -and
+                $headerTitleText.DesiredSize.Width + 390 -lt 1004
+            )
+            $englishLayoutButtons = @(
+                $switchButton, $verifyButton, $refreshButton,
+                $refreshQuotaButton, $addButton, $renameButton,
+                $deleteButton, $launchCodexButton, $launchSettingsButton
+            )
+            foreach ($layoutButton in $englishLayoutButtons) {
+                $layoutButton.Measure($unboundedLayoutSize)
+            }
+            $englishButtonsRemainSingleLine = @(
+                $englishLayoutButtons
+            ) | Where-Object {
+                $_.DesiredSize.Height -gt 44 -or $_.DesiredSize.Width -gt 190
+            }
+            $xamlSourceForLayout =
+                [IO.File]::ReadAllText($xamlPath)
+            $englishLayoutMeasured = (
+                $englishHeaderFits -and
+                @($englishButtonsRemainSingleLine).Count -eq 0 -and
+                $xamlSourceForLayout -match
+                    '<Setter Property="MinHeight" Value="30"' -and
+                $xamlSourceForLayout -match 'TextWrapping="NoWrap"'
+            )
+            if (-not $englishLayoutMeasured) {
+                Write-Output (
+                    'LocalizationLayoutDiagnostics=' +
+                    'HeaderFits:' + $englishHeaderFits +
+                    ';TitleDesiredWidth:' +
+                    $headerTitleText.DesiredSize.Width +
+                    ';ThemeWidth:' + $themeComboBox.Width +
+                    ';LanguageWidth:' + $languageComboBox.Width +
+                    ';OversizeButtons:' +
+                    (@($englishButtonsRemainSingleLine | ForEach-Object {
+                        [string]$_.Name
+                    }) -join ',') +
+                    ';RowContract:' + ($xamlSourceForLayout -match
+                        '<Setter Property="MinHeight" Value="30"') +
+                    ';NoWrapContract:' + ($xamlSourceForLayout -match
+                        'TextWrapping="NoWrap"')
+                )
+            }
+
+            $script:guiLanguage = 'zh-CN'
+            Set-QiehaoCodexStatusVisual -Status '已退出'
+            Apply-QiehaoLocalization
+            $switchBackToZhCnWorks = (
+                $window.Title -ceq 'Codex 账号管理器' -and
+                [string]$switchButton.Content -ceq '切换账号' -and
+                $codexStatusText.Text -ceq '已退出'
+            )
+            $dynamicQuotaStatusRedrawsAcrossLanguages = (
+                $quotaFailureStatusEn -match
+                    'Error code: QUOTA_RATE_LIMITS_TIMEOUT' -and
+                $refreshStatusText.Text -match '额度更新失败' -and
+                $refreshStatusText.Text -match
+                    'QUOTA_RATE_LIMITS_TIMEOUT'
+            )
+            $finalQuotaJson = if ($null -eq $script:guiQuotaCache) {
+                'NULL'
+            }
+            else { $script:guiQuotaCache | ConvertTo-Json -Depth 12 -Compress }
+            $languageSwitchPreservesCoreState = (
+                (@($script:guiAllProfileRows | ForEach-Object {
+                    [string]$_.Name
+                }) -join '|') -ceq $initialNames -and
+                [string]$script:guiCurrentActiveProfile -ceq $initialActive -and
+                [string]$themeComboBox.SelectedItem.Id -ceq $initialThemeId -and
+                $finalQuotaJson -ceq $initialQuotaJson
+            )
+            $languageSwitchStartsNoBusinessAction = (
+                $script:guiQuotaSelfTestQueryCount -eq 0 -and
+                -not [bool]$script:guiQuotaCoordinator.QueryInProgress -and
+                -not [bool]$script:guiIsWriteOperationBusy
+            )
+
+            $localizationChecks = [ordered]@{
+                InitialZhCnTextsCorrect = $initialZhCnTextsCorrect
+                SwitchToEnUsUpdatesWindowTitle =
+                    $switchToEnUsUpdatesWindowTitle
+                SwitchToEnUsUpdatesButtons = $switchToEnUsUpdatesButtons
+                SwitchToEnUsUpdatesDataGridHeaders =
+                    $switchToEnUsUpdatesDataGridHeaders
+                SwitchToEnUsUpdatesStatus = $switchToEnUsUpdatesStatus
+                SwitchToEnUsUpdatesQuotaTooltip =
+                    $switchToEnUsUpdatesQuotaTooltip
+                DynamicCodexStatesEnUs = $dynamicCodexStatesEnUs
+                DynamicWorkflowStatesEnUs = $dynamicWorkflowStatesEnUs
+                DynamicQuotaStatusRedrawsAcrossLanguages =
+                    $dynamicQuotaStatusRedrawsAcrossLanguages
+                SwitchBackToZhCnWorks = $switchBackToZhCnWorks
+                LanguageSwitchPreservesCoreState =
+                    $languageSwitchPreservesCoreState
+                LanguageSwitchStartsNoBusinessAction =
+                    $languageSwitchStartsNoBusinessAction
+                EnglishWpfLayoutMeasured = $englishLayoutMeasured
+            }
+            foreach ($check in $localizationChecks.GetEnumerator()) {
+                if (-not [bool]$check.Value) {
+                    throw ('GUI_LOCALIZATION_SELFTEST_FAILED_' +
+                        [string]$check.Key)
+                }
+                Write-Output ([string]$check.Key + '=True')
+            }
+            Write-Output 'GUI_LOCALIZATION_LIFECYCLE_SELFTEST_PASS'
+            return
         }
         if ($QuotaAsyncLifecycleSelfTest) {
             $tempBase = [System.IO.Path]::GetFullPath(
@@ -3285,6 +3983,7 @@ try {
         }
         Start-QiehaoProcessMonitor
         $script:guiThemePersistenceReady = $true
+        $script:guiLanguagePersistenceReady = $true
     })
     $window.Add_Closing({ Stop-QiehaoAllTimers })
     $window.Add_Closed({

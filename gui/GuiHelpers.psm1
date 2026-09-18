@@ -106,6 +106,10 @@ function ConvertTo-QiehaoGuiProfileRows {
         }
 
         if ($ActiveProfileKnown) {
+            $activeCode = if ($name.Equals(
+                $ActiveProfile,
+                [StringComparison]::OrdinalIgnoreCase
+            )) { 'Yes' } else { 'No' }
             $activeText = if ($name.Equals(
                 $ActiveProfile,
                 [StringComparison]::OrdinalIgnoreCase
@@ -115,13 +119,23 @@ function ConvertTo-QiehaoGuiProfileRows {
             $activeValue = Get-ObjectPropertyValue -InputObject $item `
                 -Name 'Active' -DefaultValue $null
             if ($activeValue -is [bool]) {
+                $activeCode = if ([bool]$activeValue) { 'Yes' } else { 'No' }
                 $activeText = if ([bool]$activeValue) { '是' } else { '否' }
             }
             else {
+                $activeCode = 'Unknown'
                 $activeText = '未知'
             }
         }
 
+        $healthCode = [string](Get-ObjectPropertyValue -InputObject $item `
+            -Name 'Health' -DefaultValue 'UNKNOWN')
+        $authCode = [string](Get-ObjectPropertyValue -InputObject $item `
+            -Name 'AuthFile' -DefaultValue 'UNKNOWN')
+        $identityCode = [string](Get-ObjectPropertyValue -InputObject $item `
+            -Name 'IdentityMarker' -DefaultValue 'UNKNOWN')
+        $metadataCode = [string](Get-ObjectPropertyValue -InputObject $item `
+            -Name 'Metadata' -DefaultValue 'UNKNOWN')
         $updated = [string](Get-ObjectPropertyValue -InputObject $item `
             -Name 'UpdatedAt' -DefaultValue '<UNAVAILABLE>')
         if ([string]::IsNullOrWhiteSpace($updated)) {
@@ -134,20 +148,27 @@ function ConvertTo-QiehaoGuiProfileRows {
 
         $rows += [pscustomobject]@{
             Name = $name
+            ActiveCode = $activeCode
             Active = $activeText
+            VerificationCode = 'Unverified'
             Verification = '未验证'
+            HealthCode = $healthCode
             Health = ConvertTo-QiehaoProfileDisplayValue -Category 'Health' `
-                -Value (Get-ObjectPropertyValue -InputObject $item `
-                    -Name 'Health' -DefaultValue 'UNKNOWN')
+                -Value $healthCode
+            AuthCode = $authCode
             Auth = ConvertTo-QiehaoProfileDisplayValue -Category 'Artifact' `
-                -Value (Get-ObjectPropertyValue -InputObject $item `
-                    -Name 'AuthFile' -DefaultValue 'UNKNOWN')
+                -Value $authCode
+            IdentityCode = $identityCode
             Identity = ConvertTo-QiehaoProfileDisplayValue -Category 'Artifact' `
-                -Value (Get-ObjectPropertyValue -InputObject $item `
-                    -Name 'IdentityMarker' -DefaultValue 'UNKNOWN')
+                -Value $identityCode
+            MetadataCode = $metadataCode
             Metadata = ConvertTo-QiehaoProfileDisplayValue -Category 'Metadata' `
-                -Value (Get-ObjectPropertyValue -InputObject $item `
-                    -Name 'Metadata' -DefaultValue 'UNKNOWN')
+                -Value $metadataCode
+            UpdatedCode = if ($updated -eq '不可用') {
+                'Unavailable'
+            }
+            elseif ($updated -eq '元数据异常') { 'InvalidMetadata' }
+            else { 'Value' }
             Updated = $updated
         }
     }
@@ -848,6 +869,11 @@ function Get-QiehaoGuiSnapshot {
     catch {
         $errors += 'CODEX_PROCESS_STATE_UNAVAILABLE'
     }
+    $codexState = switch ($codexStatus) {
+        '运行中' { 'Running' }
+        '已退出' { 'Stopped' }
+        default { 'Unknown' }
+    }
 
     $rows = ConvertTo-QiehaoGuiProfileRows -ProfileData $rawProfiles `
         -ActiveProfile $activeProfile -ActiveProfileKnown:$activeProfileKnown
@@ -885,10 +911,22 @@ function Get-QiehaoGuiSnapshot {
         }
     }
 
+    $identityState = switch ($identityStatus) {
+        '已确认' { 'Confirmed' }
+        '不匹配' { 'Mismatch' }
+        '尚未初始化' { 'Uninitialized' }
+        '待退出后确认' { 'PendingExit' }
+        default { 'Unavailable' }
+    }
+
     return [pscustomobject]@{
+        CodexState = $codexState
         CodexDesktop = $codexStatus
+        ActiveProfileKnown = $activeProfileKnown
         ActiveProfile = $activeProfile
+        IdentityState = $identityState
         IdentityStatus = $identityStatus
+        WebChatGPTState = 'Unaffected'
         WebChatGPT = '不受影响'
         Profiles = @($rows)
         ReadOnlyErrors = @($errors)
@@ -1335,11 +1373,13 @@ function Read-QiehaoUiPreferences {
     )
 
     $defaultBackground = '01-blue-glass'
+    $defaultLanguage = 'zh-CN'
     $preferencePath = Join-Path -Path $StateDirectory `
         -ChildPath 'ui-preferences.json'
     if (-not [System.IO.File]::Exists($preferencePath)) {
         return [pscustomobject]@{
             Background = $defaultBackground
+            Language = $defaultLanguage
             IsValid = $true
             UsedDefault = $true
         }
@@ -1356,23 +1396,54 @@ function Read-QiehaoUiPreferences {
         if ($null -eq $data -or -not ($data -is [pscustomobject])) {
             throw 'UI_PREFERENCES_INVALID'
         }
-        $keys = @($data.PSObject.Properties | ForEach-Object { $_.Name })
-        if ($keys.Count -ne 2 -or
-            -not ($keys -ccontains 'schema_version') -or
-            -not ($keys -ccontains 'background') -or
-            [int]$data.schema_version -ne 1 -or
-            $null -eq (Get-QiehaoBackgroundTheme -Id ([string]$data.background))) {
+        $schemaProperty = $data.PSObject.Properties['schema_version']
+        $schemaVersion = if ($null -eq $schemaProperty) {
+            0
+        }
+        else { [int]$schemaProperty.Value }
+        if ($schemaVersion -notin @(0, 1, 2)) {
             throw 'UI_PREFERENCES_INVALID'
         }
+        $backgroundProperty = $data.PSObject.Properties['background']
+        if ($null -eq $backgroundProperty) {
+            $backgroundProperty = $data.PSObject.Properties['Theme']
+        }
+        $languageProperty = $data.PSObject.Properties['language']
+        if ($null -eq $languageProperty) {
+            $languageProperty = $data.PSObject.Properties['Language']
+        }
+        $backgroundCandidate = if ($null -eq $backgroundProperty) {
+            $defaultBackground
+        }
+        else { [string]$backgroundProperty.Value }
+        $languageCandidate = if ($null -eq $languageProperty) {
+            $defaultLanguage
+        }
+        else { [string]$languageProperty.Value }
+        $backgroundValid = $null -ne (
+            Get-QiehaoBackgroundTheme -Id $backgroundCandidate
+        )
+        $languageValid = @('zh-CN', 'en-US') -ccontains $languageCandidate
+        $resolvedBackground = if ($backgroundValid) {
+            $backgroundCandidate
+        }
+        else { $defaultBackground }
+        $resolvedLanguage = if ($languageValid) {
+            $languageCandidate
+        }
+        else { $defaultLanguage }
         return [pscustomobject]@{
-            Background = [string]$data.background
-            IsValid = $true
-            UsedDefault = $false
+            Background = $resolvedBackground
+            Language = $resolvedLanguage
+            IsValid = ($backgroundValid -and $languageValid)
+            UsedDefault = (-not $backgroundValid -or -not $languageValid -or
+                $null -eq $backgroundProperty -or $null -eq $languageProperty)
         }
     }
     catch {
         return [pscustomobject]@{
             Background = $defaultBackground
+            Language = $defaultLanguage
             IsValid = $false
             UsedDefault = $true
         }
@@ -1389,12 +1460,29 @@ function Write-QiehaoUiPreferences {
         [Parameter(Mandatory = $true)]
         [string]$StateDirectory,
 
-        [Parameter(Mandatory = $true)]
-        [string]$Background
+        [string]$Background,
+
+        [string]$Language
     )
 
-    if ($null -eq (Get-QiehaoBackgroundTheme -Id $Background)) {
+    if (-not $PSBoundParameters.ContainsKey('Background') -and
+        -not $PSBoundParameters.ContainsKey('Language')) {
+        throw 'UI_PREFERENCES_VALUE_REQUIRED'
+    }
+    $current = Read-QiehaoUiPreferences -StateDirectory $StateDirectory
+    $resolvedBackground = if ($PSBoundParameters.ContainsKey('Background')) {
+        $Background
+    }
+    else { [string]$current.Background }
+    $resolvedLanguage = if ($PSBoundParameters.ContainsKey('Language')) {
+        $Language
+    }
+    else { [string]$current.Language }
+    if ($null -eq (Get-QiehaoBackgroundTheme -Id $resolvedBackground)) {
         throw 'UI_BACKGROUND_THEME_INVALID'
+    }
+    if (@('zh-CN', 'en-US') -cnotcontains $resolvedLanguage) {
+        throw 'UI_LANGUAGE_INVALID'
     }
     [System.IO.Directory]::CreateDirectory($StateDirectory) | Out-Null
     $preferencePath = Join-Path -Path $StateDirectory `
@@ -1407,8 +1495,9 @@ function Write-QiehaoUiPreferences {
     $writer = $null
     try {
         $json = [ordered]@{
-            schema_version = 1
-            background = $Background
+            schema_version = 2
+            background = $resolvedBackground
+            language = $resolvedLanguage
         } | ConvertTo-Json
         $encoding = New-Object System.Text.UTF8Encoding($false)
         $stream = New-Object System.IO.FileStream(
