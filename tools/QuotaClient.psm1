@@ -8,7 +8,7 @@ $script:QuotaAuthModulePath = Join-Path -Path $script:QuotaProjectRoot `
 
 Import-Module -Name $script:QuotaParserPath -Force -ErrorAction Stop
 $script:QuotaAuthModule = Import-Module -Name $script:QuotaAuthModulePath `
-    -Force -PassThru -ErrorAction Stop
+    -PassThru -ErrorAction Stop
 
 function Write-QiehaoQuotaJsonLine {
     param(

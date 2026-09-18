@@ -6,11 +6,14 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $modulePath = Join-Path -Path $projectRoot -ChildPath 'gui\QuotaHelpers.psm1'
+$guiHelperPath = Join-Path -Path $projectRoot -ChildPath 'gui\GuiHelpers.psm1'
+$corePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 $guiScriptPath = Join-Path -Path $projectRoot -ChildPath 'gui\QiehaoGui.ps1'
 $clientPath = Join-Path -Path $projectRoot -ChildPath 'tools\QuotaClient.psm1'
 $xamlPath = Join-Path -Path $projectRoot -ChildPath 'gui\MainWindow.xaml'
 $gitIgnorePath = Join-Path -Path $projectRoot -ChildPath '.gitignore'
 Import-Module -Name $modulePath -Force -ErrorAction Stop
+Import-Module -Name $guiHelperPath -Force -ErrorAction Stop
 
 function Assert-QuotaTest {
     param(
@@ -50,12 +53,179 @@ function New-FakeQuotaSnapshot {
     }
 }
 
+function New-FakeStartupCoreSnapshot {
+    param(
+        [string]$ActiveProfile = 'Team',
+        [AllowNull()][object]$Order
+    )
+    $profiles = @(
+        [pscustomobject]@{
+            Profile = 'Plus'; Active = $false; Health = 'READY'
+            AuthFile = 'PRESENT'; IdentityMarker = 'PRESENT'
+            Metadata = 'VALID'; UpdatedAt = '2000-01-01T00:00:00Z'
+        },
+        [pscustomobject]@{
+            Profile = 'Team'; Active = $true; Health = 'READY'
+            AuthFile = 'PRESENT'; IdentityMarker = 'PRESENT'
+            Metadata = 'VALID'; UpdatedAt = '2000-01-01T00:00:00Z'
+        }
+    )
+    if ($null -ne $Order) { $null = $Order.Add('CoreSnapshot') }
+    return Get-QiehaoGuiSnapshot -ListProvider ({ $profiles }.GetNewClosure()) `
+        -ActiveProvider ({
+            [pscustomobject]@{ ActiveProfile = $ActiveProfile }
+        }.GetNewClosure()) `
+        -ProcessProvider {
+            [pscustomobject]@{ ReasonCode = 'CODEX_PROCESSES_STOPPED' }
+        } `
+        -ActiveIdentityProvider {
+            [pscustomobject]@{ Result = 'ACTIVE_IDENTITY_CONFIRMED' }
+        }
+}
+
 $testRoot = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath (
     'qiehao-quota-selftest-' + [Guid]::NewGuid().ToString('N')
 )
 [System.IO.Directory]::CreateDirectory($testRoot) | Out-Null
 
 try {
+    # Regression guard for 4ae0e77: importing QuotaClient must not remove the
+    # core commands that the GUI Loaded handler invokes.
+    Import-Module -Name $corePath -Force -ErrorAction Stop
+    $coreCommandNames = @(
+        'Get-CodexAccountSlot',
+        'Get-CodexActiveProfile',
+        'Test-CodexProcessesStopped',
+        'Test-CodexActiveIdentity'
+    )
+    Assert-QuotaTest (
+        @($coreCommandNames | Where-Object {
+            $null -eq (Get-Command -Name $_ -ErrorAction SilentlyContinue)
+        }).Count -eq 0
+    ) 'QUOTA_STARTUP_CORE_COMMANDS_MISSING_BEFORE_CLIENT_IMPORT'
+    Import-Module -Name $clientPath -Force -ErrorAction Stop
+    Assert-QuotaTest (
+        @($coreCommandNames | Where-Object {
+            $null -eq (Get-Command -Name $_ -ErrorAction SilentlyContinue)
+        }).Count -eq 0
+    ) 'QUOTA_CLIENT_IMPORT_REMOVED_CORE_COMMANDS'
+
+    $startupRoot = Join-Path $testRoot 'startup-regression'
+    [System.IO.Directory]::CreateDirectory($startupRoot) | Out-Null
+
+    # Core Profile rows exist before any optional quota work.
+    $coreSnapshot = New-FakeStartupCoreSnapshot
+    $coreRows = @($coreSnapshot.Profiles)
+    $teamCore = @($coreRows | Where-Object { $_.Name -ceq 'Team' })[0]
+    $plusCore = @($coreRows | Where-Object { $_.Name -ceq 'Plus' })[0]
+    Assert-QuotaTest (
+        $coreRows.Count -eq 2 -and
+        $coreSnapshot.ActiveProfile -ceq 'Team' -and
+        $teamCore.Active -ceq '是' -and $plusCore.Active -ceq '否'
+    ) 'QUOTA_STARTUP_CORE_BASELINE_INVALID'
+
+    # A. Missing cache: both core rows remain and receive safe placeholders.
+    $noCacheDirectory = Join-Path $startupRoot 'missing'
+    [System.IO.Directory]::CreateDirectory($noCacheDirectory) | Out-Null
+    $noCache = Read-QiehaoQuotaCache -StateDirectory $noCacheDirectory
+    $noCacheRows = @((New-FakeStartupCoreSnapshot).Profiles)
+    $noCacheDecorated = @(Update-QiehaoQuotaProfileRows -Rows $noCacheRows `
+        -Cache $noCache.Cache -ActiveProfile 'Team')
+    Assert-QuotaTest (
+        $noCache.UsedEmpty -and $noCacheDecorated.Count -eq 2 -and
+        @($noCacheDecorated | Where-Object { $_.Name -ceq 'Team' }).Count -eq 1
+    ) 'NO_QUOTA_CACHE_CORE_STILL_LOADS'
+
+    # B/C/D. Empty, corrupt and unsupported cache all degrade independently.
+    foreach ($badCase in @(
+        [pscustomobject]@{ Name = 'empty'; Text = '' },
+        [pscustomobject]@{ Name = 'corrupt'; Text = '{BROKEN JSON' },
+        [pscustomobject]@{
+            Name = 'unsupported'
+            Text = '{"schema_version":999,"profiles":{}}'
+        }
+    )) {
+        $badDirectory = Join-Path $startupRoot $badCase.Name
+        [System.IO.Directory]::CreateDirectory($badDirectory) | Out-Null
+        [System.IO.File]::WriteAllText(
+            (Join-Path $badDirectory 'quota-cache.json'),
+            [string]$badCase.Text
+        )
+        $badRead = Read-QiehaoQuotaCache -StateDirectory $badDirectory
+        $badCore = New-FakeStartupCoreSnapshot
+        Assert-QuotaTest (
+            -not $badRead.IsValid -and
+            @($badCore.Profiles).Count -eq 2 -and
+            $badCore.ActiveProfile -ceq 'Team'
+        ) ('QUOTA_' + $badCase.Name.ToUpperInvariant() +
+            '_CACHE_CHANGED_CORE')
+    }
+
+    # Provider failure and unavailable enrichment cannot mutate core identity.
+    $providerCoordinator = New-QiehaoQuotaCoordinatorState
+    $providerFailure = Invoke-QiehaoQuotaCacheRefresh -Reason Manual `
+        -Coordinator $providerCoordinator -StateDirectory $noCacheDirectory `
+        -Cache $noCache.Cache -ActiveProfile 'Team' -SelectedProfile 'Plus' `
+        -QuotaProvider {
+            [pscustomobject]@{
+                Succeeded = $false
+                FailureCode = 'FAKE_PROVIDER_FAILURE'
+                Snapshot = $null
+            }
+        }
+    $providerCore = New-FakeStartupCoreSnapshot
+    Assert-QuotaTest (
+        -not $providerFailure.Succeeded -and
+        @($providerCore.Profiles).Count -eq 2 -and
+        $providerCore.ActiveProfile -ceq 'Team'
+    ) 'QUOTA_PROVIDER_FAILURE_CHANGED_CORE'
+
+    $moduleUnavailableRows = @((New-FakeStartupCoreSnapshot).Profiles)
+    $moduleUnavailable = Invoke-QiehaoOptionalProfileRowEnrichment `
+        -Rows $moduleUnavailableRows -Enrichment $null
+    Assert-QuotaTest (
+        -not $moduleUnavailable.EnrichmentSucceeded -and
+        @($moduleUnavailable.Rows).Count -eq 2 -and
+        @($moduleUnavailable.Rows | Where-Object {
+            $_.Name -ceq 'Team' -and $_.Active -ceq '是'
+        }).Count -eq 1
+    ) 'QUOTA_MODULE_UNAVAILABLE_CHANGED_CORE'
+
+    # Cache keys can decorate known rows but can never define population.
+    $ghostDirectory = Join-Path $startupRoot 'ghost'
+    [System.IO.Directory]::CreateDirectory($ghostDirectory) | Out-Null
+    $ghostSave = Save-QiehaoQuotaSnapshot -StateDirectory $ghostDirectory `
+        -Cache (New-QiehaoEmptyQuotaCache) -ProfileName 'Ghost' `
+        -Snapshot (New-FakeQuotaSnapshot -Durations @(60) -Remaining @(50))
+    $ghostRows = @((New-FakeStartupCoreSnapshot).Profiles)
+    $ghostDecorated = @(Update-QiehaoQuotaProfileRows -Rows $ghostRows `
+        -Cache $ghostSave.Cache -ActiveProfile 'Team')
+    Assert-QuotaTest (
+        $ghostSave.Succeeded -and $ghostDecorated.Count -eq 2 -and
+        @($ghostDecorated.Name) -ccontains 'Plus' -and
+        @($ghostDecorated.Name) -ccontains 'Team' -and
+        -not (@($ghostDecorated.Name) -ccontains 'Ghost')
+    ) 'QUOTA_CACHE_DEFINED_PROFILE_POPULATION'
+
+    # Explicit startup ordering: core snapshot is established before optional
+    # quota enrichment, and enrichment failure cannot set it to uninitialized.
+    $startupOrder = New-Object 'System.Collections.Generic.List[string]'
+    $orderedCore = New-FakeStartupCoreSnapshot -Order $startupOrder
+    $orderedRows = @($orderedCore.Profiles)
+    $orderedResult = Invoke-QiehaoOptionalProfileRowEnrichment `
+        -Rows $orderedRows -Enrichment ({
+            $null = $startupOrder.Add('QuotaSnapshot')
+            throw 'FAKE_QUOTA_FORMATTER_FAILURE'
+        }.GetNewClosure())
+    Assert-QuotaTest (
+        ($startupOrder.ToArray() -join '|') -ceq
+            'CoreSnapshot|QuotaSnapshot' -and
+        -not $orderedResult.EnrichmentSucceeded -and
+        @($orderedResult.Rows).Count -eq 2 -and
+        $orderedCore.ActiveProfile -ceq 'Team' -and
+        @($orderedCore.ReadOnlyErrors).Count -eq 0
+    ) 'QUOTA_STARTUP_ORDER_OR_CORE_ISOLATION_FAILED'
+
     $cache = New-QiehaoEmptyQuotaCache
     $coordinator = New-QiehaoQuotaCoordinatorState
     $calls = New-Object 'System.Collections.Generic.List[string]'
@@ -345,6 +515,17 @@ try {
         CorruptCacheFallback = 'PASS'
         SensitiveFieldsExcluded = 'PASS'
         ProcessTimersIsolated = 'PASS'
+        CoreCommandsSurviveQuotaImport = 'PASS'
+        NoQuotaCacheCoreStillLoads = 'PASS'
+        EmptyQuotaCacheCoreStillLoads = 'PASS'
+        CorruptQuotaCacheCoreStillLoads = 'PASS'
+        UnsupportedQuotaCacheCoreStillLoads = 'PASS'
+        QuotaProviderFailureCoreStillLoads = 'PASS'
+        QuotaModuleUnavailableCoreStillLoads = 'PASS'
+        ProfileWithoutQuotaEntryStillVisible = 'PASS'
+        QuotaCacheNeverDefinesProfilePopulation = 'PASS'
+        QuotaStartupRunsAfterCoreSnapshot = 'PASS'
+        QuotaFailureDoesNotSetCoreUninitialized = 'PASS'
     }
     Write-Output 'QUOTA_GUI_SELFTEST_PASS'
 }

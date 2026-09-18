@@ -154,6 +154,45 @@ function ConvertTo-QiehaoGuiProfileRows {
     return @($rows)
 }
 
+function Invoke-QiehaoOptionalProfileRowEnrichment {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$Rows,
+
+        [AllowNull()]
+        [scriptblock]$Enrichment
+    )
+
+    # Profile rows are core state. Optional feature enrichment may mutate those
+    # rows, but it can never define, remove, or replace the profile population.
+    $coreRows = @($Rows)
+    if ($null -eq $Enrichment) {
+        return [pscustomobject]@{
+            Rows = $coreRows
+            EnrichmentSucceeded = $false
+            FailureCode = 'OPTIONAL_ENRICHMENT_UNAVAILABLE'
+        }
+    }
+
+    try {
+        $null = & $Enrichment
+        return [pscustomobject]@{
+            Rows = $coreRows
+            EnrichmentSucceeded = $true
+            FailureCode = $null
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Rows = $coreRows
+            EnrichmentSucceeded = $false
+            FailureCode = 'OPTIONAL_ENRICHMENT_FAILED'
+        }
+    }
+}
+
 function ConvertTo-QiehaoVerifyMessage {
     [CmdletBinding()]
     param(
@@ -1807,6 +1846,7 @@ function Exit-QiehaoGuiSingleInstance {
 
 Export-ModuleMember -Function @(
     'ConvertTo-QiehaoGuiProfileRows',
+    'Invoke-QiehaoOptionalProfileRowEnrichment',
     'ConvertTo-QiehaoCodexStatus',
     'ConvertTo-QiehaoActiveIdentityStatus',
     'ConvertTo-QiehaoVerifyMessage',

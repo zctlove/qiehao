@@ -1,7 +1,12 @@
 ﻿[CmdletBinding()]
 param(
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [switch]$SimulateQuotaModuleUnavailable
 )
+
+if ($SimulateQuotaModuleUnavailable -and -not $SelfTest) {
+    throw 'SIMULATED_QUOTA_MODULE_FAILURE_REQUIRES_SELFTEST'
+}
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -23,9 +28,39 @@ Add-Type -AssemblyName WindowsBase -ErrorAction Stop
 
 Import-Module -Name $coreModulePath -Force -ErrorAction Stop
 Import-Module -Name $helperModulePath -Force -ErrorAction Stop
-Import-Module -Name $quotaHelperModulePath -Force -ErrorAction Stop
-Import-Module -Name $quotaClientModulePath -Force -ErrorAction Stop
+$script:guiQuotaModulesAvailable = $false
+if (-not $SimulateQuotaModuleUnavailable) {
+    try {
+        Import-Module -Name $quotaHelperModulePath -Force -ErrorAction Stop
+        Import-Module -Name $quotaClientModulePath -Force -ErrorAction Stop
+        $script:guiQuotaModulesAvailable = $true
+    }
+    catch {
+        # Quota is optional. Core profile, process, identity and
+        # account-management commands must remain available.
+    }
+}
 $stateDirectory = Resolve-QiehaoProjectStateDirectory -GuiScriptRoot $guiRoot
+
+$script:guiQuotaFallbackStrings = [ordered]@{
+    RefreshButton = '刷新额度'
+    ColumnHeader = '额度快照'
+    CacheUnavailable = '额度功能不可用，账号管理功能不受影响。'
+    NoSnapshot = '额度不可用'
+    InactiveTooltip = '额度功能当前不可用；账号管理功能不受影响。'
+}
+
+function Get-QiehaoQuotaUiTextSafe {
+    param([Parameter(Mandatory = $true)][string]$Key)
+    if ($script:guiQuotaModulesAvailable) {
+        try { return Get-QiehaoQuotaUiText -Key $Key }
+        catch { }
+    }
+    if ($script:guiQuotaFallbackStrings.Contains($Key)) {
+        return [string]$script:guiQuotaFallbackStrings[$Key]
+    }
+    return '额度不可用'
+}
 
 function Read-QiehaoMainWindow {
     $xamlText = [System.IO.File]::ReadAllText($xamlPath)
@@ -101,8 +136,8 @@ try {
     $verifyButton = Get-RequiredControl -Window $window -Name 'VerifyButton'
     $refreshButton = Get-RequiredControl -Window $window -Name 'RefreshButton'
     $refreshQuotaButton = Get-RequiredControl -Window $window -Name 'RefreshQuotaButton'
-    $refreshQuotaButton.Content = Get-QiehaoQuotaUiText -Key 'RefreshButton'
-    $quotaColumn.Header = Get-QiehaoQuotaUiText -Key 'ColumnHeader'
+    $refreshQuotaButton.Content = Get-QiehaoQuotaUiTextSafe -Key 'RefreshButton'
+    $quotaColumn.Header = Get-QiehaoQuotaUiTextSafe -Key 'ColumnHeader'
     $addButton = Get-RequiredControl -Window $window -Name 'AddButton'
     $renameButton = Get-RequiredControl -Window $window -Name 'RenameButton'
     $deleteButton = Get-RequiredControl -Window $window -Name 'DeleteButton'
@@ -148,7 +183,15 @@ try {
     $script:guiVerificationStates = @{}
     $script:guiIsClosing = $false
     $script:guiThemePersistenceReady = $false
-    $script:guiQuotaCacheRead = if ($SelfTest) {
+    $script:guiQuotaCacheRead = if (-not $script:guiQuotaModulesAvailable) {
+        [pscustomobject]@{
+            Cache = $null
+            IsValid = $false
+            UsedEmpty = $true
+            ErrorCode = 'QUOTA_MODULE_UNAVAILABLE'
+        }
+    }
+    elseif ($SelfTest) {
         [pscustomobject]@{
             Cache = New-QiehaoEmptyQuotaCache
             IsValid = $true
@@ -157,10 +200,29 @@ try {
         }
     }
     else {
-        Read-QiehaoQuotaCache -StateDirectory $stateDirectory
+        try {
+            Read-QiehaoQuotaCache -StateDirectory $stateDirectory
+        }
+        catch {
+            $script:guiQuotaModulesAvailable = $false
+            [pscustomobject]@{
+                Cache = $null
+                IsValid = $false
+                UsedEmpty = $true
+                ErrorCode = 'QUOTA_CACHE_LOAD_FAILED'
+            }
+        }
     }
     $script:guiQuotaCache = $script:guiQuotaCacheRead.Cache
-    $script:guiQuotaCoordinator = New-QiehaoQuotaCoordinatorState
+    $script:guiQuotaCoordinator = if ($script:guiQuotaModulesAvailable) {
+        New-QiehaoQuotaCoordinatorState
+    }
+    else {
+        [pscustomobject]@{
+            StartupAttempted = $false
+            QueryInProgress = $false
+        }
+    }
     $script:guiQuotaJustUpdatedProfile = $null
     $script:guiQuotaAsyncPowerShell = $null
     $script:guiQuotaAsyncResult = $null
@@ -168,6 +230,28 @@ try {
     $script:guiQuotaCompletionTickHandler = $null
     $script:guiQuotaRequestedProfile = $null
     $script:guiQuotaAsyncReason = $null
+
+    function Set-QiehaoQuotaUnavailableRows {
+        param(
+            [AllowNull()]
+            [AllowEmptyCollection()]
+            [object[]]$Rows
+        )
+        foreach ($row in @($Rows)) {
+            if ($null -eq $row) { continue }
+            Add-Member -InputObject $row -NotePropertyName QuotaSummary -NotePropertyValue (Get-QiehaoQuotaUiTextSafe -Key 'NoSnapshot') -Force
+            Add-Member -InputObject $row -NotePropertyName QuotaFreshness -NotePropertyValue '' -Force
+            Add-Member -InputObject $row -NotePropertyName QuotaAvailability -NotePropertyValue '' -Force
+            Add-Member -InputObject $row -NotePropertyName QuotaToolTip -NotePropertyValue (Get-QiehaoQuotaUiTextSafe -Key 'InactiveTooltip') -Force
+            Add-Member -InputObject $row -NotePropertyName QuotaIsActive -NotePropertyValue $false -Force
+        }
+    }
+
+    function Disable-QiehaoQuotaFeature {
+        $script:guiQuotaModulesAvailable = $false
+        $script:guiQuotaCoordinator.QueryInProgress = $false
+        $refreshQuotaButton.IsEnabled = $false
+    }
 
     function Get-QiehaoSelectedProfileName {
         if ($null -eq $profilesGrid.SelectedItem) { return $null }
@@ -184,6 +268,7 @@ try {
                 [bool]$script:guiLaunchTarget.Available)
         $refreshButton.IsEnabled = [bool]$state.Refresh
         $refreshQuotaButton.IsEnabled = (
+            $script:guiQuotaModulesAvailable -and
             -not $script:guiIsClosing -and
             -not $script:guiIsWriteOperationBusy -and
             -not [bool]$script:guiQuotaCoordinator.QueryInProgress -and
@@ -549,10 +634,8 @@ try {
                 $row.Verification = [string]$script:guiVerificationStates[[string]$row.Name]
             }
         }
-        $rows = @(Update-QiehaoQuotaProfileRows -Rows $rows `
-            -Cache $script:guiQuotaCache `
-            -ActiveProfile ([string]$Snapshot.ActiveProfile) `
-            -JustUpdatedProfile $script:guiQuotaJustUpdatedProfile)
+        # Establish core state before optional quota enrichment. Quota failures
+        # must never replace the profile population or core status fields.
         $script:guiAllProfileRows = @($rows)
         $codexStatusText.Text = [string]$Snapshot.CodexDesktop
         $script:guiCurrentCodexStatus = [string]$Snapshot.CodexDesktop
@@ -566,6 +649,26 @@ try {
             '不匹配' { $identityStatusText.Foreground = '#FFFF7B72' }
             '待退出后确认' { $identityStatusText.Foreground = '#FFFFC857' }
             default { $identityStatusText.Foreground = $window.Resources['TextSecondaryBrush'] }
+        }
+        Set-QiehaoQuotaUnavailableRows -Rows $rows
+        $quotaEnrichment = $null
+        if ($script:guiQuotaModulesAvailable) {
+            $quotaEnrichment = {
+                $decoratedRows = @(Update-QiehaoQuotaProfileRows -Rows $rows `
+                    -Cache $script:guiQuotaCache `
+                    -ActiveProfile ([string]$Snapshot.ActiveProfile) `
+                    -JustUpdatedProfile $script:guiQuotaJustUpdatedProfile)
+                if ($decoratedRows.Count -ne $rows.Count) {
+                    throw 'QUOTA_ENRICHMENT_CHANGED_PROFILE_POPULATION'
+                }
+            }.GetNewClosure()
+        }
+        $quotaResult = Invoke-QiehaoOptionalProfileRowEnrichment `
+            -Rows $rows -Enrichment $quotaEnrichment
+        $script:guiAllProfileRows = @($quotaResult.Rows)
+        if (-not $quotaResult.EnrichmentSucceeded) {
+            Set-QiehaoQuotaUnavailableRows -Rows $script:guiAllProfileRows
+            Disable-QiehaoQuotaFeature
         }
         $refreshStatusText.Text = if (@($Snapshot.ReadOnlyErrors).Count -eq 0) {
             '状态已刷新'
@@ -608,11 +711,28 @@ try {
     }
 
     function Update-QiehaoQuotaRows {
-        $script:guiAllProfileRows = @(Update-QiehaoQuotaProfileRows `
-            -Rows $script:guiAllProfileRows `
-            -Cache $script:guiQuotaCache `
-            -ActiveProfile $script:guiCurrentActiveProfile `
-            -JustUpdatedProfile $script:guiQuotaJustUpdatedProfile)
+        if (-not $script:guiQuotaModulesAvailable) {
+            Set-QiehaoQuotaUnavailableRows -Rows $script:guiAllProfileRows
+            Update-QiehaoProfileFilter
+            return
+        }
+        try {
+            $rows = @(Update-QiehaoQuotaProfileRows `
+                -Rows $script:guiAllProfileRows `
+                -Cache $script:guiQuotaCache `
+                -ActiveProfile $script:guiCurrentActiveProfile `
+                -JustUpdatedProfile $script:guiQuotaJustUpdatedProfile)
+            if ($rows.Count -ne $script:guiAllProfileRows.Count) {
+                throw 'QUOTA_ENRICHMENT_CHANGED_PROFILE_POPULATION'
+            }
+            $script:guiAllProfileRows = $rows
+        }
+        catch {
+            Disable-QiehaoQuotaFeature
+            Set-QiehaoQuotaUnavailableRows -Rows $script:guiAllProfileRows
+            $refreshStatusText.Text =
+                Get-QiehaoQuotaUiTextSafe -Key 'CacheUnavailable'
+        }
         Update-QiehaoProfileFilter
     }
 
@@ -717,7 +837,7 @@ try {
                 $script:guiQuotaCache = $saved.Cache
                 $script:guiQuotaJustUpdatedProfile = $requestedProfile
                 $updated = $true
-                $refreshStatusText.Text = Get-QiehaoQuotaUiText -Key 'Updated'
+                $refreshStatusText.Text = Get-QiehaoQuotaUiTextSafe -Key 'Updated'
             }
         }
         if (-not $updated) {
@@ -730,15 +850,15 @@ try {
             }
             if ($reason -ceq 'SwitchAfter') {
                 $refreshStatusText.Text =
-                    Get-QiehaoQuotaUiText -Key 'SwitchNewFailed'
+                    Get-QiehaoQuotaUiTextSafe -Key 'SwitchNewFailed'
             }
             elseif ($null -ne $existing) {
                 $refreshStatusText.Text =
-                    Get-QiehaoQuotaUiText -Key 'UpdateFailedCached'
+                    Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedCached'
             }
             else {
                 $refreshStatusText.Text =
-                    Get-QiehaoQuotaUiText -Key 'UpdateFailedNoCache'
+                    Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedNoCache'
             }
         }
         Update-QiehaoQuotaRows
@@ -751,7 +871,8 @@ try {
             [ValidateSet('Open', 'Manual', 'SwitchAfter')]
             [string]$Reason
         )
-        if ($script:guiIsClosing -or
+        if (-not $script:guiQuotaModulesAvailable -or
+            $script:guiIsClosing -or
             [bool]$script:guiQuotaCoordinator.QueryInProgress) {
             return $false
         }
@@ -770,7 +891,7 @@ try {
         $script:guiQuotaCoordinator.QueryInProgress = $true
         $script:guiQuotaRequestedProfile = $activeProfile
         $script:guiQuotaAsyncReason = $Reason
-        $refreshStatusText.Text = Get-QiehaoQuotaUiText -Key 'Updating'
+        $refreshStatusText.Text = Get-QiehaoQuotaUiTextSafe -Key 'Updating'
         Update-QiehaoActionButtons
         try {
             $powerShell = [PowerShell]::Create()
@@ -803,12 +924,13 @@ try {
         catch {
             Stop-QiehaoQuotaAsync
             $refreshStatusText.Text =
-                Get-QiehaoQuotaUiText -Key 'UpdateFailedNoCache'
+                Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedNoCache'
             return $false
         }
     }
 
     function Invoke-QiehaoQuotaBeforeSwitch {
+        if (-not $script:guiQuotaModulesAvailable) { return }
         Stop-QiehaoQuotaAsync
         $activeProfile = [string]$script:guiCurrentActiveProfile
         if ([string]::IsNullOrWhiteSpace($activeProfile) -or
@@ -833,11 +955,16 @@ try {
         }
         else {
             $refreshStatusText.Text =
-                Get-QiehaoQuotaUiText -Key 'SwitchOldFailed'
+                Get-QiehaoQuotaUiTextSafe -Key 'SwitchOldFailed'
         }
     }
 
     function Invoke-QiehaoManualQuotaRefresh {
+        if (-not $script:guiQuotaModulesAvailable) {
+            $refreshStatusText.Text =
+                Get-QiehaoQuotaUiTextSafe -Key 'CacheUnavailable'
+            return
+        }
         if ($script:guiIsWriteOperationBusy -or
             [bool]$script:guiQuotaCoordinator.QueryInProgress) {
             return
@@ -849,7 +976,7 @@ try {
                 [StringComparison]::OrdinalIgnoreCase
             )) {
             $refreshStatusText.Text =
-                Get-QiehaoQuotaUiText -Key 'RefreshCurrentOnly'
+                Get-QiehaoQuotaUiTextSafe -Key 'RefreshCurrentOnly'
         }
         $null = Start-QiehaoQuotaAsync -Reason Manual
     }
@@ -1783,7 +1910,7 @@ try {
             try { Invoke-QiehaoQuotaBeforeSwitch }
             catch {
                 $refreshStatusText.Text =
-                    Get-QiehaoQuotaUiText -Key 'SwitchOldFailed'
+                    Get-QiehaoQuotaUiTextSafe -Key 'SwitchOldFailed'
             }
             $result = Invoke-QiehaoOperationProvider -Operation 'SWITCH' `
                 -Provider { param($Name) Switch-CodexAccountProfile -Name $Name } `
@@ -1909,7 +2036,7 @@ try {
                 $script:guiVerificationStates[$newName] = $script:guiVerificationStates[$oldName]
                 $script:guiVerificationStates.Remove($oldName)
             }
-            if ($result.IsSuccess) {
+            if ($result.IsSuccess -and $script:guiQuotaModulesAvailable) {
                 $quotaRename = Rename-QiehaoQuotaCacheProfile `
                     -StateDirectory $stateDirectory `
                     -Cache $script:guiQuotaCache `
@@ -1927,7 +2054,7 @@ try {
                 }
                 else {
                     $quotaCacheWarning =
-                        Get-QiehaoQuotaUiText -Key 'RenameCacheFailed'
+                        Get-QiehaoQuotaUiTextSafe -Key 'RenameCacheFailed'
                 }
             }
             Show-QiehaoOperationResult -Result $result
@@ -1959,6 +2086,8 @@ try {
                 -ArgumentList @($profileName)
             if ($result.IsSuccess) {
                 $script:guiVerificationStates.Remove($profileName)
+            }
+            if ($result.IsSuccess -and $script:guiQuotaModulesAvailable) {
                 $quotaDelete = Remove-QiehaoQuotaCacheProfile `
                     -StateDirectory $stateDirectory `
                     -Cache $script:guiQuotaCache `
@@ -1968,7 +2097,7 @@ try {
                 }
                 else {
                     $quotaCacheWarning =
-                        Get-QiehaoQuotaUiText -Key 'DeleteCacheFailed'
+                        Get-QiehaoQuotaUiTextSafe -Key 'DeleteCacheFailed'
                 }
             }
             Show-QiehaoOperationResult -Result $result
@@ -2138,7 +2267,7 @@ try {
             throw 'GUI_SELFTEST_BINDING_FAILED'
         }
         if ($refreshQuotaButton.Content -cne
-            (Get-QiehaoQuotaUiText -Key 'RefreshButton') -or
+            (Get-QiehaoQuotaUiTextSafe -Key 'RefreshButton') -or
             $null -eq $profilesGrid.ItemsSource[0].PSObject.Properties[
                 'QuotaSummary'
             ]) {
@@ -2199,11 +2328,14 @@ try {
     $profileContextMenu.Add_Opened({ Update-QiehaoActionButtons })
     $window.Add_Loaded({
         Invoke-QiehaoReadOnlyRefresh
-        if (-not [bool]$script:guiQuotaCacheRead.IsValid) {
+        if (-not $script:guiQuotaModulesAvailable -or
+            -not [bool]$script:guiQuotaCacheRead.IsValid) {
             $refreshStatusText.Text =
-                Get-QiehaoQuotaUiText -Key 'CacheUnavailable'
+                Get-QiehaoQuotaUiTextSafe -Key 'CacheUnavailable'
         }
-        $null = Start-QiehaoQuotaAsync -Reason Open
+        if ($script:guiQuotaModulesAvailable) {
+            $null = Start-QiehaoQuotaAsync -Reason Open
+        }
         Start-QiehaoProcessMonitor
         $script:guiThemePersistenceReady = $true
     })

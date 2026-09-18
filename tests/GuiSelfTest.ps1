@@ -453,6 +453,22 @@ Assert-GuiTest -Condition (
     $guiStartup7.Output -ccontains 'GUI_SELFTEST_READY'
 ) -Code 'GUI_STARTUP_SELFTEST_PS7_FAILED'
 
+$guiQuotaUnavailable51 = Invoke-PowerShellFileTest `
+    -HostPath $ps51Command.Source -ScriptPath $guiScriptPath `
+    -AdditionalArguments @('-SelfTest', '-SimulateQuotaModuleUnavailable')
+Assert-GuiTest -Condition (
+    $guiQuotaUnavailable51.ExitCode -eq 0 -and
+    $guiQuotaUnavailable51.Output -ccontains 'GUI_SELFTEST_READY'
+) -Code 'GUI_QUOTA_MODULE_UNAVAILABLE_PS51_BLOCKED_CORE_STARTUP'
+
+$guiQuotaUnavailable7 = Invoke-PowerShellFileTest `
+    -HostPath $ps7Command.Source -ScriptPath $guiScriptPath `
+    -AdditionalArguments @('-SelfTest', '-SimulateQuotaModuleUnavailable')
+Assert-GuiTest -Condition (
+    $guiQuotaUnavailable7.ExitCode -eq 0 -and
+    $guiQuotaUnavailable7.Output -ccontains 'GUI_SELFTEST_READY'
+) -Code 'GUI_QUOTA_MODULE_UNAVAILABLE_PS7_BLOCKED_CORE_STARTUP'
+
 $themes = @(Get-QiehaoBackgroundThemes)
 Assert-GuiTest -Condition (
     $themes.Count -eq 5 -and
@@ -2357,6 +2373,8 @@ finally {
     Result = 'PASS'
     GuiStartupPowerShell51 = 'PASS'
     GuiStartupPowerShell7 = 'PASS'
+    QuotaModuleUnavailablePowerShell51 = 'PASS'
+    QuotaModuleUnavailablePowerShell7 = 'PASS'
     QuotaSnapshotGuiCache = 'PASS'
     PowerShell51XamlParse = 'PASS'
     PowerShell7XamlParse = 'PASS'
