@@ -20,6 +20,8 @@ $quotaBackgroundWorkerTestPath = Join-Path -Path $PSScriptRoot `
     -ChildPath 'QuotaBackgroundWorkerSelfTest.ps1'
 $quotaChildCleanupTestPath = Join-Path -Path $PSScriptRoot `
     -ChildPath 'QuotaChildCleanupSelfTest.ps1'
+$switchBeforeQuotaTestPath = Join-Path -Path $PSScriptRoot `
+    -ChildPath 'SwitchBeforeQuotaSelfTest.ps1'
 $coreModulePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 
 function Assert-GuiTest {
@@ -523,6 +525,12 @@ $requiredChildCleanupOutput = @(
     'FakeNormalChildExitedNaturally=True',
     'FakeSlowExitUsesSeparateCleanupBudget=True',
     'FakeNearDeadlineUsesSeparateCleanupBudget=True',
+    'ResponseAt2SecondsPasses=True',
+    'ResponseAt9SecondsPasses=True',
+    'ResponseAt12SecondsPasses=True',
+    'ResponseAt25SecondsPasses=True',
+    'ResponseBeyond30SecondsFailsWithQuotaRateLimitsTimeout=True',
+    'RateLimitsWaitElapsedMillisecondsPreserved=True',
     'FakeNeverExitCleanupBounded=True',
     'FakeNeverExitCleanupFailurePreserved=True',
     'PrimaryAndCleanupFailuresSeparated=True',
@@ -547,6 +555,40 @@ Assert-GuiTest -Condition (
         $childCleanup7.Output -cnotcontains $_
     }).Count -eq 0
 ) -Code 'GUI_CHILD_CLEANUP_CONTRACT_PS7_FAILED'
+
+$requiredSwitchBeforeQuotaOutput = @(
+    'SwitchBeforeQuotaRunsDuringManualExitWait=True',
+    'SwitchBeforeQuotaSuccessBeforeStopped=True',
+    'SwitchBeforeQuotaSuccessAfterStoppedWithinBudget=True',
+    'SwitchBeforeQuotaTimeoutDoesNotBlockSwitch=True',
+    'SwitchBeforeQuotaUsesOldCacheOnFailure=True',
+    'SwitchBeforeQuotaFailureWithoutOldCacheStillSwitches=True',
+    'SwitchBeforeQuotaNoRetry=True',
+    'SwitchBeforeQuotaBudgetDoesNotRestartAfterStopped=True',
+    'SwitchBeforeQuotaSlowStatusMessage=True',
+    'SwitchBeforeQuotaSuccessStatusMessage=True',
+    'SwitchBeforeQuotaTimeoutStatusMessage=True',
+    'QuotaFailureNeverChangesSwitchSuccess=True',
+    'SwitchBeforeQuotaWaitTimerRemainsActiveUntilQuotaDone=True',
+    'SWITCH_BEFORE_QUOTA_SELFTEST_PASS'
+)
+$switchBeforeQuota51 = Invoke-PowerShellFileTest `
+    -HostPath $ps51Command.Source -ScriptPath $switchBeforeQuotaTestPath
+Assert-GuiTest -Condition (
+    $switchBeforeQuota51.ExitCode -eq 0 -and
+    @($requiredSwitchBeforeQuotaOutput | Where-Object {
+        $switchBeforeQuota51.Output -cnotcontains $_
+    }).Count -eq 0
+) -Code 'GUI_SWITCH_BEFORE_QUOTA_CONTRACT_PS51_FAILED'
+
+$switchBeforeQuota7 = Invoke-PowerShellFileTest `
+    -HostPath $ps7Command.Source -ScriptPath $switchBeforeQuotaTestPath
+Assert-GuiTest -Condition (
+    $switchBeforeQuota7.ExitCode -eq 0 -and
+    @($requiredSwitchBeforeQuotaOutput | Where-Object {
+        $switchBeforeQuota7.Output -cnotcontains $_
+    }).Count -eq 0
+) -Code 'GUI_SWITCH_BEFORE_QUOTA_CONTRACT_PS7_FAILED'
 
 $ps51Xaml = Invoke-PowerShellFileTest -HostPath $ps51Command.Source `
     -ScriptPath $PSCommandPath -AdditionalArguments @('-XamlOnly')
@@ -728,6 +770,7 @@ $requiredQuotaAsyncOutputs = @(
     'StartupQuotaSuccessClearsBusy=True',
     'StartupQuotaFailureClearsBusy=True',
     'StartupQuotaTimeoutClearsBusy=True',
+    'LongQuotaKeepsCoreGuiResponsive=True',
     'StartupQuotaCompletionTimerStops=True',
     'StartupQuotaCompletionHandlerRemoved=True',
     'StartupQuotaSuccessReEnablesRefresh=True',
@@ -2104,7 +2147,7 @@ $successWait = New-TestWaitRuntime -ProbeProvider ({
     if ($runningThenStopped.Calls -ge 2) { return 'Succeeded' }
     return 'Pending'
 }.GetNewClosure())
-Invoke-TestDispatcherFor -Milliseconds 100
+Invoke-TestDispatcherFor -Milliseconds 150
 $successTicksAfterStop = $successWait.Runtime.TickCount
 Invoke-TestDispatcherFor -Milliseconds 30
 Assert-GuiTest -Condition (
@@ -2562,9 +2605,13 @@ Assert-GuiTest -Condition (
     $quotaAsyncSourceSection -match
         'guiQuotaCoordinator\.QueryInProgress = \$false' -and
     $quotaAsyncSourceSection -match 'AddMilliseconds\(' -and
-    $quotaAsyncSourceSection -match 'else \{ 18000 \}' -and
+    $quotaAsyncSourceSection -match 'else \{ 38000 \}' -and
     $quotaAsyncSourceSection -match
-        'Invoke-QiehaoQuotaBackgroundWorker -TimeoutSeconds 10' -and
+        'Invoke-QiehaoQuotaBackgroundWorker' -and
+    $quotaAsyncSourceSection -match
+        '-TimeoutSeconds \$TimeoutSeconds' -and
+    $quotaAsyncSourceSection -match
+        '\$quotaTimeoutSeconds = if \(\$Reason -ceq ''SwitchBefore''\)' -and
     $quotaAsyncSourceSection -match
         '\$script:guiQuotaWorkerOutputCount = \$output\.Count' -and
     $quotaAsyncSourceSection -match '\$output\.Count -eq 1' -and
@@ -2576,6 +2623,13 @@ Assert-GuiTest -Condition (
         'Get-QiehaoCurrentQuotaSnapshot -TimeoutSeconds 10' -and
     $quotaAsyncSourceSection -notmatch 'GetNewClosure'
 ) -Code 'GUI_QUOTA_ASYNC_SOURCE_LIFECYCLE_INVALID'
+Assert-GuiTest -Condition (
+    $quotaAsyncSourceSection -match '额度服务响应较慢，仍在等待' -and
+    $guiSource -match 'Codex 已安全退出。' -and
+    $guiSource -match '额度快照已保存，正在切换账号' -and
+    $guiSource -match '已保留上次缓存，正在继续切换' -and
+    $quotaAsyncSourceSection -notmatch '(?:20|50|80)%'
+) -Code 'GUI_SWITCH_QUOTA_STATUS_CONTRACT_INVALID'
 Assert-GuiTest -Condition (
     $guiSource -match 'Codex 已安全退出，可以切换账号。' -and
     $guiSource -match '文件 → 退出' -and
@@ -2753,6 +2807,8 @@ finally {
     BackgroundWorkerContractPowerShell7 = 'PASS'
     ChildCleanupContractPowerShell51 = 'PASS'
     ChildCleanupContractPowerShell7 = 'PASS'
+    SwitchBeforeQuotaContractPowerShell51 = 'PASS'
+    SwitchBeforeQuotaContractPowerShell7 = 'PASS'
     QuotaCommandsExportedPowerShell51 = 'PASS'
     QuotaCommandsExportedPowerShell7 = 'PASS'
     CoreCommandsSurviveAllQuotaImports = 'PASS'
@@ -2767,6 +2823,7 @@ finally {
     StartupQuotaSuccessClearsBusy = 'PASS'
     StartupQuotaFailureClearsBusy = 'PASS'
     StartupQuotaTimeoutClearsBusy = 'PASS'
+    LongQuotaKeepsCoreGuiResponsive = 'PASS'
     StartupQuotaCompletionTimerStops = 'PASS'
     StartupQuotaCompletionHandlerRemoved = 'PASS'
     StartupQuotaSuccessReEnablesRefresh = 'PASS'
@@ -2785,7 +2842,7 @@ finally {
     WorkerExecutableDiscoverySucceeded = 'PASS'
     WorkerLockDiagnosticSurvives = 'PASS'
     QuotaTimerNoDynamicClosure = 'PASS'
-    QuotaGuiHardFailSafe18Seconds = 'PASS'
+    QuotaGuiHardFailSafe38Seconds = 'PASS'
     QuotaAvailableFromForeignWorkingDirectory = 'PASS'
     QuotaModuleUnavailablePowerShell51 = 'PASS'
     QuotaModuleUnavailablePowerShell7 = 'PASS'

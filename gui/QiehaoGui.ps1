@@ -291,6 +291,7 @@ try {
     $script:guiManualSwitchWaitStatusText = $null
     $script:guiManualSwitchWaitCancelButton = $null
     $script:guiManualSwitchWaitOutcome = 'Idle'
+    $script:guiManualSwitchCodexStopped = $false
     $script:guiManualSwitchResult = $null
     $script:guiManualSwitchPresentation = $null
     $script:guiSwitchUiState = 'Idle'
@@ -359,7 +360,9 @@ try {
     $script:guiQuotaCompletionTickHandler = $null
     $script:guiQuotaRequestedProfile = $null
     $script:guiQuotaAsyncReason = $null
+    $script:guiQuotaStartedUtc = $null
     $script:guiQuotaDeadlineUtc = $null
+    $script:guiQuotaSlowStatusShown = $false
     $script:guiQuotaLastQueryFailed = $false
     $script:guiQuotaLastFailureCode = $null
     $script:guiQuotaLastDiagnostics = $null
@@ -370,6 +373,23 @@ try {
     $script:guiQuotaSelfTestScenario = $null
     $script:guiQuotaSelfTestQueryCount = 0
     $script:guiQuotaSelfTestHardCeilingMilliseconds = 0
+
+    function Set-QiehaoSwitchQuotaStatus {
+        param(
+            [Parameter(Mandatory = $true)][string]$Text,
+            [ValidateSet('Warning', 'Success')][string]$Tone = 'Warning'
+        )
+        $refreshStatusText.Text = $Text
+        if ($null -ne $script:guiManualSwitchWaitStatusText) {
+            $script:guiManualSwitchWaitStatusText.Text = $Text
+            $brushKey = if ($Tone -ceq 'Success') {
+                'DialogSuccessBrush'
+            }
+            else { 'DialogWarningBrush' }
+            $script:guiManualSwitchWaitStatusText.Foreground =
+                $window.Resources[$brushKey]
+        }
+    }
 
     function Set-QiehaoQuotaUnavailableRows {
         param(
@@ -941,7 +961,9 @@ try {
             $script:guiQuotaAsyncResult = $null
             $script:guiQuotaRequestedProfile = $null
             $script:guiQuotaAsyncReason = $null
+            $script:guiQuotaStartedUtc = $null
             $script:guiQuotaDeadlineUtc = $null
+            $script:guiQuotaSlowStatusShown = $false
             $script:guiQuotaCoordinator.QueryInProgress = $false
         }
         if (-not $ForClosing) { Update-QiehaoActionButtons }
@@ -1017,7 +1039,9 @@ try {
             $script:guiQuotaAsyncResult = $null
             $script:guiQuotaRequestedProfile = $null
             $script:guiQuotaAsyncReason = $null
+            $script:guiQuotaStartedUtc = $null
             $script:guiQuotaDeadlineUtc = $null
+            $script:guiQuotaSlowStatusShown = $false
             $script:guiQuotaCoordinator.QueryInProgress = $false
         }
 
@@ -1057,8 +1081,24 @@ try {
         $script:guiQuotaLastQueryFailed = -not $updated
         if ($updated) {
             $script:guiQuotaLastFailureCode = $null
-            $refreshStatusText.Text =
-                Get-QiehaoQuotaUiTextSafe -Key 'Updated'
+            if ($reason -ceq 'SwitchBefore') {
+                $switchQuotaSuccessText = if (
+                    $script:guiManualSwitchWaitInProgress -and
+                    -not $script:guiManualSwitchCodexStopped
+                ) {
+                    "'$requestedProfile' 的额度快照已保存，" +
+                    '正在等待 Codex 安全退出……'
+                }
+                else {
+                    "'$requestedProfile' 的额度快照已保存，正在切换账号……"
+                }
+                Set-QiehaoSwitchQuotaStatus -Tone Success `
+                    -Text $switchQuotaSuccessText
+            }
+            else {
+                $refreshStatusText.Text =
+                    Get-QiehaoQuotaUiTextSafe -Key 'Updated'
+            }
         }
         else {
             if ([string]::IsNullOrWhiteSpace($completionFailureCode)) {
@@ -1066,7 +1106,13 @@ try {
             }
             $script:guiQuotaLastFailureCode =
                 Get-QiehaoSafeQuotaFailureCode -Value $completionFailureCode
-            if ($reason -ceq 'SwitchAfter') {
+            if ($reason -ceq 'SwitchBefore') {
+                Set-QiehaoSwitchQuotaStatus -Text (
+                    "本次未能更新 '$requestedProfile' 的额度快照。" +
+                    '已保留上次缓存，正在继续切换……'
+                )
+            }
+            elseif ($reason -ceq 'SwitchAfter') {
                 $refreshStatusText.Text = Format-QiehaoQuotaFailureStatus `
                     -BaseText (
                         Get-QiehaoQuotaUiTextSafe -Key 'SwitchNewFailed'
@@ -1085,12 +1131,17 @@ try {
         finally {
             Update-QiehaoActionButtons
         }
+        if ($reason -ceq 'SwitchBefore' -and
+            -not $script:guiManualSwitchWaitInProgress -and
+            [string]$script:guiPendingAction -ceq 'SwitchAfterQuota') {
+            Continue-QiehaoStoppedSwitchAfterQuota
+        }
     }
 
     function Start-QiehaoQuotaAsync {
         param(
             [Parameter(Mandatory = $true)]
-            [ValidateSet('Open', 'Manual', 'SwitchAfter')]
+            [ValidateSet('Open', 'Manual', 'SwitchBefore', 'SwitchAfter')]
             [string]$Reason
         )
         if (-not $script:guiQuotaModulesAvailable -or
@@ -1120,6 +1171,13 @@ try {
         $script:guiQuotaEndInvokeAttempted = $false
         $script:guiQuotaRequestedProfile = $activeProfile
         $script:guiQuotaAsyncReason = $Reason
+        $script:guiQuotaStartedUtc = [DateTime]::UtcNow
+        $script:guiQuotaSlowStatusShown = $false
+        $quotaTimeoutSeconds = if ($Reason -ceq 'SwitchBefore') {
+            8
+        }
+        elseif ($Reason -ceq 'SwitchAfter') { 10 }
+        else { 30 }
         $hardCeilingMilliseconds = if (
             $SelfTest -and
             -not [string]::IsNullOrWhiteSpace(
@@ -1129,7 +1187,9 @@ try {
         ) {
             $script:guiQuotaSelfTestHardCeilingMilliseconds
         }
-        else { 18000 }
+        elseif ($Reason -ceq 'SwitchBefore') { 8000 }
+        elseif ($Reason -ceq 'SwitchAfter') { 18000 }
+        else { 38000 }
         $script:guiQuotaDeadlineUtc = [DateTime]::UtcNow.AddMilliseconds(
             $hardCeilingMilliseconds
         )
@@ -1138,7 +1198,7 @@ try {
         try {
             $powerShell = [PowerShell]::Create()
             $queryScript = {
-                param($ClientModulePath, $Scenario)
+                param($ClientModulePath, $Scenario, $TimeoutSeconds)
                 $ErrorActionPreference = 'Stop'
                 $clientModule = @(Import-Module -Name $ClientModulePath `
                     -PassThru -ErrorAction Stop |
@@ -1262,13 +1322,15 @@ try {
                         default { throw 'FAKE_QUOTA_SCENARIO_INVALID' }
                     }
                     }
-                    Invoke-QiehaoQuotaBackgroundWorker -TimeoutSeconds 10 `
+                    Invoke-QiehaoQuotaBackgroundWorker `
+                        -TimeoutSeconds $TimeoutSeconds `
                         -QuotaProvider $fakeProvider `
                         -QuotaProviderArgument $Scenario
                     return
                 }
 
-                Invoke-QiehaoQuotaBackgroundWorker -TimeoutSeconds 10
+                Invoke-QiehaoQuotaBackgroundWorker `
+                    -TimeoutSeconds $TimeoutSeconds
             }
             $workerScenario = if ($SelfTest) {
                 [string]$script:guiQuotaSelfTestScenario
@@ -1276,7 +1338,8 @@ try {
             else { '' }
             $null = $powerShell.AddScript($queryScript.ToString()).
                 AddArgument($quotaClientModulePath).
-                AddArgument($workerScenario)
+                AddArgument($workerScenario).
+                AddArgument($quotaTimeoutSeconds)
             $script:guiQuotaAsyncPowerShell = $powerShell
             $script:guiQuotaAsyncResult = $powerShell.BeginInvoke()
             if ($SelfTest -and -not [string]::IsNullOrWhiteSpace(
@@ -1298,6 +1361,20 @@ try {
                         $script:guiQuotaAsyncResult.IsCompleted) {
                         Complete-QiehaoQuotaAsync
                         return
+                    }
+                    if ([string]$script:guiQuotaAsyncReason -ceq
+                        'SwitchBefore' -and
+                        -not $script:guiQuotaSlowStatusShown -and
+                        $null -ne $script:guiQuotaStartedUtc -and
+                        [DateTime]::UtcNow -ge
+                            ([DateTime]$script:guiQuotaStartedUtc).
+                                AddSeconds(3)) {
+                        $script:guiQuotaSlowStatusShown = $true
+                        if (-not $script:guiManualSwitchCodexStopped) {
+                            Set-QiehaoSwitchQuotaStatus -Text (
+                                '额度服务响应较慢，仍在等待……'
+                            )
+                        }
                     }
                     if ($null -ne $script:guiQuotaDeadlineUtc -and
                         [DateTime]::UtcNow -ge
@@ -1355,7 +1432,7 @@ try {
             -SelectedProfile (Get-QiehaoSelectedProfileName) `
             -QuotaProvider {
                 param($IgnoredProfile)
-                Get-QiehaoCurrentQuotaSnapshot -TimeoutSeconds 10
+                Get-QiehaoCurrentQuotaSnapshot -TimeoutSeconds 8
             }
         if ($result.Succeeded) {
             $script:guiQuotaCache = $result.Cache
@@ -1561,6 +1638,7 @@ try {
         $script:guiManualSwitchWaitStatusText = $null
         $script:guiManualSwitchWaitCancelButton = $null
         $script:guiManualSwitchWaitOutcome = 'Closing'
+        $script:guiManualSwitchCodexStopped = $false
         $script:guiManualSwitchResult = $null
         $script:guiManualSwitchPresentation = $null
         $script:guiSwitchUiState = 'Closing'
@@ -1894,6 +1972,21 @@ try {
         catch { }
     }
 
+    function Continue-QiehaoStoppedSwitchAfterQuota {
+        $targetProfile = [string]$script:guiPendingTargetProfile
+        $script:guiPendingAction = $null
+        $script:guiPendingTargetProfile = $null
+        if ($script:guiIsClosing -or
+            [string]::IsNullOrWhiteSpace($targetProfile)) {
+            Set-QiehaoWriteBusy -Value $false
+            return
+        }
+        Set-QiehaoSwitchUiState -State 'Switching' `
+            -TargetProfile $targetProfile
+        Invoke-QiehaoSwitchCore -TargetProfile $targetProfile `
+            -SkipQuotaBefore
+    }
+
     function Complete-QiehaoManualSwitchWait {
         param(
             [Parameter(Mandatory = $true)]
@@ -1906,6 +1999,7 @@ try {
         $script:guiPendingAction = $null
         $script:guiPendingTargetProfile = $null
         $script:guiManualSwitchWaitInProgress = $false
+        $script:guiManualSwitchCodexStopped = $false
 
         if ($FinalState -ceq 'Stopped' -and
             -not $script:guiIsClosing -and
@@ -1926,7 +2020,8 @@ try {
             $switchAction = [System.Action]({
                 try {
                     $script:guiManualSwitchResult = Invoke-QiehaoSwitchCore `
-                        -TargetProfile $capturedTarget -DeferPresentation
+                        -TargetProfile $capturedTarget -DeferPresentation `
+                        -SkipQuotaBefore
                 }
                 catch {
                     $script:guiManualSwitchResult =
@@ -1961,6 +2056,9 @@ try {
         }
 
         $script:guiIsWriteOperationBusy = $false
+        if ([string]$script:guiQuotaAsyncReason -ceq 'SwitchBefore') {
+            Stop-QiehaoQuotaAsync
+        }
         $script:guiManualSwitchWaitOutcome = switch ($FinalState) {
             'Running' { 'TimedOut' }
             'Cancelled' { 'Cancelled' }
@@ -1988,7 +2086,22 @@ try {
                 -ProbeProvider {
                     $status = ConvertTo-QiehaoCodexStatus `
                         -ProcessState (Test-CodexProcessesStopped)
-                    if ($status -ceq '已退出') { return 'Succeeded' }
+                    if ($status -ceq '已退出') {
+                        if ([string]$script:guiQuotaAsyncReason -ceq
+                            'SwitchBefore' -and
+                            [bool]$script:guiQuotaCoordinator.
+                                QueryInProgress) {
+                            $script:guiManualSwitchCodexStopped = $true
+                            Set-QiehaoCodexStatusVisual -Status '已退出'
+                            Set-QiehaoSwitchQuotaStatus -Text (
+                                'Codex 已安全退出。' +
+                                "正在完成 '$script:guiQuotaRequestedProfile' " +
+                                '的额度快照，随后自动切换……'
+                            )
+                            return 'Pending'
+                        }
+                        return 'Succeeded'
+                    }
                     if ($status -ceq '未知') { return 'Unknown' }
                     return 'Pending'
                 } `
@@ -2098,7 +2211,13 @@ try {
         $root.Children.Add($instructionsPanel) | Out-Null
 
         $statusText = New-Object System.Windows.Controls.TextBlock
-        $statusText.Text = '正在等待 Codex 安全退出……'
+        $statusText.Text = if (
+            [string]$script:guiQuotaAsyncReason -ceq 'SwitchBefore'
+        ) {
+            "正在保存 '$script:guiQuotaRequestedProfile' 的最新额度快照，" +
+            '同时等待 Codex 安全退出……'
+        }
+        else { '正在等待 Codex 安全退出……' }
         $statusText.FontWeight = 'Bold'
         $statusText.Foreground = $dialog.Resources['DialogWarningBrush']
         $statusText.VerticalAlignment = 'Center'
@@ -2163,6 +2282,7 @@ try {
         $script:guiPendingTargetProfile = $TargetProfile
         $script:guiManualSwitchWaitInProgress = $true
         $script:guiManualSwitchWaitOutcome = 'Waiting'
+        $script:guiManualSwitchCodexStopped = $false
         $script:guiManualSwitchResult = $null
         $script:guiManualSwitchPresentation = $null
         $script:guiManualSwitchWaitInternalClose = $false
@@ -2170,6 +2290,9 @@ try {
             -StatusText "正在等待 Codex 安全退出，随后自动切换到 '$TargetProfile'……"
         Set-QiehaoSwitchUiState -State 'WaitingForCodexExit' `
             -TargetProfile $TargetProfile
+        if ([string]$script:guiQuotaAsyncReason -ceq 'SwitchBefore') {
+            Set-QiehaoSwitchQuotaStatus -Text $statusText.Text
+        }
         Stop-QiehaoProcessMonitor
 
         try { [void]$dialog.ShowDialog() }
@@ -2313,13 +2436,16 @@ try {
     function Invoke-QiehaoSwitchCore {
         param(
             [Parameter(Mandatory = $true)][string]$TargetProfile,
-            [switch]$DeferPresentation
+            [switch]$DeferPresentation,
+            [switch]$SkipQuotaBefore
         )
         try {
-            try { Invoke-QiehaoQuotaBeforeSwitch }
-            catch {
-                $refreshStatusText.Text =
-                    Get-QiehaoQuotaUiTextSafe -Key 'SwitchOldFailed'
+            if (-not $SkipQuotaBefore) {
+                try { Invoke-QiehaoQuotaBeforeSwitch }
+                catch {
+                    $refreshStatusText.Text =
+                        Get-QiehaoQuotaUiTextSafe -Key 'SwitchOldFailed'
+                }
             }
             $result = Invoke-QiehaoOperationProvider -Operation 'SWITCH' `
                 -Provider { param($Name) Switch-CodexAccountProfile -Name $Name } `
@@ -2366,11 +2492,13 @@ try {
             return
         }
         if ($liveStatus -ceq '运行中') {
+            $null = Start-QiehaoQuotaAsync -Reason SwitchBefore
             try {
                 Show-QiehaoManualSwitchWaitDialog -TargetProfile $targetProfile
             }
             catch {
                 Stop-QiehaoManualSwitchWaitTimer -Result 'Error'
+                Stop-QiehaoQuotaAsync
                 if ($null -ne $script:guiManualSwitchWaitDialog) {
                     $script:guiManualSwitchWaitInternalClose = $true
                     try { $script:guiManualSwitchWaitDialog.Close() }
@@ -2391,8 +2519,19 @@ try {
             }
             return
         }
-        Set-QiehaoWriteBusy -Value $true -StatusText '正在安全切换账号…'
-        Invoke-QiehaoSwitchCore -TargetProfile $targetProfile
+        Set-QiehaoWriteBusy -Value $true `
+            -StatusText (
+                "正在保存 '$script:guiCurrentActiveProfile' 的最新额度快照……"
+            )
+        $script:guiPendingAction = 'SwitchAfterQuota'
+        $script:guiPendingTargetProfile = $targetProfile
+        if (Start-QiehaoQuotaAsync -Reason SwitchBefore) {
+            Set-QiehaoSwitchQuotaStatus -Text (
+                "正在保存 '$script:guiCurrentActiveProfile' 的最新额度快照……"
+            )
+            return
+        }
+        Continue-QiehaoStoppedSwitchAfterQuota
     }
 
     function Invoke-QiehaoVerifySelectedProfile {
@@ -2933,6 +3072,18 @@ try {
                 Reset-QiehaoQuotaSelfTestScenario -Scenario 'Timeout' `
                     -HardCeilingMilliseconds 250
                 $timeoutStarted = Start-QiehaoQuotaAsync -Reason Open
+                $longQueryKeepsCoreGuiResponsive = (
+                    $timeoutStarted -and
+                    [bool]$script:guiQuotaCoordinator.QueryInProgress -and
+                    -not [bool]$refreshQuotaButton.IsEnabled -and
+                    $refreshStatusText.Text -ceq
+                        (Get-QiehaoQuotaUiTextSafe -Key 'Updating') -and
+                    $script:guiQuotaModulesAvailable -and
+                    -not $script:guiIsWriteOperationBusy -and
+                    [string]$script:guiCurrentActiveProfile -ceq 'Team' -and
+                    @($script:guiAllProfileRows).Count -eq 2 -and
+                    $window.Dispatcher.CheckAccess()
+                )
                 $timeoutIdle = Wait-QiehaoQuotaSelfTestUntilIdle
                 $startupTimeoutClearsBusy = (
                     $timeoutStarted -and $timeoutIdle -and
@@ -2984,6 +3135,8 @@ try {
                         $startupFailureClearsBusy
                     StartupQuotaTimeoutClearsBusy =
                         $startupTimeoutClearsBusy
+                    LongQuotaKeepsCoreGuiResponsive =
+                        $longQueryKeepsCoreGuiResponsive
                     StartupQuotaCompletionTimerStops =
                         $startupCompletionTimerStops
                     StartupQuotaCompletionHandlerRemoved =

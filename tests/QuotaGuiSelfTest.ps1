@@ -522,18 +522,25 @@ try {
     ).Value
     Assert-QuotaTest (
         $processTimerSection -notmatch 'Quota' -and
-        $waitTimerSection -notmatch 'Quota'
+        $waitTimerSection -match 'guiQuotaAsyncReason' -and
+        $waitTimerSection -match
+            'guiQuotaCoordinator\.\s*QueryInProgress' -and
+        $waitTimerSection -match
+            '(?s)QueryInProgress.*?return ''Pending''.*?return ''Succeeded''' -and
+        $waitTimerSection -notmatch
+            'Get-QiehaoCurrentQuotaSnapshot|Invoke-QiehaoQuotaBackgroundWorker|Save-QiehaoQuotaSnapshot|account/rateLimits/read'
     ) 'QUOTA_LEAKED_INTO_PROCESS_TIMERS'
     Assert-QuotaTest (
         $guiSource -notmatch 'account/rateLimits/read' -and
         $guiSource -match 'Get-QiehaoCurrentQuotaSnapshot' -and
         $guiSource -match 'Start-QiehaoQuotaAsync -Reason Open' -and
+        $guiSource -match 'Start-QiehaoQuotaAsync -Reason SwitchBefore' -and
         $guiSource -match 'Start-QiehaoQuotaAsync -Reason SwitchAfter'
     ) 'QUOTA_GUI_RPC_ENCAPSULATION_FAILED'
     $clientSource = [System.IO.File]::ReadAllText($clientPath)
     Assert-QuotaTest (
         [regex]::Matches($clientSource, 'account/rateLimits/read').Count -eq 1 -and
-        $clientSource -match '\[int\]\$TimeoutSeconds = 10' -and
+        $clientSource -match '\[int\]\$TimeoutSeconds = 30' -and
         $clientSource -match '\[int\]\$CleanupGraceMilliseconds = 4000' -and
         $clientSource -notmatch 'remainingCleanupMilliseconds' -and
         $clientSource -match '\$process\.StandardInput\.Flush\(\)' -and
@@ -544,6 +551,8 @@ try {
         $clientSource -match 'PrimaryFailureCode = \$primaryFailureCode' -and
         $clientSource -match 'CleanupSucceeded = \$cleanupSucceeded' -and
         $clientSource -match 'CleanupFailureCode = \$cleanupFailureCode' -and
+        $clientSource -match 'PrimaryElapsedMilliseconds' -and
+        $clientSource -match 'RateLimitsWaitElapsedMilliseconds' -and
         $clientSource -match '(?s)\$failureCode = if \(-not \$primarySucceeded\).*?\$primaryFailureCode.*?elseif \(-not \$cleanupSucceeded\).*?\$cleanupFailureCode' -and
         $clientSource -notmatch 'Stop-Process|taskkill|TerminateProcess|\.Kill\s*\(' -and
         $clientSource -notmatch 'supportsLunaReserve|Invoke-WebRequest|Invoke-RestMethod|HttpClient|Authorization'

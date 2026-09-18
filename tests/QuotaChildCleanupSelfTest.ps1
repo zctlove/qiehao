@@ -56,6 +56,7 @@ function Invoke-FakeCleanupTransport {
         [Parameter(Mandatory = $true)][int]$CleanupGraceMilliseconds,
         [int]$ResponseDelayMilliseconds = 0,
         [int]$ExitDelayMilliseconds = 0,
+        [int]$TestDeadlineMilliseconds = 0,
         [Parameter(Mandatory = $true)][string]$PidFile
     )
 
@@ -84,14 +85,17 @@ function Invoke-FakeCleanupTransport {
             $TimeoutSeconds,
             $CleanupGraceMilliseconds,
             $TestExecutablePath,
-            $TestProcessArguments
+            $TestProcessArguments,
+            $TestDeadlineMilliseconds
         )
         Invoke-QiehaoQuotaTransport `
             -TimeoutSeconds $TimeoutSeconds `
             -CleanupGraceMilliseconds $CleanupGraceMilliseconds `
             -TestExecutablePath $TestExecutablePath `
-            -TestProcessArguments $TestProcessArguments
-    } $TimeoutSeconds $CleanupGraceMilliseconds $hostExecutable $arguments
+            -TestProcessArguments $TestProcessArguments `
+            -TestDeadlineMilliseconds $TestDeadlineMilliseconds
+    } $TimeoutSeconds $CleanupGraceMilliseconds $hostExecutable $arguments `
+        $TestDeadlineMilliseconds
 }
 
 $tempBase = [System.IO.Path]::GetFullPath(
@@ -112,6 +116,7 @@ if (-not $testDirectory.StartsWith(
 
 $neverPidFile = Join-Path $testDirectory 'never.pid'
 $doublePidFile = Join-Path $testDirectory 'double.pid'
+$boundaryPidFiles = @()
 try {
     $normal = Invoke-FakeCleanupTransport -Scenario Normal `
         -TimeoutSeconds 3 -CleanupGraceMilliseconds 1500 `
@@ -155,6 +160,53 @@ try {
         [long]$nearDeadline.ElapsedMilliseconds -ge 3200 -and
         [long]$nearDeadline.CleanupElapsedMilliseconds -ge 1500
     ) 'RPC_AND_CLEANUP_BUDGETS_NOT_SEPARATE'
+
+    # Boundary semantics are scaled 5:1 to keep the offline matrix fast:
+    # 200 ms of fake wait represents one production second. The production
+    # public default remains 30 seconds; only the private fake transport seam
+    # receives the 6000 ms deadline used below.
+    $boundaryResults = @{}
+    foreach ($boundary in @(
+        [pscustomobject]@{ Name = 'At2'; Delay = 400 },
+        [pscustomobject]@{ Name = 'At9'; Delay = 1800 },
+        [pscustomobject]@{ Name = 'At12'; Delay = 2400 },
+        [pscustomobject]@{ Name = 'At25'; Delay = 5000 }
+    )) {
+        $pidFile = Join-Path $testDirectory (
+            'boundary-' + $boundary.Name + '.pid'
+        )
+        $boundaryPidFiles += $pidFile
+        $boundaryResults[$boundary.Name] = Invoke-FakeCleanupTransport `
+            -Scenario Normal -TimeoutSeconds 30 `
+            -CleanupGraceMilliseconds 2000 `
+            -ResponseDelayMilliseconds $boundary.Delay `
+            -TestDeadlineMilliseconds 6000 -PidFile $pidFile
+    }
+    Assert-CleanupContract (
+        [bool]$boundaryResults.At2.Succeeded -and
+        [bool]$boundaryResults.At9.Succeeded -and
+        [bool]$boundaryResults.At12.Succeeded -and
+        [bool]$boundaryResults.At25.Succeeded -and
+        [long]$boundaryResults.At12.Diagnostics.
+            RateLimitsWaitElapsedMilliseconds -ge 2100 -and
+        [long]$boundaryResults.At25.Diagnostics.
+            RateLimitsWaitElapsedMilliseconds -ge 4600
+    ) 'QUOTA_30_SECOND_BOUNDARY_PASS_CASE_FAILED'
+
+    $beyondPidFile = Join-Path $testDirectory 'boundary-beyond-30.pid'
+    $boundaryPidFiles += $beyondPidFile
+    $beyond = Invoke-FakeCleanupTransport -Scenario Normal `
+        -TimeoutSeconds 30 -CleanupGraceMilliseconds 2000 `
+        -ResponseDelayMilliseconds 6500 `
+        -TestDeadlineMilliseconds 6000 -PidFile $beyondPidFile
+    Assert-CleanupContract (
+        -not [bool]$beyond.Succeeded -and
+        -not [bool]$beyond.PrimarySucceeded -and
+        [string]$beyond.PrimaryFailureCode -ceq
+            'QUOTA_RATE_LIMITS_TIMEOUT' -and
+        [string]$beyond.FailureCode -ceq 'QUOTA_RATE_LIMITS_TIMEOUT' -and
+        [long]$beyond.Diagnostics.RateLimitsWaitElapsedMilliseconds -ge 5000
+    ) 'QUOTA_BEYOND_30_SECOND_BOUNDARY_DID_NOT_TIMEOUT'
 
     $neverStopwatch = [Diagnostics.Stopwatch]::StartNew()
     $never = Invoke-FakeCleanupTransport -Scenario NeverExit `
@@ -208,6 +260,12 @@ try {
     Write-Output 'FakeNormalChildExitedNaturally=True'
     Write-Output 'FakeSlowExitUsesSeparateCleanupBudget=True'
     Write-Output 'FakeNearDeadlineUsesSeparateCleanupBudget=True'
+    Write-Output 'ResponseAt2SecondsPasses=True'
+    Write-Output 'ResponseAt9SecondsPasses=True'
+    Write-Output 'ResponseAt12SecondsPasses=True'
+    Write-Output 'ResponseAt25SecondsPasses=True'
+    Write-Output 'ResponseBeyond30SecondsFailsWithQuotaRateLimitsTimeout=True'
+    Write-Output 'RateLimitsWaitElapsedMillisecondsPreserved=True'
     Write-Output 'FakeNeverExitCleanupBounded=True'
     Write-Output 'FakeNeverExitCleanupFailurePreserved=True'
     Write-Output 'PrimaryAndCleanupFailuresSeparated=True'
@@ -218,6 +276,9 @@ try {
 finally {
     Stop-FakeTestChild -PidFile $neverPidFile
     Stop-FakeTestChild -PidFile $doublePidFile
+    foreach ($pidFile in $boundaryPidFiles) {
+        Stop-FakeTestChild -PidFile $pidFile
+    }
     if ([System.IO.Directory]::Exists($testDirectory)) {
         [System.IO.Directory]::Delete($testDirectory, $true)
     }

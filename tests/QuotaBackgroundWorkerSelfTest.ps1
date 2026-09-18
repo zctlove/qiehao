@@ -77,6 +77,8 @@ function Invoke-FakeBackgroundWorker {
                                 AppServerStarted = $true
                                 InitializeMatched = $true
                                 RateLimitsResponseMatched = $true
+                                PrimaryElapsedMilliseconds = 12
+                                RateLimitsWaitElapsedMilliseconds = 9
                             }
                             ElapsedMilliseconds = 12
                             ChildCleanup = 'Normal'
@@ -172,7 +174,11 @@ Assert-WorkerContract (
     [bool]$successResult.Diagnostics.AccountStabilityLockAcquired -and
     [bool]$successResult.Diagnostics.AppServerStarted -and
     [bool]$successResult.Diagnostics.InitializeMatched -and
-    [bool]$successResult.Diagnostics.RateLimitsResponseMatched
+    [bool]$successResult.Diagnostics.RateLimitsResponseMatched -and
+    [long]$successResult.Diagnostics.PrimaryElapsedMilliseconds -eq 12 -and
+    [long]$successResult.Diagnostics.RateLimitsWaitElapsedMilliseconds -eq 9 -and
+    [long]$successResult.PrimaryElapsedMilliseconds -eq 12 -and
+    [long]$successResult.RateLimitsWaitElapsedMilliseconds -eq 9
 ) 'BACKGROUND_WORKER_DIAGNOSTICS_MARSHAL_INVALID'
 Assert-WorkerContract (
     $successResult.Snapshot -is [pscustomobject] -and

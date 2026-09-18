@@ -280,6 +280,8 @@ function New-QiehaoQuotaDiagnostics {
         [bool]$StdinCloseSucceeded = $false,
         [bool]$ChildExitedNaturally = $false,
         [bool]$ChildHasExited = $false,
+        [long]$PrimaryElapsedMilliseconds = 0,
+        [long]$RateLimitsWaitElapsedMilliseconds = 0,
         [long]$CleanupElapsedMilliseconds = 0,
         [bool]$PrimarySucceeded = $false,
         [AllowNull()][string]$PrimaryFailureCode,
@@ -322,6 +324,9 @@ function New-QiehaoQuotaDiagnostics {
         StdinCloseSucceeded = $StdinCloseSucceeded
         ChildExitedNaturally = $ChildExitedNaturally
         ChildHasExited = $ChildHasExited
+        PrimaryElapsedMilliseconds = $PrimaryElapsedMilliseconds
+        RateLimitsWaitElapsedMilliseconds =
+            $RateLimitsWaitElapsedMilliseconds
         CleanupElapsedMilliseconds = $CleanupElapsedMilliseconds
         PrimarySucceeded = $PrimarySucceeded
         PrimaryFailureCode = $PrimaryFailureCode
@@ -379,7 +384,10 @@ function Invoke-QiehaoQuotaTransport {
 
         [AllowNull()][string]$TestExecutablePath,
 
-        [AllowNull()][string]$TestProcessArguments
+        [AllowNull()][string]$TestProcessArguments,
+
+        [ValidateRange(0, 60000)]
+        [int]$TestDeadlineMilliseconds = 0
     )
 
     $process = $null
@@ -398,6 +406,7 @@ function Invoke-QiehaoQuotaTransport {
     $stdinCloseSucceeded = $false
     $childExitedNaturally = $false
     $childHasExited = $false
+    $rateLimitsWaitElapsedMilliseconds = 0L
     $cleanupElapsedMilliseconds = 0L
     $executable = [pscustomobject]@{
         Succeeded = $false
@@ -470,7 +479,13 @@ function Invoke-QiehaoQuotaTransport {
         if (-not $processStarted) { throw 'QUOTA_APP_SERVER_START_FAILED' }
         $appServerStarted = $true
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        $deadlineUtc = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $deadlineUtc = if ($TestDeadlineMilliseconds -gt 0 -and
+            -not [string]::IsNullOrWhiteSpace($TestExecutablePath)) {
+            [DateTime]::UtcNow.AddMilliseconds($TestDeadlineMilliseconds)
+        }
+        else {
+            [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        }
 
         $initializeId = 1
         Write-QiehaoQuotaJsonLine -Writer $process.StandardInput `
@@ -519,6 +534,7 @@ function Invoke-QiehaoQuotaTransport {
                     excludeResetCreditDetails = $true
                 }
             })
+        $rateLimitsWaitStopwatch = [Diagnostics.Stopwatch]::StartNew()
         try {
             $quotaResponse = Wait-QiehaoQuotaMatchingResponse `
                 -Reader $process.StandardOutput -RequestId $quotaRequestId `
@@ -529,6 +545,13 @@ function Invoke-QiehaoQuotaTransport {
                 throw 'QUOTA_RATE_LIMITS_TIMEOUT'
             }
             throw 'QUOTA_RESPONSE_INVALID'
+        }
+        finally {
+            if ($rateLimitsWaitStopwatch.IsRunning) {
+                $rateLimitsWaitStopwatch.Stop()
+            }
+            $rateLimitsWaitElapsedMilliseconds =
+                $rateLimitsWaitStopwatch.ElapsedMilliseconds
         }
         if ($quotaResponse.MatchingErrorReceived) {
             throw 'QUOTA_RATE_LIMITS_RPC_ERROR'
@@ -680,12 +703,18 @@ function Invoke-QiehaoQuotaTransport {
             -StdinCloseSucceeded $stdinCloseSucceeded `
             -ChildExitedNaturally $childExitedNaturally `
             -ChildHasExited $childHasExited `
+            -PrimaryElapsedMilliseconds $stopwatch.ElapsedMilliseconds `
+            -RateLimitsWaitElapsedMilliseconds `
+                $rateLimitsWaitElapsedMilliseconds `
             -CleanupElapsedMilliseconds $cleanupElapsedMilliseconds `
             -PrimarySucceeded $primarySucceeded `
             -PrimaryFailureCode $primaryFailureCode `
             -CleanupSucceeded $cleanupSucceeded `
             -CleanupFailureCode $cleanupFailureCode
         ElapsedMilliseconds = $stopwatch.ElapsedMilliseconds
+        PrimaryElapsedMilliseconds = $stopwatch.ElapsedMilliseconds
+        RateLimitsWaitElapsedMilliseconds =
+            $rateLimitsWaitElapsedMilliseconds
         CleanupElapsedMilliseconds = $cleanupElapsedMilliseconds
         ChildCleanup = $childCleanup
         AccountStabilityLockCleanup = 'Pending'
@@ -696,7 +725,7 @@ function Get-QiehaoCurrentQuotaSnapshot {
     [CmdletBinding()]
     param(
         [ValidateRange(1, 60)]
-        [int]$TimeoutSeconds = 10
+        [int]$TimeoutSeconds = 30
     )
 
     $operation = {
@@ -731,6 +760,8 @@ function Get-QiehaoCurrentQuotaSnapshot {
                 -CleanupSucceeded $true
             ElapsedMilliseconds = 0
             CleanupElapsedMilliseconds = 0
+            PrimaryElapsedMilliseconds = 0
+            RateLimitsWaitElapsedMilliseconds = 0
             ChildCleanup = 'NotStarted'
             AccountStabilityLockCleanup = 'ReleasedOrNotAcquired'
         }
@@ -856,6 +887,14 @@ function ConvertTo-QiehaoQuotaPlainDiagnostics {
         ChildHasExited = [bool](Get-QiehaoQuotaPropertyValue `
             -InputObject $Diagnostics -Name 'ChildHasExited' `
             -DefaultValue $false)
+        PrimaryElapsedMilliseconds = [long](
+            Get-QiehaoQuotaPropertyValue -InputObject $Diagnostics `
+                -Name 'PrimaryElapsedMilliseconds' -DefaultValue 0
+        )
+        RateLimitsWaitElapsedMilliseconds = [long](
+            Get-QiehaoQuotaPropertyValue -InputObject $Diagnostics `
+                -Name 'RateLimitsWaitElapsedMilliseconds' -DefaultValue 0
+        )
         CleanupElapsedMilliseconds = [long](
             Get-QiehaoQuotaPropertyValue -InputObject $Diagnostics `
                 -Name 'CleanupElapsedMilliseconds' -DefaultValue 0
@@ -876,7 +915,7 @@ function ConvertTo-QiehaoQuotaPlainDiagnostics {
 function Invoke-QiehaoQuotaBackgroundWorker {
     [CmdletBinding()]
     param(
-        [ValidateRange(1, 60)][int]$TimeoutSeconds = 10,
+        [ValidateRange(1, 60)][int]$TimeoutSeconds = 30,
         [AllowNull()][scriptblock]$QuotaProvider,
         [AllowNull()][object]$QuotaProviderArgument
     )
@@ -1004,6 +1043,18 @@ function Invoke-QiehaoQuotaBackgroundWorker {
             ElapsedMilliseconds = [long](Get-QiehaoQuotaPropertyValue `
                 -InputObject $providerResult -Name 'ElapsedMilliseconds' `
                 -DefaultValue 0)
+            PrimaryElapsedMilliseconds = [long](
+                Get-QiehaoQuotaPropertyValue -InputObject $providerResult `
+                    -Name 'PrimaryElapsedMilliseconds' `
+                    -DefaultValue ([long](Get-QiehaoQuotaPropertyValue `
+                        -InputObject $providerResult `
+                        -Name 'ElapsedMilliseconds' -DefaultValue 0))
+            )
+            RateLimitsWaitElapsedMilliseconds = [long](
+                Get-QiehaoQuotaPropertyValue -InputObject $plainDiagnostics `
+                    -Name 'RateLimitsWaitElapsedMilliseconds' `
+                    -DefaultValue 0
+            )
             CleanupElapsedMilliseconds = [long](
                 Get-QiehaoQuotaPropertyValue -InputObject $providerResult `
                     -Name 'CleanupElapsedMilliseconds' -DefaultValue 0
@@ -1039,6 +1090,8 @@ function Invoke-QiehaoQuotaBackgroundWorker {
                 -AuthReferenceValid $authReferenceValid `
                 -ProviderOutputCount $providerOutput.Count
             ElapsedMilliseconds = 0
+            PrimaryElapsedMilliseconds = 0
+            RateLimitsWaitElapsedMilliseconds = 0
             CleanupElapsedMilliseconds = 0
             ChildCleanup = 'NotStarted'
             AccountStabilityLockCleanup = 'ReleasedOrNotAcquired'
