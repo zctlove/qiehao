@@ -162,7 +162,11 @@ function Invoke-QiehaoOptionalProfileRowEnrichment {
         [object[]]$Rows,
 
         [AllowNull()]
-        [scriptblock]$Enrichment
+        [scriptblock]$Enrichment,
+
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$EnrichmentArguments = @()
     )
 
     # Profile rows are core state. Optional feature enrichment may mutate those
@@ -177,7 +181,7 @@ function Invoke-QiehaoOptionalProfileRowEnrichment {
     }
 
     try {
-        $null = & $Enrichment
+        $null = & $Enrichment @EnrichmentArguments
         return [pscustomobject]@{
             Rows = $coreRows
             EnrichmentSucceeded = $true

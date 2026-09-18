@@ -1,11 +1,13 @@
 ﻿[CmdletBinding()]
 param(
     [switch]$SelfTest,
-    [switch]$SimulateQuotaModuleUnavailable
+    [switch]$SimulateQuotaModuleUnavailable,
+    [switch]$SimulateQuotaQueryFailure
 )
 
-if ($SimulateQuotaModuleUnavailable -and -not $SelfTest) {
-    throw 'SIMULATED_QUOTA_MODULE_FAILURE_REQUIRES_SELFTEST'
+if (($SimulateQuotaModuleUnavailable -or $SimulateQuotaQueryFailure) -and
+    -not $SelfTest) {
+    throw 'SIMULATED_QUOTA_FAILURE_REQUIRES_SELFTEST'
 }
 
 Set-StrictMode -Version 2.0
@@ -15,6 +17,8 @@ $guiRoot = $PSScriptRoot
 $projectRoot = Split-Path -Parent $guiRoot
 $coreModulePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 $helperModulePath = Join-Path -Path $guiRoot -ChildPath 'GuiHelpers.psm1'
+$quotaParserModulePath = Join-Path -Path $projectRoot `
+    -ChildPath 'tools\QuotaParser.psm1'
 $quotaHelperModulePath = Join-Path -Path $guiRoot -ChildPath 'QuotaHelpers.psm1'
 $quotaClientModulePath = Join-Path -Path $projectRoot -ChildPath 'tools\QuotaClient.psm1'
 $xamlPath = Join-Path -Path $guiRoot -ChildPath 'MainWindow.xaml'
@@ -26,18 +30,91 @@ Add-Type -AssemblyName PresentationCore -ErrorAction Stop
 Add-Type -AssemblyName PresentationFramework -ErrorAction Stop
 Add-Type -AssemblyName WindowsBase -ErrorAction Stop
 
+function Test-QiehaoModuleExportContract {
+    param(
+        [AllowNull()]
+        [System.Management.Automation.PSModuleInfo]$Module,
+        [Parameter(Mandatory = $true)]
+        [string[]]$RequiredCommands
+    )
+
+    if ($null -eq $Module) { return $false }
+    foreach ($requiredCommand in $RequiredCommands) {
+        if (-not $Module.ExportedCommands.ContainsKey($requiredCommand)) {
+            return $false
+        }
+    }
+    return $true
+}
+
 Import-Module -Name $coreModulePath -Force -ErrorAction Stop
 Import-Module -Name $helperModulePath -Force -ErrorAction Stop
 $script:guiQuotaModulesAvailable = $false
-if (-not $SimulateQuotaModuleUnavailable) {
+$script:guiQuotaInitializationFailureCode = $null
+if ($SimulateQuotaModuleUnavailable) {
+    $script:guiQuotaInitializationFailureCode =
+        'QUOTA_HELPERS_IMPORT_FAILED'
+}
+else {
+    $quotaParserModule = $null
+    $quotaClientModule = $null
+    $quotaHelperModule = $null
     try {
-        Import-Module -Name $quotaHelperModulePath -Force -ErrorAction Stop
-        Import-Module -Name $quotaClientModulePath -Force -ErrorAction Stop
-        $script:guiQuotaModulesAvailable = $true
+        $quotaParserModule = @(Import-Module -Name $quotaParserModulePath `
+            -PassThru -ErrorAction Stop | Select-Object -Last 1)[0]
     }
     catch {
-        # Quota is optional. Core profile, process, identity and
-        # account-management commands must remain available.
+        $script:guiQuotaInitializationFailureCode =
+            'QUOTA_PARSER_IMPORT_FAILED'
+    }
+    if ($null -eq $script:guiQuotaInitializationFailureCode) {
+        try {
+            $quotaClientModule = @(Import-Module -Name $quotaClientModulePath `
+                -PassThru -ErrorAction Stop | Select-Object -Last 1)[0]
+        }
+        catch {
+            $script:guiQuotaInitializationFailureCode =
+                'QUOTA_CLIENT_IMPORT_FAILED'
+        }
+    }
+    if ($null -eq $script:guiQuotaInitializationFailureCode) {
+        try {
+            $quotaHelperModule = @(Import-Module -Name $quotaHelperModulePath `
+                -PassThru -ErrorAction Stop | Select-Object -Last 1)[0]
+        }
+        catch {
+            $script:guiQuotaInitializationFailureCode =
+                'QUOTA_HELPERS_IMPORT_FAILED'
+        }
+    }
+    if ($null -eq $script:guiQuotaInitializationFailureCode) {
+        $parserContract = Test-QiehaoModuleExportContract `
+            -Module $quotaParserModule `
+            -RequiredCommands @('ConvertTo-QiehaoQuotaSnapshot')
+        $clientContract = Test-QiehaoModuleExportContract `
+            -Module $quotaClientModule `
+            -RequiredCommands @('Get-QiehaoCurrentQuotaSnapshot')
+        $helperContract = Test-QiehaoModuleExportContract `
+            -Module $quotaHelperModule -RequiredCommands @(
+                'Get-QiehaoQuotaUiText',
+                'New-QiehaoEmptyQuotaCache',
+                'Read-QiehaoQuotaCache',
+                'Write-QiehaoQuotaCache',
+                'Get-QiehaoQuotaCacheSnapshot',
+                'Save-QiehaoQuotaSnapshot',
+                'Rename-QiehaoQuotaCacheProfile',
+                'Remove-QiehaoQuotaCacheProfile',
+                'New-QiehaoQuotaCoordinatorState',
+                'Invoke-QiehaoQuotaCacheRefresh',
+                'Update-QiehaoQuotaProfileRows'
+            )
+        if ($parserContract -and $clientContract -and $helperContract) {
+            $script:guiQuotaModulesAvailable = $true
+        }
+        else {
+            $script:guiQuotaInitializationFailureCode =
+                'QUOTA_REQUIRED_COMMAND_MISSING'
+        }
     }
 }
 $stateDirectory = Resolve-QiehaoProjectStateDirectory -GuiScriptRoot $guiRoot
@@ -205,6 +282,8 @@ try {
         }
         catch {
             $script:guiQuotaModulesAvailable = $false
+            $script:guiQuotaInitializationFailureCode =
+                'QUOTA_RUNTIME_INIT_FAILED'
             [pscustomobject]@{
                 Cache = $null
                 IsValid = $false
@@ -214,11 +293,20 @@ try {
         }
     }
     $script:guiQuotaCache = $script:guiQuotaCacheRead.Cache
-    $script:guiQuotaCoordinator = if ($script:guiQuotaModulesAvailable) {
-        New-QiehaoQuotaCoordinatorState
+    $script:guiQuotaCoordinator = $null
+    if ($script:guiQuotaModulesAvailable) {
+        try {
+            $script:guiQuotaCoordinator = New-QiehaoQuotaCoordinatorState
+        }
+        catch {
+            $script:guiQuotaModulesAvailable = $false
+            $script:guiQuotaInitializationFailureCode =
+                'QUOTA_RUNTIME_INIT_FAILED'
+        }
     }
-    else {
-        [pscustomobject]@{
+    if ($null -eq $script:guiQuotaCoordinator) {
+        $script:guiQuotaCache = $null
+        $script:guiQuotaCoordinator = [pscustomobject]@{
             StartupAttempted = $false
             QueryInProgress = $false
         }
@@ -248,7 +336,20 @@ try {
     }
 
     function Disable-QiehaoQuotaFeature {
+        param(
+            [ValidateSet(
+                'QUOTA_PARSER_IMPORT_FAILED',
+                'QUOTA_CLIENT_IMPORT_FAILED',
+                'QUOTA_HELPERS_IMPORT_FAILED',
+                'QUOTA_REQUIRED_COMMAND_MISSING',
+                'QUOTA_RUNTIME_INIT_FAILED'
+            )]
+            [string]$FailureCode = 'QUOTA_RUNTIME_INIT_FAILED'
+        )
         $script:guiQuotaModulesAvailable = $false
+        if ($null -eq $script:guiQuotaInitializationFailureCode) {
+            $script:guiQuotaInitializationFailureCode = $FailureCode
+        }
         $script:guiQuotaCoordinator.QueryInProgress = $false
         $refreshQuotaButton.IsEnabled = $false
     }
@@ -652,19 +753,29 @@ try {
         }
         Set-QiehaoQuotaUnavailableRows -Rows $rows
         $quotaEnrichment = $null
+        $quotaEnrichmentArguments = @()
         if ($script:guiQuotaModulesAvailable) {
             $quotaEnrichment = {
-                $decoratedRows = @(Update-QiehaoQuotaProfileRows -Rows $rows `
-                    -Cache $script:guiQuotaCache `
-                    -ActiveProfile ([string]$Snapshot.ActiveProfile) `
-                    -JustUpdatedProfile $script:guiQuotaJustUpdatedProfile)
-                if ($decoratedRows.Count -ne $rows.Count) {
+                param($Context)
+                $decoratedRows = @(Update-QiehaoQuotaProfileRows `
+                    -Rows $Context.Rows `
+                    -Cache $Context.Cache `
+                    -ActiveProfile ([string]$Context.ActiveProfile) `
+                    -JustUpdatedProfile $Context.JustUpdatedProfile)
+                if ($decoratedRows.Count -ne @($Context.Rows).Count) {
                     throw 'QUOTA_ENRICHMENT_CHANGED_PROFILE_POPULATION'
                 }
-            }.GetNewClosure()
+            }
+            $quotaEnrichmentArguments = @([pscustomobject]@{
+                Rows = $rows
+                Cache = $script:guiQuotaCache
+                ActiveProfile = [string]$Snapshot.ActiveProfile
+                JustUpdatedProfile = $script:guiQuotaJustUpdatedProfile
+            })
         }
         $quotaResult = Invoke-QiehaoOptionalProfileRowEnrichment `
-            -Rows $rows -Enrichment $quotaEnrichment
+            -Rows $rows -Enrichment $quotaEnrichment `
+            -EnrichmentArguments $quotaEnrichmentArguments
         $script:guiAllProfileRows = @($quotaResult.Rows)
         if (-not $quotaResult.EnrichmentSucceeded) {
             Set-QiehaoQuotaUnavailableRows -Rows $script:guiAllProfileRows
@@ -897,7 +1008,7 @@ try {
             $powerShell = [PowerShell]::Create()
             $queryScript = {
                 param($ClientModulePath)
-                Import-Module -Name $ClientModulePath -Force -ErrorAction Stop
+                Import-Module -Name $ClientModulePath -ErrorAction Stop
                 Get-QiehaoCurrentQuotaSnapshot -TimeoutSeconds 10
             }
             $null = $powerShell.AddScript($queryScript.ToString()).
@@ -2258,6 +2369,13 @@ try {
             -ProcessProvider { [pscustomobject]@{ ReasonCode = 'CODEX_PROCESSES_STOPPED' } } `
             -ActiveIdentityProvider { [pscustomobject]@{ Result = 'ACTIVE_IDENTITY_CONFIRMED' } }
         Set-QiehaoSnapshot -Snapshot $snapshot
+        if ($SimulateQuotaQueryFailure) {
+            $script:guiQuotaCoordinator.QueryInProgress = $true
+            $script:guiQuotaRequestedProfile =
+                [string]$script:guiCurrentActiveProfile
+            $script:guiQuotaAsyncReason = 'Manual'
+            Complete-QiehaoQuotaAsync
+        }
         if (@($profilesGrid.ItemsSource).Count -ne 2 -or
             $codexStatusText.Text -cne '已退出' -or
             $activeProfileText.Text -cne 'Plus' -or
@@ -2273,6 +2391,11 @@ try {
             ]) {
             throw 'GUI_SELFTEST_QUOTA_BINDING_FAILED'
         }
+        if ($script:guiQuotaModulesAvailable -and
+            [string]$profilesGrid.ItemsSource[0].QuotaSummary -cne
+                (Get-QiehaoQuotaUiTextSafe -Key 'NoSnapshot')) {
+            throw 'GUI_SELFTEST_NO_CACHE_PRESENTATION_FAILED'
+        }
         $profileSearchTextBox.Text = 'team'
         Update-QiehaoProfileFilter
         if (@($profilesGrid.ItemsSource).Count -ne 1 -or
@@ -2282,6 +2405,18 @@ try {
         $alternateImageResult = Set-QiehaoTheme `
             -Theme (Get-QiehaoBackgroundTheme -Id '03-ice-glass')
         if (-not $alternateImageResult.Loaded) { throw 'GUI_SELFTEST_THEME_SWITCH_FAILED' }
+        Write-Output ('QUOTA_RUNTIME_AVAILABLE=' +
+            [string]$script:guiQuotaModulesAvailable)
+        Write-Output ('QUOTA_INITIALIZATION_FAILURE_CODE=' + $(
+            if ($null -eq $script:guiQuotaInitializationFailureCode) {
+                'NONE'
+            }
+            else { [string]$script:guiQuotaInitializationFailureCode }
+        ))
+        Write-Output ('QUOTA_REFRESH_BUTTON_ENABLED=' +
+            [string]$refreshQuotaButton.IsEnabled)
+        Write-Output ('QUOTA_CACHE_EXISTS=' +
+            [string](-not [bool]$script:guiQuotaCacheRead.UsedEmpty))
         Write-Output 'GUI_SELFTEST_READY'
         return
     }

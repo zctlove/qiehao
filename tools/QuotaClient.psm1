@@ -6,9 +6,21 @@ $script:QuotaParserPath = Join-Path -Path $PSScriptRoot -ChildPath 'QuotaParser.
 $script:QuotaAuthModulePath = Join-Path -Path $script:QuotaProjectRoot `
     -ChildPath 'lib\CodexAuth.psm1'
 
-Import-Module -Name $script:QuotaParserPath -Force -ErrorAction Stop
+$script:QuotaParserModule = Import-Module -Name $script:QuotaParserPath `
+    -PassThru -ErrorAction Stop
 $script:QuotaAuthModule = Import-Module -Name $script:QuotaAuthModulePath `
     -PassThru -ErrorAction Stop
+if ($null -eq $script:QuotaParserModule -or
+    -not $script:QuotaParserModule.ExportedCommands.ContainsKey(
+        'ConvertTo-QiehaoQuotaSnapshot'
+    )) {
+    throw 'QUOTA_PARSER_EXPORT_CONTRACT_INVALID'
+}
+if ($null -eq $script:QuotaAuthModule -or
+    $script:QuotaAuthModule -isnot
+        [System.Management.Automation.PSModuleInfo]) {
+    throw 'QUOTA_AUTH_MODULE_REFERENCE_INVALID'
+}
 
 function Write-QiehaoQuotaJsonLine {
     param(

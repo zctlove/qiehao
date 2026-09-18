@@ -14,6 +14,8 @@ $guiScriptPath = Join-Path -Path $guiRoot -ChildPath 'QiehaoGui.ps1'
 $helperModulePath = Join-Path -Path $guiRoot -ChildPath 'GuiHelpers.psm1'
 $quotaGuiSelfTestPath = Join-Path -Path $PSScriptRoot `
     -ChildPath 'QuotaGuiSelfTest.ps1'
+$quotaImportContractPath = Join-Path -Path $PSScriptRoot `
+    -ChildPath 'QuotaImportContractSelfTest.ps1'
 $coreModulePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 
 function Assert-GuiTest {
@@ -387,7 +389,9 @@ function Invoke-PowerShellFileTest {
         [Parameter(Mandatory = $true)]
         [string]$ScriptPath,
 
-        [string[]]$AdditionalArguments = @()
+        [string[]]$AdditionalArguments = @(),
+
+        [string]$WorkingDirectory = ''
     )
 
     $arguments = @(
@@ -399,8 +403,17 @@ function Invoke-PowerShellFileTest {
         '-File',
         $ScriptPath
     ) + @($AdditionalArguments)
-    $output = @(& $HostPath @arguments 2>&1)
-    $exitCode = $LASTEXITCODE
+    $previousLocation = Get-Location
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+            Set-Location -LiteralPath $WorkingDirectory
+        }
+        $output = @(& $HostPath @arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        Set-Location -LiteralPath $previousLocation.Path
+    }
     return [pscustomobject]@{
         ExitCode = $exitCode
         Output = @($output | ForEach-Object { [string]$_ })
@@ -409,6 +422,48 @@ function Invoke-PowerShellFileTest {
 
 $ps51Command = Get-Command -Name 'powershell.exe' -ErrorAction Stop
 $ps7Command = Get-Command -Name 'pwsh.exe' -ErrorAction Stop
+
+$productionImport51 = Invoke-PowerShellFileTest `
+    -HostPath $ps51Command.Source -ScriptPath $quotaImportContractPath
+Assert-GuiTest -Condition (
+    $productionImport51.ExitCode -eq 0 -and
+    $productionImport51.Output -ccontains 'CORE_COMMANDS_PRESENT=True' -and
+    $productionImport51.Output -ccontains
+        'CORE_COMMANDS_SURVIVE_ALL_QUOTA_IMPORTS=True' -and
+    $productionImport51.Output -ccontains
+        'QUOTA_PARSER_COMMANDS_PRESENT=True' -and
+    $productionImport51.Output -ccontains
+        'QUOTA_CLIENT_COMMANDS_PRESENT=True' -and
+    $productionImport51.Output -ccontains
+        'QUOTA_HELPER_COMMANDS_PRESENT=True' -and
+    $productionImport51.Output -ccontains
+        'QUOTA_AUTH_MODULE_REFERENCE_VALID=True' -and
+    $productionImport51.Output -ccontains
+        'QUOTA_MUTEX_HELPER_PRESENT=True' -and
+    $productionImport51.Output -ccontains 'QUOTA_RUNTIME_AVAILABLE=True' -and
+    $productionImport51.Output -ccontains 'PRODUCTION_IMPORT_ORDER_PASS'
+) -Code 'GUI_PRODUCTION_IMPORT_ORDER_PS51_FAILED'
+
+$productionImport7 = Invoke-PowerShellFileTest `
+    -HostPath $ps7Command.Source -ScriptPath $quotaImportContractPath
+Assert-GuiTest -Condition (
+    $productionImport7.ExitCode -eq 0 -and
+    $productionImport7.Output -ccontains 'CORE_COMMANDS_PRESENT=True' -and
+    $productionImport7.Output -ccontains
+        'CORE_COMMANDS_SURVIVE_ALL_QUOTA_IMPORTS=True' -and
+    $productionImport7.Output -ccontains
+        'QUOTA_PARSER_COMMANDS_PRESENT=True' -and
+    $productionImport7.Output -ccontains
+        'QUOTA_CLIENT_COMMANDS_PRESENT=True' -and
+    $productionImport7.Output -ccontains
+        'QUOTA_HELPER_COMMANDS_PRESENT=True' -and
+    $productionImport7.Output -ccontains
+        'QUOTA_AUTH_MODULE_REFERENCE_VALID=True' -and
+    $productionImport7.Output -ccontains
+        'QUOTA_MUTEX_HELPER_PRESENT=True' -and
+    $productionImport7.Output -ccontains 'QUOTA_RUNTIME_AVAILABLE=True' -and
+    $productionImport7.Output -ccontains 'PRODUCTION_IMPORT_ORDER_PASS'
+) -Code 'GUI_PRODUCTION_IMPORT_ORDER_PS7_FAILED'
 
 $ps51Xaml = Invoke-PowerShellFileTest -HostPath $ps51Command.Source `
     -ScriptPath $PSCommandPath -AdditionalArguments @('-XamlOnly')
@@ -444,12 +499,24 @@ $guiStartup51 = Invoke-PowerShellFileTest -HostPath $ps51Command.Source `
     -ScriptPath $guiScriptPath -AdditionalArguments @('-SelfTest')
 Assert-GuiTest -Condition (
     $guiStartup51.ExitCode -eq 0 -and
+    $guiStartup51.Output -ccontains 'QUOTA_RUNTIME_AVAILABLE=True' -and
+    $guiStartup51.Output -ccontains
+        'QUOTA_INITIALIZATION_FAILURE_CODE=NONE' -and
+    $guiStartup51.Output -ccontains
+        'QUOTA_REFRESH_BUTTON_ENABLED=True' -and
+    $guiStartup51.Output -ccontains 'QUOTA_CACHE_EXISTS=False' -and
     $guiStartup51.Output -ccontains 'GUI_SELFTEST_READY'
 ) -Code 'GUI_STARTUP_SELFTEST_PS51_FAILED'
 $guiStartup7 = Invoke-PowerShellFileTest -HostPath $ps7Command.Source `
     -ScriptPath $guiScriptPath -AdditionalArguments @('-SelfTest')
 Assert-GuiTest -Condition (
     $guiStartup7.ExitCode -eq 0 -and
+    $guiStartup7.Output -ccontains 'QUOTA_RUNTIME_AVAILABLE=True' -and
+    $guiStartup7.Output -ccontains
+        'QUOTA_INITIALIZATION_FAILURE_CODE=NONE' -and
+    $guiStartup7.Output -ccontains
+        'QUOTA_REFRESH_BUTTON_ENABLED=True' -and
+    $guiStartup7.Output -ccontains 'QUOTA_CACHE_EXISTS=False' -and
     $guiStartup7.Output -ccontains 'GUI_SELFTEST_READY'
 ) -Code 'GUI_STARTUP_SELFTEST_PS7_FAILED'
 
@@ -458,6 +525,12 @@ $guiQuotaUnavailable51 = Invoke-PowerShellFileTest `
     -AdditionalArguments @('-SelfTest', '-SimulateQuotaModuleUnavailable')
 Assert-GuiTest -Condition (
     $guiQuotaUnavailable51.ExitCode -eq 0 -and
+    $guiQuotaUnavailable51.Output -ccontains
+        'QUOTA_RUNTIME_AVAILABLE=False' -and
+    $guiQuotaUnavailable51.Output -ccontains
+        'QUOTA_INITIALIZATION_FAILURE_CODE=QUOTA_HELPERS_IMPORT_FAILED' -and
+    $guiQuotaUnavailable51.Output -ccontains
+        'QUOTA_REFRESH_BUTTON_ENABLED=False' -and
     $guiQuotaUnavailable51.Output -ccontains 'GUI_SELFTEST_READY'
 ) -Code 'GUI_QUOTA_MODULE_UNAVAILABLE_PS51_BLOCKED_CORE_STARTUP'
 
@@ -466,8 +539,86 @@ $guiQuotaUnavailable7 = Invoke-PowerShellFileTest `
     -AdditionalArguments @('-SelfTest', '-SimulateQuotaModuleUnavailable')
 Assert-GuiTest -Condition (
     $guiQuotaUnavailable7.ExitCode -eq 0 -and
+    $guiQuotaUnavailable7.Output -ccontains
+        'QUOTA_RUNTIME_AVAILABLE=False' -and
+    $guiQuotaUnavailable7.Output -ccontains
+        'QUOTA_INITIALIZATION_FAILURE_CODE=QUOTA_HELPERS_IMPORT_FAILED' -and
+    $guiQuotaUnavailable7.Output -ccontains
+        'QUOTA_REFRESH_BUTTON_ENABLED=False' -and
     $guiQuotaUnavailable7.Output -ccontains 'GUI_SELFTEST_READY'
 ) -Code 'GUI_QUOTA_MODULE_UNAVAILABLE_PS7_BLOCKED_CORE_STARTUP'
+
+$guiQueryFailure51 = Invoke-PowerShellFileTest `
+    -HostPath $ps51Command.Source -ScriptPath $guiScriptPath `
+    -AdditionalArguments @('-SelfTest', '-SimulateQuotaQueryFailure')
+Assert-GuiTest -Condition (
+    $guiQueryFailure51.ExitCode -eq 0 -and
+    $guiQueryFailure51.Output -ccontains 'QUOTA_RUNTIME_AVAILABLE=True' -and
+    $guiQueryFailure51.Output -ccontains
+        'QUOTA_INITIALIZATION_FAILURE_CODE=NONE' -and
+    $guiQueryFailure51.Output -ccontains
+        'QUOTA_REFRESH_BUTTON_ENABLED=True' -and
+    $guiQueryFailure51.Output -ccontains 'GUI_SELFTEST_READY'
+) -Code 'GUI_QUERY_FAILURE_DISABLED_QUOTA_PS51'
+
+$guiQueryFailure7 = Invoke-PowerShellFileTest `
+    -HostPath $ps7Command.Source -ScriptPath $guiScriptPath `
+    -AdditionalArguments @('-SelfTest', '-SimulateQuotaQueryFailure')
+Assert-GuiTest -Condition (
+    $guiQueryFailure7.ExitCode -eq 0 -and
+    $guiQueryFailure7.Output -ccontains 'QUOTA_RUNTIME_AVAILABLE=True' -and
+    $guiQueryFailure7.Output -ccontains
+        'QUOTA_INITIALIZATION_FAILURE_CODE=NONE' -and
+    $guiQueryFailure7.Output -ccontains
+        'QUOTA_REFRESH_BUTTON_ENABLED=True' -and
+    $guiQueryFailure7.Output -ccontains 'GUI_SELFTEST_READY'
+) -Code 'GUI_QUERY_FAILURE_DISABLED_QUOTA_PS7'
+
+$tempBase = [System.IO.Path]::GetFullPath(
+    [System.IO.Path]::GetTempPath()
+).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+$foreignWorkingDirectory = [System.IO.Path]::GetFullPath(
+    (Join-Path $tempBase (
+        'qiehao-quota-foreign-cwd-' + [Guid]::NewGuid().ToString('N')
+    ))
+)
+if (-not $foreignWorkingDirectory.StartsWith(
+    $tempBase + [System.IO.Path]::DirectorySeparatorChar,
+    [StringComparison]::OrdinalIgnoreCase
+)) {
+    throw 'GUI_FOREIGN_CWD_OUTSIDE_TEMP'
+}
+[System.IO.Directory]::CreateDirectory($foreignWorkingDirectory) | Out-Null
+try {
+    $foreignCwd51 = Invoke-PowerShellFileTest `
+        -HostPath $ps51Command.Source -ScriptPath $guiScriptPath `
+        -AdditionalArguments @('-SelfTest') `
+        -WorkingDirectory $foreignWorkingDirectory
+    Assert-GuiTest -Condition (
+        $foreignCwd51.ExitCode -eq 0 -and
+        $foreignCwd51.Output -ccontains 'QUOTA_RUNTIME_AVAILABLE=True' -and
+        $foreignCwd51.Output -ccontains
+            'QUOTA_REFRESH_BUTTON_ENABLED=True' -and
+        $foreignCwd51.Output -ccontains 'GUI_SELFTEST_READY'
+    ) -Code 'GUI_FOREIGN_CWD_PS51_FAILED'
+
+    $foreignCwd7 = Invoke-PowerShellFileTest `
+        -HostPath $ps7Command.Source -ScriptPath $guiScriptPath `
+        -AdditionalArguments @('-SelfTest') `
+        -WorkingDirectory $foreignWorkingDirectory
+    Assert-GuiTest -Condition (
+        $foreignCwd7.ExitCode -eq 0 -and
+        $foreignCwd7.Output -ccontains 'QUOTA_RUNTIME_AVAILABLE=True' -and
+        $foreignCwd7.Output -ccontains
+            'QUOTA_REFRESH_BUTTON_ENABLED=True' -and
+        $foreignCwd7.Output -ccontains 'GUI_SELFTEST_READY'
+    ) -Code 'GUI_FOREIGN_CWD_PS7_FAILED'
+}
+finally {
+    if ([System.IO.Directory]::Exists($foreignWorkingDirectory)) {
+        [System.IO.Directory]::Delete($foreignWorkingDirectory, $true)
+    }
+}
 
 $themes = @(Get-QiehaoBackgroundThemes)
 Assert-GuiTest -Condition (
@@ -2371,8 +2522,17 @@ finally {
 
 [pscustomobject]@{
     Result = 'PASS'
+    ProductionImportOrderPowerShell51 = 'PASS'
+    ProductionImportOrderPowerShell7 = 'PASS'
+    QuotaCommandsExportedPowerShell51 = 'PASS'
+    QuotaCommandsExportedPowerShell7 = 'PASS'
+    CoreCommandsSurviveAllQuotaImports = 'PASS'
     GuiStartupPowerShell51 = 'PASS'
     GuiStartupPowerShell7 = 'PASS'
+    QuotaAvailableWithNoCache = 'PASS'
+    NoCacheDoesNotDisableRefreshButton = 'PASS'
+    QueryFailureDoesNotDisableQuotaFeature = 'PASS'
+    QuotaAvailableFromForeignWorkingDirectory = 'PASS'
     QuotaModuleUnavailablePowerShell51 = 'PASS'
     QuotaModuleUnavailablePowerShell7 = 'PASS'
     QuotaSnapshotGuiCache = 'PASS'
