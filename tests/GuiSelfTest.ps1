@@ -18,6 +18,8 @@ $quotaImportContractPath = Join-Path -Path $PSScriptRoot `
     -ChildPath 'QuotaImportContractSelfTest.ps1'
 $quotaBackgroundWorkerTestPath = Join-Path -Path $PSScriptRoot `
     -ChildPath 'QuotaBackgroundWorkerSelfTest.ps1'
+$quotaChildCleanupTestPath = Join-Path -Path $PSScriptRoot `
+    -ChildPath 'QuotaChildCleanupSelfTest.ps1'
 $coreModulePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 
 function Assert-GuiTest {
@@ -514,6 +516,38 @@ Assert-GuiTest -Condition (
     }).Count -eq 0
 ) -Code 'GUI_BACKGROUND_WORKER_CONTRACT_PS7_FAILED'
 
+$requiredChildCleanupOutput = @(
+    'FakeNormalMatchingResponse=True',
+    'FakeNormalSnapshotParsed=True',
+    'FakeNormalStdinCloseSucceeded=True',
+    'FakeNormalChildExitedNaturally=True',
+    'FakeSlowExitUsesSeparateCleanupBudget=True',
+    'FakeNearDeadlineUsesSeparateCleanupBudget=True',
+    'FakeNeverExitCleanupBounded=True',
+    'FakeNeverExitCleanupFailurePreserved=True',
+    'PrimaryAndCleanupFailuresSeparated=True',
+    'PrimaryFailureNotOverwritten=True',
+    'ProductionChildForceTerminationPresent=False',
+    'QUOTA_CHILD_CLEANUP_SELFTEST_PASS'
+)
+$childCleanup51 = Invoke-PowerShellFileTest `
+    -HostPath $ps51Command.Source -ScriptPath $quotaChildCleanupTestPath
+Assert-GuiTest -Condition (
+    $childCleanup51.ExitCode -eq 0 -and
+    @($requiredChildCleanupOutput | Where-Object {
+        $childCleanup51.Output -cnotcontains $_
+    }).Count -eq 0
+) -Code 'GUI_CHILD_CLEANUP_CONTRACT_PS51_FAILED'
+
+$childCleanup7 = Invoke-PowerShellFileTest `
+    -HostPath $ps7Command.Source -ScriptPath $quotaChildCleanupTestPath
+Assert-GuiTest -Condition (
+    $childCleanup7.ExitCode -eq 0 -and
+    @($requiredChildCleanupOutput | Where-Object {
+        $childCleanup7.Output -cnotcontains $_
+    }).Count -eq 0
+) -Code 'GUI_CHILD_CLEANUP_CONTRACT_PS7_FAILED'
+
 $ps51Xaml = Invoke-PowerShellFileTest -HostPath $ps51Command.Source `
     -ScriptPath $PSCommandPath -AdditionalArguments @('-XamlOnly')
 Assert-GuiTest -Condition (
@@ -699,6 +733,9 @@ $requiredQuotaAsyncOutputs = @(
     'StartupQuotaSuccessReEnablesRefresh=True',
     'StartupQuotaFailureReEnablesRefresh=True',
     'QueryFailureDoesNotDisableQuotaRuntime=True',
+    'CleanupFailureClearsBusy=True',
+    'CleanupFailureReEnablesRefresh=True',
+    'CleanupFailureDiagnosticsPreserved=True',
     'AsyncCompletionExceptionStillCleansUp=True',
     'GuiClosingDuringQuotaQueryCleansUp=True',
     'StartupSendsAtMostOneQuery=True',
@@ -2525,7 +2562,7 @@ Assert-GuiTest -Condition (
     $quotaAsyncSourceSection -match
         'guiQuotaCoordinator\.QueryInProgress = \$false' -and
     $quotaAsyncSourceSection -match 'AddMilliseconds\(' -and
-    $quotaAsyncSourceSection -match 'else \{ 15000 \}' -and
+    $quotaAsyncSourceSection -match 'else \{ 18000 \}' -and
     $quotaAsyncSourceSection -match
         'Invoke-QiehaoQuotaBackgroundWorker -TimeoutSeconds 10' -and
     $quotaAsyncSourceSection -match
@@ -2714,6 +2751,8 @@ finally {
     ProductionImportOrderPowerShell7 = 'PASS'
     BackgroundWorkerContractPowerShell51 = 'PASS'
     BackgroundWorkerContractPowerShell7 = 'PASS'
+    ChildCleanupContractPowerShell51 = 'PASS'
+    ChildCleanupContractPowerShell7 = 'PASS'
     QuotaCommandsExportedPowerShell51 = 'PASS'
     QuotaCommandsExportedPowerShell7 = 'PASS'
     CoreCommandsSurviveAllQuotaImports = 'PASS'
@@ -2722,6 +2761,9 @@ finally {
     QuotaAvailableWithNoCache = 'PASS'
     NoCacheDoesNotDisableRefreshButton = 'PASS'
     QueryFailureDoesNotDisableQuotaFeature = 'PASS'
+    CleanupFailureClearsBusy = 'PASS'
+    CleanupFailureReEnablesRefresh = 'PASS'
+    CleanupFailureDiagnosticsPreserved = 'PASS'
     StartupQuotaSuccessClearsBusy = 'PASS'
     StartupQuotaFailureClearsBusy = 'PASS'
     StartupQuotaTimeoutClearsBusy = 'PASS'
@@ -2743,7 +2785,7 @@ finally {
     WorkerExecutableDiscoverySucceeded = 'PASS'
     WorkerLockDiagnosticSurvives = 'PASS'
     QuotaTimerNoDynamicClosure = 'PASS'
-    QuotaGuiHardFailSafe15Seconds = 'PASS'
+    QuotaGuiHardFailSafe18Seconds = 'PASS'
     QuotaAvailableFromForeignWorkingDirectory = 'PASS'
     QuotaModuleUnavailablePowerShell51 = 'PASS'
     QuotaModuleUnavailablePowerShell7 = 'PASS'

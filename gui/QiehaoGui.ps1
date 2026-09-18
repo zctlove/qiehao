@@ -1129,7 +1129,7 @@ try {
         ) {
             $script:guiQuotaSelfTestHardCeilingMilliseconds
         }
-        else { 15000 }
+        else { 18000 }
         $script:guiQuotaDeadlineUtc = [DateTime]::UtcNow.AddMilliseconds(
             $hardCeilingMilliseconds
         )
@@ -1205,6 +1205,41 @@ try {
                                 }
                                 ElapsedMilliseconds = 2
                                 ChildCleanup = 'Normal'
+                                AccountStabilityLockCleanup = 'Released'
+                            }
+                        }
+                        'CleanupFailure' {
+                            return [pscustomobject]@{
+                                Succeeded = $false
+                                FailureCode =
+                                    'QUOTA_CHILD_CLEANUP_FAILED'
+                                Snapshot = $null
+                                PrimarySucceeded = $true
+                                PrimaryFailureCode = $null
+                                CleanupSucceeded = $false
+                                CleanupFailureCode =
+                                    'QUOTA_CHILD_CLEANUP_FAILED'
+                                Diagnostics = [pscustomobject]@{
+                                    AccountStabilityLockAcquired = $true
+                                    AppServerStarted = $true
+                                    ProcessStarted = $true
+                                    InitializeMatched = $true
+                                    RateLimitsResponseMatched = $true
+                                    SnapshotParsed = $true
+                                    StdinCloseAttempted = $true
+                                    StdinCloseSucceeded = $true
+                                    ChildExitedNaturally = $false
+                                    ChildHasExited = $false
+                                    CleanupElapsedMilliseconds = 4000
+                                    PrimarySucceeded = $true
+                                    PrimaryFailureCode = $null
+                                    CleanupSucceeded = $false
+                                    CleanupFailureCode =
+                                        'QUOTA_CHILD_CLEANUP_FAILED'
+                                }
+                                ElapsedMilliseconds = 2200
+                                CleanupElapsedMilliseconds = 4000
+                                ChildCleanup = 'GraceExpired'
                                 AccountStabilityLockCleanup = 'Released'
                             }
                         }
@@ -2858,6 +2893,43 @@ try {
                     $null -eq $script:guiQuotaInitializationFailureCode
                 )
 
+                Reset-QiehaoQuotaSelfTestScenario `
+                    -Scenario 'CleanupFailure'
+                $cleanupFailureStarted =
+                    Start-QiehaoQuotaAsync -Reason Open
+                $cleanupFailureIdle =
+                    Wait-QiehaoQuotaSelfTestUntilIdle
+                $cleanupFailureBaseText =
+                    Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry'
+                $cleanupFailureClearsBusy = (
+                    $cleanupFailureStarted -and
+                    $cleanupFailureIdle -and
+                    -not [bool]$script:guiQuotaCoordinator.QueryInProgress -and
+                    $script:guiQuotaLastQueryFailed
+                )
+                $cleanupFailureReEnablesRefresh = (
+                    [bool]$refreshQuotaButton.IsEnabled -and
+                    $refreshStatusText.Text.StartsWith(
+                        $cleanupFailureBaseText,
+                        [StringComparison]::Ordinal
+                    ) -and
+                    $script:guiQuotaLastFailureCode -ceq
+                        'QUOTA_CHILD_CLEANUP_FAILED'
+                )
+                $cleanupFailureDiagnosticsPreserved = (
+                    $null -ne $script:guiQuotaLastDiagnostics -and
+                    [bool]$script:guiQuotaLastDiagnostics.PrimarySucceeded -and
+                    $null -eq
+                        $script:guiQuotaLastDiagnostics.PrimaryFailureCode -and
+                    -not [bool](
+                        $script:guiQuotaLastDiagnostics.CleanupSucceeded
+                    ) -and
+                    [string](
+                        $script:guiQuotaLastDiagnostics.CleanupFailureCode
+                    ) -ceq 'QUOTA_CHILD_CLEANUP_FAILED' -and
+                    [bool]$script:guiQuotaLastDiagnostics.SnapshotParsed
+                )
+
                 Reset-QiehaoQuotaSelfTestScenario -Scenario 'Timeout' `
                     -HardCeilingMilliseconds 250
                 $timeoutStarted = Start-QiehaoQuotaAsync -Reason Open
@@ -2922,6 +2994,12 @@ try {
                         $startupFailureReEnablesRefresh
                     QueryFailureDoesNotDisableQuotaRuntime =
                         $queryFailureDoesNotDisableRuntime
+                    CleanupFailureClearsBusy =
+                        $cleanupFailureClearsBusy
+                    CleanupFailureReEnablesRefresh =
+                        $cleanupFailureReEnablesRefresh
+                    CleanupFailureDiagnosticsPreserved =
+                        $cleanupFailureDiagnosticsPreserved
                     AsyncCompletionExceptionStillCleansUp =
                         $asyncCompletionExceptionCleansUp
                     GuiClosingDuringQuotaQueryCleansUp =

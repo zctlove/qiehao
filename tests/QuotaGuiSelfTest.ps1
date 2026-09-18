@@ -534,8 +534,18 @@ try {
     Assert-QuotaTest (
         [regex]::Matches($clientSource, 'account/rateLimits/read').Count -eq 1 -and
         $clientSource -match '\[int\]\$TimeoutSeconds = 10' -and
-        $clientSource -notmatch 'WaitForExit\(10000\)|WaitForExit\(5000\)' -and
-        $clientSource -match 'remainingCleanupMilliseconds' -and
+        $clientSource -match '\[int\]\$CleanupGraceMilliseconds = 4000' -and
+        $clientSource -notmatch 'remainingCleanupMilliseconds' -and
+        $clientSource -match '\$process\.StandardInput\.Flush\(\)' -and
+        $clientSource -match '\$process\.StandardInput\.Close\(\)' -and
+        $clientSource -match '\$process\.StandardInput\.Dispose\(\)' -and
+        $clientSource -match '(?s)WaitForExit\(\s*\$CleanupGraceMilliseconds\s*\)' -and
+        $clientSource -match 'PrimarySucceeded = \$primarySucceeded' -and
+        $clientSource -match 'PrimaryFailureCode = \$primaryFailureCode' -and
+        $clientSource -match 'CleanupSucceeded = \$cleanupSucceeded' -and
+        $clientSource -match 'CleanupFailureCode = \$cleanupFailureCode' -and
+        $clientSource -match '(?s)\$failureCode = if \(-not \$primarySucceeded\).*?\$primaryFailureCode.*?elseif \(-not \$cleanupSucceeded\).*?\$cleanupFailureCode' -and
+        $clientSource -notmatch 'Stop-Process|taskkill|TerminateProcess|\.Kill\s*\(' -and
         $clientSource -notmatch 'supportsLunaReserve|Invoke-WebRequest|Invoke-RestMethod|HttpClient|Authorization'
     ) 'QUOTA_CLIENT_SAFETY_CONTRACT_FAILED'
 

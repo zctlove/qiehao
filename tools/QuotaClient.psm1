@@ -274,7 +274,17 @@ function New-QiehaoQuotaDiagnostics {
         [bool]$AccountStabilityLockAcquired = $false,
         [bool]$AppServerStarted = $false,
         [bool]$InitializeMatched = $false,
-        [bool]$RateLimitsResponseMatched = $false
+        [bool]$RateLimitsResponseMatched = $false,
+        [bool]$SnapshotParsed = $false,
+        [bool]$StdinCloseAttempted = $false,
+        [bool]$StdinCloseSucceeded = $false,
+        [bool]$ChildExitedNaturally = $false,
+        [bool]$ChildHasExited = $false,
+        [long]$CleanupElapsedMilliseconds = 0,
+        [bool]$PrimarySucceeded = $false,
+        [AllowNull()][string]$PrimaryFailureCode,
+        [bool]$CleanupSucceeded = $true,
+        [AllowNull()][string]$CleanupFailureCode
     )
 
     $linesReceived = 0
@@ -304,8 +314,19 @@ function New-QiehaoQuotaDiagnostics {
         ExecutableVersion = $ExecutableVersion
         AccountStabilityLockAcquired = $AccountStabilityLockAcquired
         AppServerStarted = $AppServerStarted
+        ProcessStarted = $AppServerStarted
         InitializeMatched = $InitializeMatched
         RateLimitsResponseMatched = $RateLimitsResponseMatched
+        SnapshotParsed = $SnapshotParsed
+        StdinCloseAttempted = $StdinCloseAttempted
+        StdinCloseSucceeded = $StdinCloseSucceeded
+        ChildExitedNaturally = $ChildExitedNaturally
+        ChildHasExited = $ChildHasExited
+        CleanupElapsedMilliseconds = $CleanupElapsedMilliseconds
+        PrimarySucceeded = $PrimarySucceeded
+        PrimaryFailureCode = $PrimaryFailureCode
+        CleanupSucceeded = $CleanupSucceeded
+        CleanupFailureCode = $CleanupFailureCode
     }
 }
 
@@ -351,7 +372,14 @@ function Invoke-QiehaoQuotaTransport {
     param(
         [Parameter(Mandatory = $true)]
         [ValidateRange(1, 60)]
-        [int]$TimeoutSeconds
+        [int]$TimeoutSeconds,
+
+        [ValidateRange(100, 10000)]
+        [int]$CleanupGraceMilliseconds = 4000,
+
+        [AllowNull()][string]$TestExecutablePath,
+
+        [AllowNull()][string]$TestProcessArguments
     )
 
     $process = $null
@@ -360,21 +388,58 @@ function Invoke-QiehaoQuotaTransport {
     $initializeResponse = $null
     $quotaResponse = $null
     $snapshot = $null
-    $failureCode = $null
+    $primarySucceeded = $false
+    $primaryFailureCode = $null
+    $cleanupSucceeded = $true
+    $cleanupFailureCode = $null
     $childCleanup = 'NotStarted'
-    $executable = Resolve-QiehaoCodexExecutable
+    $snapshotParsed = $false
+    $stdinCloseAttempted = $false
+    $stdinCloseSucceeded = $false
+    $childExitedNaturally = $false
+    $childHasExited = $false
+    $cleanupElapsedMilliseconds = 0L
+    $executable = [pscustomobject]@{
+        Succeeded = $false
+        Source = 'NotFound'
+        Path = $null
+        FileName = ''
+        Version = ''
+    }
+    $processArguments = 'app-server --stdio'
     $appServerStarted = $false
     $initializeMatched = $false
     $rateLimitsResponseMatched = $false
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
     try {
+        if (-not [string]::IsNullOrWhiteSpace($TestExecutablePath)) {
+            $testFullPath = [System.IO.Path]::GetFullPath(
+                $TestExecutablePath
+            )
+            if (-not [System.IO.Path]::IsPathRooted($testFullPath) -or
+                -not [System.IO.File]::Exists($testFullPath)) {
+                throw 'QUOTA_APP_SERVER_START_FAILED'
+            }
+            $testItem = Get-Item -LiteralPath $testFullPath -ErrorAction Stop
+            $executable = [pscustomobject]@{
+                Succeeded = $true
+                Source = 'ExplicitKnownPath'
+                Path = $testFullPath
+                FileName = [string]$testItem.Name
+                Version = [string]$testItem.VersionInfo.FileVersion
+            }
+            $processArguments = [string]$TestProcessArguments
+        }
+        else {
+            $executable = Resolve-QiehaoCodexExecutable
+        }
         if (-not [bool]$executable.Succeeded) {
             throw 'QUOTA_CODEX_NOT_FOUND'
         }
 
         $startInfo = New-Object Diagnostics.ProcessStartInfo
         $startInfo.FileName = [string]$executable.Path
-        $startInfo.Arguments = 'app-server --stdio'
+        $startInfo.Arguments = $processArguments
         $startInfo.WorkingDirectory = Split-Path -Parent (
             [string]$executable.Path
         )
@@ -485,45 +550,96 @@ function Invoke-QiehaoQuotaTransport {
             -not ($snapshot.Windows -is [object[]])) {
             throw 'QUOTA_PARSE_FAILED'
         }
+        $snapshotParsed = $true
+        $primarySucceeded = $true
     }
     catch {
-        $failureCode = ConvertTo-QiehaoQuotaFailureCode -ErrorRecord $_
+        $primaryFailureCode =
+            ConvertTo-QiehaoQuotaFailureCode -ErrorRecord $_
     }
     finally {
         if ($stopwatch.IsRunning) {
             $stopwatch.Stop()
         }
         if ($null -ne $process -and $processStarted) {
+            $cleanupSucceeded = $false
+            $cleanupStopwatch = [Diagnostics.Stopwatch]::StartNew()
+            $stdinCloseAttempted = $true
+            $stdinOperationSucceeded = $true
+            try {
+                $process.StandardInput.Flush()
+            }
+            catch {
+                $stdinOperationSucceeded = $false
+            }
             try {
                 $process.StandardInput.Close()
             }
             catch {
+                $stdinOperationSucceeded = $false
             }
-            $remainingCleanupMilliseconds = [Math]::Max(
-                0,
-                ([long]$TimeoutSeconds * 1000L) - $stopwatch.ElapsedMilliseconds
-            )
-            if (-not $process.WaitForExit([int]$remainingCleanupMilliseconds)) {
+            try {
+                $process.StandardInput.Dispose()
+            }
+            catch {
+                $stdinOperationSucceeded = $false
+            }
+            $stdinCloseSucceeded = $stdinOperationSucceeded
+
+            try {
+                $childHasExited = [bool]$process.WaitForExit(
+                    $CleanupGraceMilliseconds
+                )
+            }
+            catch {
+                $childHasExited = $false
+            }
+            if (-not $childHasExited) {
                 try {
-                    # Only this exact child instance is eligible for fallback cleanup.
-                    $process.Kill()
-                    $childCleanup = 'ExactChildTerminationRequestedAtDeadline'
+                    $childHasExited = [bool]$process.HasExited
                 }
                 catch {
-                    $childCleanup = 'ExactChildCleanupFailed'
+                    $childHasExited = $false
                 }
             }
-            else {
+            if ($childHasExited) {
+                # The parameterless overload completes asynchronous stream
+                # bookkeeping after the bounded wait has observed process exit.
+                try { $process.WaitForExit() }
+                catch { }
+                $childExitedNaturally = $true
+            }
+
+            if ($null -ne $stderrTask -and
+                ($childHasExited -or $stderrTask.IsCompleted)) {
+                try { $null = $stderrTask.GetAwaiter().GetResult() }
+                catch { }
+            }
+            try { $process.StandardOutput.Dispose() }
+            catch { }
+            try { $process.StandardError.Dispose() }
+            catch { }
+            if ($null -ne $stderrTask -and $stderrTask.IsCompleted) {
+                try { $null = $stderrTask.GetAwaiter().GetResult() }
+                catch { }
+            }
+
+            $cleanupSucceeded = (
+                $stdinCloseSucceeded -and $childHasExited
+            )
+            if ($cleanupSucceeded) {
                 $childCleanup = 'Normal'
             }
-            if ($null -ne $stderrTask) {
-                try {
-                    $null = $stderrTask.GetAwaiter().GetResult()
-                }
-                catch {
-                }
+            else {
+                $cleanupFailureCode = 'QUOTA_CHILD_CLEANUP_FAILED'
+                $childCleanup = 'GraceExpired'
             }
             $process.Dispose()
+            if ($cleanupStopwatch.IsRunning) {
+                $cleanupStopwatch.Stop()
+            }
+            $cleanupElapsedMilliseconds =
+                $cleanupStopwatch.ElapsedMilliseconds
         }
         elseif ($null -ne $process) {
             $process.Dispose()
@@ -534,15 +650,22 @@ function Invoke-QiehaoQuotaTransport {
         }
     }
 
-    if ($processStarted -and $childCleanup -cne 'Normal') {
-        $failureCode = 'QUOTA_CHILD_CLEANUP_FAILED'
-        $snapshot = $null
+    $succeeded = $primarySucceeded -and $cleanupSucceeded
+    $failureCode = if (-not $primarySucceeded) {
+        $primaryFailureCode
     }
-    $succeeded = [string]::IsNullOrWhiteSpace($failureCode)
+    elseif (-not $cleanupSucceeded) {
+        $cleanupFailureCode
+    }
+    else { $null }
     return [pscustomobject]@{
         Succeeded = $succeeded
         FailureCode = if ($succeeded) { $null } else { $failureCode }
         Snapshot = if ($succeeded) { $snapshot } else { $null }
+        PrimarySucceeded = $primarySucceeded
+        PrimaryFailureCode = $primaryFailureCode
+        CleanupSucceeded = $cleanupSucceeded
+        CleanupFailureCode = $cleanupFailureCode
         Diagnostics = New-QiehaoQuotaDiagnostics `
             -Response $quotaResponse `
             -ExecutableDiscoverySucceeded ([bool]$executable.Succeeded) `
@@ -551,8 +674,19 @@ function Invoke-QiehaoQuotaTransport {
             -ExecutableVersion ([string]$executable.Version) `
             -AppServerStarted $appServerStarted `
             -InitializeMatched $initializeMatched `
-            -RateLimitsResponseMatched $rateLimitsResponseMatched
+            -RateLimitsResponseMatched $rateLimitsResponseMatched `
+            -SnapshotParsed $snapshotParsed `
+            -StdinCloseAttempted $stdinCloseAttempted `
+            -StdinCloseSucceeded $stdinCloseSucceeded `
+            -ChildExitedNaturally $childExitedNaturally `
+            -ChildHasExited $childHasExited `
+            -CleanupElapsedMilliseconds $cleanupElapsedMilliseconds `
+            -PrimarySucceeded $primarySucceeded `
+            -PrimaryFailureCode $primaryFailureCode `
+            -CleanupSucceeded $cleanupSucceeded `
+            -CleanupFailureCode $cleanupFailureCode
         ElapsedMilliseconds = $stopwatch.ElapsedMilliseconds
+        CleanupElapsedMilliseconds = $cleanupElapsedMilliseconds
         ChildCleanup = $childCleanup
         AccountStabilityLockCleanup = 'Pending'
     }
@@ -581,12 +715,22 @@ function Get-QiehaoCurrentQuotaSnapshot {
         return $result
     }
     catch {
+        $lockFailureCode =
+            ConvertTo-QiehaoQuotaFailureCode -ErrorRecord $_
         return [pscustomobject]@{
             Succeeded = $false
-            FailureCode = ConvertTo-QiehaoQuotaFailureCode -ErrorRecord $_
+            FailureCode = $lockFailureCode
             Snapshot = $null
-            Diagnostics = New-QiehaoQuotaDiagnostics -Response $null
+            PrimarySucceeded = $false
+            PrimaryFailureCode = $lockFailureCode
+            CleanupSucceeded = $true
+            CleanupFailureCode = $null
+            Diagnostics = New-QiehaoQuotaDiagnostics -Response $null `
+                -PrimarySucceeded $false `
+                -PrimaryFailureCode $lockFailureCode `
+                -CleanupSucceeded $true
             ElapsedMilliseconds = 0
+            CleanupElapsedMilliseconds = 0
             ChildCleanup = 'NotStarted'
             AccountStabilityLockCleanup = 'ReleasedOrNotAcquired'
         }
@@ -686,12 +830,46 @@ function ConvertTo-QiehaoQuotaPlainDiagnostics {
         AppServerStarted = [bool](Get-QiehaoQuotaPropertyValue `
             -InputObject $Diagnostics -Name 'AppServerStarted' `
             -DefaultValue $false)
+        ProcessStarted = [bool](Get-QiehaoQuotaPropertyValue `
+            -InputObject $Diagnostics -Name 'ProcessStarted' `
+            -DefaultValue ([bool](Get-QiehaoQuotaPropertyValue `
+                -InputObject $Diagnostics -Name 'AppServerStarted' `
+                -DefaultValue $false)))
         InitializeMatched = [bool](Get-QiehaoQuotaPropertyValue `
             -InputObject $Diagnostics -Name 'InitializeMatched' `
             -DefaultValue $false)
         RateLimitsResponseMatched = [bool](Get-QiehaoQuotaPropertyValue `
             -InputObject $Diagnostics -Name 'RateLimitsResponseMatched' `
             -DefaultValue $false)
+        SnapshotParsed = [bool](Get-QiehaoQuotaPropertyValue `
+            -InputObject $Diagnostics -Name 'SnapshotParsed' `
+            -DefaultValue $false)
+        StdinCloseAttempted = [bool](Get-QiehaoQuotaPropertyValue `
+            -InputObject $Diagnostics -Name 'StdinCloseAttempted' `
+            -DefaultValue $false)
+        StdinCloseSucceeded = [bool](Get-QiehaoQuotaPropertyValue `
+            -InputObject $Diagnostics -Name 'StdinCloseSucceeded' `
+            -DefaultValue $false)
+        ChildExitedNaturally = [bool](Get-QiehaoQuotaPropertyValue `
+            -InputObject $Diagnostics -Name 'ChildExitedNaturally' `
+            -DefaultValue $false)
+        ChildHasExited = [bool](Get-QiehaoQuotaPropertyValue `
+            -InputObject $Diagnostics -Name 'ChildHasExited' `
+            -DefaultValue $false)
+        CleanupElapsedMilliseconds = [long](
+            Get-QiehaoQuotaPropertyValue -InputObject $Diagnostics `
+                -Name 'CleanupElapsedMilliseconds' -DefaultValue 0
+        )
+        PrimarySucceeded = [bool](Get-QiehaoQuotaPropertyValue `
+            -InputObject $Diagnostics -Name 'PrimarySucceeded' `
+            -DefaultValue $false)
+        PrimaryFailureCode = Get-QiehaoQuotaPropertyValue `
+            -InputObject $Diagnostics -Name 'PrimaryFailureCode'
+        CleanupSucceeded = [bool](Get-QiehaoQuotaPropertyValue `
+            -InputObject $Diagnostics -Name 'CleanupSucceeded' `
+            -DefaultValue $true)
+        CleanupFailureCode = Get-QiehaoQuotaPropertyValue `
+            -InputObject $Diagnostics -Name 'CleanupFailureCode'
     }
 }
 
@@ -748,6 +926,28 @@ function Invoke-QiehaoQuotaBackgroundWorker {
 
         $succeeded = [bool]$providerResult.Succeeded
         $failureCode = $null
+        $primarySucceeded = [bool](Get-QiehaoQuotaPropertyValue `
+            -InputObject $providerResult -Name 'PrimarySucceeded' `
+            -DefaultValue $succeeded)
+        $primaryFailureValue = Get-QiehaoQuotaPropertyValue `
+            -InputObject $providerResult -Name 'PrimaryFailureCode'
+        $cleanupSucceeded = [bool](Get-QiehaoQuotaPropertyValue `
+            -InputObject $providerResult -Name 'CleanupSucceeded' `
+            -DefaultValue $true)
+        $cleanupFailureValue = Get-QiehaoQuotaPropertyValue `
+            -InputObject $providerResult -Name 'CleanupFailureCode'
+        $primaryFailureCode = if ($null -eq $primaryFailureValue) {
+            $null
+        }
+        else {
+            Get-QiehaoQuotaSafeFailureCode -Value $primaryFailureValue
+        }
+        $cleanupFailureCode = if ($null -eq $cleanupFailureValue) {
+            $null
+        }
+        else {
+            Get-QiehaoQuotaSafeFailureCode -Value $cleanupFailureValue
+        }
         $snapshot = $null
         if ($succeeded) {
             $snapshot = ConvertTo-QiehaoQuotaPlainSnapshot -Snapshot (
@@ -757,6 +957,8 @@ function Invoke-QiehaoQuotaBackgroundWorker {
             if ($null -eq $snapshot) {
                 $succeeded = $false
                 $failureCode = 'QUOTA_RESULT_MISSING'
+                $primarySucceeded = $false
+                $primaryFailureCode = 'QUOTA_RESULT_MISSING'
             }
         }
         else {
@@ -764,23 +966,48 @@ function Invoke-QiehaoQuotaBackgroundWorker {
                 Get-QiehaoQuotaPropertyValue -InputObject $providerResult `
                     -Name 'FailureCode'
             ) -Fallback 'QUOTA_QUERY_FAILED'
+            if (-not $primarySucceeded -and
+                [string]::IsNullOrWhiteSpace($primaryFailureCode)) {
+                $primaryFailureCode = $failureCode
+            }
+            elseif (-not $cleanupSucceeded -and
+                [string]::IsNullOrWhiteSpace($cleanupFailureCode)) {
+                $cleanupFailureCode = $failureCode
+            }
+        }
+
+        $plainDiagnostics = ConvertTo-QiehaoQuotaPlainDiagnostics `
+            -Diagnostics (Get-QiehaoQuotaPropertyValue `
+                -InputObject $providerResult -Name 'Diagnostics') `
+            -Executable $executable -ModulesLoaded $modulesLoaded `
+            -ClientCommandAvailable $clientCommandAvailable `
+            -ParserCommandAvailable $parserCommandAvailable `
+            -AuthReferenceValid $authReferenceValid `
+            -ProviderOutputCount $providerOutput.Count
+        $plainDiagnostics.PrimarySucceeded = $primarySucceeded
+        $plainDiagnostics.PrimaryFailureCode = $primaryFailureCode
+        $plainDiagnostics.CleanupSucceeded = $cleanupSucceeded
+        $plainDiagnostics.CleanupFailureCode = $cleanupFailureCode
+        if ($primarySucceeded -and $null -ne $snapshot) {
+            $plainDiagnostics.SnapshotParsed = $true
         }
 
         return [pscustomobject]@{
             Succeeded = $succeeded
             FailureCode = if ($succeeded) { $null } else { $failureCode }
             Snapshot = if ($succeeded) { $snapshot } else { $null }
-            Diagnostics = ConvertTo-QiehaoQuotaPlainDiagnostics `
-                -Diagnostics (Get-QiehaoQuotaPropertyValue `
-                    -InputObject $providerResult -Name 'Diagnostics') `
-                -Executable $executable -ModulesLoaded $modulesLoaded `
-                -ClientCommandAvailable $clientCommandAvailable `
-                -ParserCommandAvailable $parserCommandAvailable `
-                -AuthReferenceValid $authReferenceValid `
-                -ProviderOutputCount $providerOutput.Count
+            PrimarySucceeded = $primarySucceeded
+            PrimaryFailureCode = $primaryFailureCode
+            CleanupSucceeded = $cleanupSucceeded
+            CleanupFailureCode = $cleanupFailureCode
+            Diagnostics = $plainDiagnostics
             ElapsedMilliseconds = [long](Get-QiehaoQuotaPropertyValue `
                 -InputObject $providerResult -Name 'ElapsedMilliseconds' `
                 -DefaultValue 0)
+            CleanupElapsedMilliseconds = [long](
+                Get-QiehaoQuotaPropertyValue -InputObject $providerResult `
+                    -Name 'CleanupElapsedMilliseconds' -DefaultValue 0
+            )
             ChildCleanup = [string](Get-QiehaoQuotaPropertyValue `
                 -InputObject $providerResult -Name 'ChildCleanup' `
                 -DefaultValue 'NotStarted')
@@ -800,6 +1027,10 @@ function Invoke-QiehaoQuotaBackgroundWorker {
             Succeeded = $false
             FailureCode = $failureCode
             Snapshot = $null
+            PrimarySucceeded = $false
+            PrimaryFailureCode = $failureCode
+            CleanupSucceeded = $true
+            CleanupFailureCode = $null
             Diagnostics = ConvertTo-QiehaoQuotaPlainDiagnostics `
                 -Diagnostics $null -Executable $executable `
                 -ModulesLoaded $modulesLoaded `
@@ -808,6 +1039,7 @@ function Invoke-QiehaoQuotaBackgroundWorker {
                 -AuthReferenceValid $authReferenceValid `
                 -ProviderOutputCount $providerOutput.Count
             ElapsedMilliseconds = 0
+            CleanupElapsedMilliseconds = 0
             ChildCleanup = 'NotStarted'
             AccountStabilityLockCleanup = 'ReleasedOrNotAcquired'
         }
