@@ -12,6 +12,8 @@ $guiRoot = Join-Path -Path $projectRoot -ChildPath 'gui'
 $xamlPath = Join-Path -Path $guiRoot -ChildPath 'MainWindow.xaml'
 $guiScriptPath = Join-Path -Path $guiRoot -ChildPath 'QiehaoGui.ps1'
 $helperModulePath = Join-Path -Path $guiRoot -ChildPath 'GuiHelpers.psm1'
+$quotaGuiSelfTestPath = Join-Path -Path $PSScriptRoot `
+    -ChildPath 'QuotaGuiSelfTest.ps1'
 $coreModulePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 
 function Assert-GuiTest {
@@ -311,6 +313,11 @@ if ($ModalLifecycleOnly) {
 
 Import-Module -Name $helperModulePath -Force -ErrorAction Stop
 Import-Module -Name $coreModulePath -Force -ErrorAction Stop
+
+$quotaGuiOutput = @(& $quotaGuiSelfTestPath)
+Assert-GuiTest -Condition (
+    $quotaGuiOutput -ccontains 'QUOTA_GUI_SELFTEST_PASS'
+) -Code 'GUI_QUOTA_SELFTEST_FAILED'
 
 function New-FakeProfileRow {
     param(
@@ -2350,6 +2357,7 @@ finally {
     Result = 'PASS'
     GuiStartupPowerShell51 = 'PASS'
     GuiStartupPowerShell7 = 'PASS'
+    QuotaSnapshotGuiCache = 'PASS'
     PowerShell51XamlParse = 'PASS'
     PowerShell7XamlParse = 'PASS'
     ModalSwitchLifecyclePowerShell51 = 'PASS'

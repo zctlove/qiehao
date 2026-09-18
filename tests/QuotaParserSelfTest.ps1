@@ -106,6 +106,7 @@ Assert-Equal $multiple.Windows.Count 2 'MULTIPLE_WINDOWS_COUNT'
 Assert-Equal $multiple.Windows[0].Label '5-hour' 'FIVE_HOUR_LABEL'
 Assert-Equal $multiple.Windows[0].DurationMinutes 300 'FIVE_HOUR_DURATION'
 Assert-Equal $multiple.Windows[0].RemainingPercent 14 'USED_TO_REMAINING'
+Assert-Equal $multiple.Windows[0].ResetsAt $resetSeconds 'RESET_SECONDS_PRESERVED'
 Assert-Equal $multiple.Windows[0].ResetLocal $expectedReset 'RESET_TO_LOCAL'
 Assert-Equal $multiple.Windows[1].Label 'Weekly' 'WEEKLY_LABEL'
 Assert-Equal $multiple.Windows[1].DurationMinutes 10080 'WEEKLY_DURATION'
@@ -123,6 +124,7 @@ $unknown = ConvertTo-QiehaoQuotaSnapshot -Result (
     New-FakeResult -Primary $unknownDuration -Secondary $null
 )
 Assert-Equal $unknown.Windows[0].Label '3-day window' 'UNKNOWN_DURATION_LABEL'
+Assert-Equal $unknown.Windows[0].ResetsAt $null 'RESET_SECONDS_MISSING'
 Assert-Equal $unknown.Windows[0].ResetLocal $null 'RESET_MISSING'
 Assert-Equal $unknown.OrdinaryUsageAllowed $null 'ORDINARY_NULL'
 
@@ -161,13 +163,16 @@ $preferred.rateLimitsByLimitId = [pscustomobject]@{
     codex = [pscustomobject]@{
         planType = 'team'
         primary = New-FakeWindow -UsedPercent 25 -DurationMinutes 120 -ResetsAt $null
-        secondary = $null
+        secondary = New-FakeWindow -UsedPercent 50 -DurationMinutes 300 -ResetsAt $null
+        tertiary = New-FakeWindow -UsedPercent 75 -DurationMinutes 4320 -ResetsAt $null
     }
 }
 $preferredSnapshot = ConvertTo-QiehaoQuotaSnapshot -Result $preferred
 Assert-Equal $preferredSnapshot.Plan 'team' 'CODEX_BUCKET_PLAN'
-Assert-Equal $preferredSnapshot.Windows.Count 1 'CODEX_BUCKET_NO_DUPLICATE'
+Assert-Equal $preferredSnapshot.Windows.Count 3 'CODEX_BUCKET_DYNAMIC_WINDOWS'
 Assert-Equal $preferredSnapshot.Windows[0].DurationMinutes 120 'CODEX_BUCKET_PRIORITY'
+Assert-Equal $preferredSnapshot.Windows[1].DurationMinutes 300 'CODEX_BUCKET_SECONDARY'
+Assert-Equal $preferredSnapshot.Windows[2].DurationMinutes 4320 'CODEX_BUCKET_FUTURE_WINDOW'
 
 $fallbackSnapshot = ConvertTo-QiehaoQuotaSnapshot -Result (
     New-FakeResult -Primary $fiveHour -Secondary $null -PlanType 'plus'

@@ -152,6 +152,7 @@ function ConvertTo-QiehaoUsageWindow {
         Label = Get-QiehaoDurationLabel -DurationMinutes $durationMinutes
         RemainingPercent = ConvertTo-QiehaoRemainingPercent `
             -UsedPercent $usedProperty.Value
+        ResetsAt = ConvertTo-QiehaoNullableInt64 -Value $resetValue
         ResetLocal = ConvertTo-QiehaoResetLocal -ResetsAt $resetValue
     }
 }
@@ -197,6 +198,24 @@ function ConvertTo-QiehaoQuotaSnapshot {
                 continue
             }
             $parsedWindow = ConvertTo-QiehaoUsageWindow -Window $windowProperty.Value
+            if ($null -ne $parsedWindow) {
+                $null = $windows.Add($parsedWindow)
+            }
+        }
+        # Preserve current primary/secondary order, then accept any future
+        # direct window field that exposes the same sanitized window shape.
+        foreach ($candidateProperty in @($selectedBucket.PSObject.Properties)) {
+            if ($candidateProperty.Name -in @('primary', 'secondary') -or
+                $null -eq $candidateProperty.Value) {
+                continue
+            }
+            $usedProperty = Get-QiehaoObjectProperty `
+                -InputObject $candidateProperty.Value -Name 'usedPercent'
+            if ($null -eq $usedProperty) {
+                continue
+            }
+            $parsedWindow = ConvertTo-QiehaoUsageWindow `
+                -Window $candidateProperty.Value
             if ($null -ne $parsedWindow) {
                 $null = $windows.Add($parsedWindow)
             }

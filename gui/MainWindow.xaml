@@ -313,6 +313,21 @@
                             <DataGridTextColumn Header="身份标记" Binding="{Binding Identity}" Width="82" />
                             <DataGridTextColumn Header="元数据" Binding="{Binding Metadata}" Width="72" />
                             <DataGridTextColumn Header="更新时间" Binding="{Binding Updated}" MinWidth="170" Width="Auto" />
+                            <DataGridTemplateColumn x:Name="QuotaColumn" Header="" MinWidth="190" Width="220">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Margin="6,4" ToolTip="{Binding QuotaToolTip}">
+                                            <TextBlock Text="{Binding QuotaSummary}" TextWrapping="Wrap" />
+                                            <TextBlock Text="{Binding QuotaAvailability}"
+                                                       Margin="0,2,0,0" FontSize="11"
+                                                       Foreground="{DynamicResource TextSecondaryBrush}" />
+                                            <TextBlock Text="{Binding QuotaFreshness}"
+                                                       Margin="0,2,0,0" FontSize="11"
+                                                       Foreground="{DynamicResource AccentBrush}" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
                         </DataGrid.Columns>
                     </DataGrid>
                 </Grid>
@@ -329,6 +344,7 @@
                         <Button x:Name="SwitchButton" Content="切换账号" IsEnabled="False" />
                         <Button x:Name="VerifyButton" Content="验证账号" IsEnabled="False" />
                         <Button x:Name="RefreshButton" Content="刷新" Style="{StaticResource PrimaryButtonStyle}" IsDefault="True" />
+                        <Button x:Name="RefreshQuotaButton" Content="" IsEnabled="False" />
                     </WrapPanel>
                     <Grid Grid.Row="2">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>

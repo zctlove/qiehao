@@ -10,6 +10,8 @@ $guiRoot = $PSScriptRoot
 $projectRoot = Split-Path -Parent $guiRoot
 $coreModulePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 $helperModulePath = Join-Path -Path $guiRoot -ChildPath 'GuiHelpers.psm1'
+$quotaHelperModulePath = Join-Path -Path $guiRoot -ChildPath 'QuotaHelpers.psm1'
+$quotaClientModulePath = Join-Path -Path $projectRoot -ChildPath 'tools\QuotaClient.psm1'
 $xamlPath = Join-Path -Path $guiRoot -ChildPath 'MainWindow.xaml'
 $stateDirectory = $null
 $backgroundDirectory = Join-Path -Path $guiRoot -ChildPath 'assets\backgrounds'
@@ -21,6 +23,8 @@ Add-Type -AssemblyName WindowsBase -ErrorAction Stop
 
 Import-Module -Name $coreModulePath -Force -ErrorAction Stop
 Import-Module -Name $helperModulePath -Force -ErrorAction Stop
+Import-Module -Name $quotaHelperModulePath -Force -ErrorAction Stop
+Import-Module -Name $quotaClientModulePath -Force -ErrorAction Stop
 $stateDirectory = Resolve-QiehaoProjectStateDirectory -GuiScriptRoot $guiRoot
 
 function Read-QiehaoMainWindow {
@@ -85,6 +89,7 @@ try {
 
     $window = Read-QiehaoMainWindow
     $profilesGrid = Get-RequiredControl -Window $window -Name 'ProfilesGrid'
+    $quotaColumn = Get-RequiredControl -Window $window -Name 'QuotaColumn'
     $profileSearchTextBox = Get-RequiredControl -Window $window -Name 'ProfileSearchTextBox'
     $profileCountText = Get-RequiredControl -Window $window -Name 'ProfileCountText'
     $codexStatusText = Get-RequiredControl -Window $window -Name 'CodexStatusText'
@@ -95,6 +100,9 @@ try {
     $switchButton = Get-RequiredControl -Window $window -Name 'SwitchButton'
     $verifyButton = Get-RequiredControl -Window $window -Name 'VerifyButton'
     $refreshButton = Get-RequiredControl -Window $window -Name 'RefreshButton'
+    $refreshQuotaButton = Get-RequiredControl -Window $window -Name 'RefreshQuotaButton'
+    $refreshQuotaButton.Content = Get-QiehaoQuotaUiText -Key 'RefreshButton'
+    $quotaColumn.Header = Get-QiehaoQuotaUiText -Key 'ColumnHeader'
     $addButton = Get-RequiredControl -Window $window -Name 'AddButton'
     $renameButton = Get-RequiredControl -Window $window -Name 'RenameButton'
     $deleteButton = Get-RequiredControl -Window $window -Name 'DeleteButton'
@@ -140,6 +148,26 @@ try {
     $script:guiVerificationStates = @{}
     $script:guiIsClosing = $false
     $script:guiThemePersistenceReady = $false
+    $script:guiQuotaCacheRead = if ($SelfTest) {
+        [pscustomobject]@{
+            Cache = New-QiehaoEmptyQuotaCache
+            IsValid = $true
+            UsedEmpty = $true
+            ErrorCode = $null
+        }
+    }
+    else {
+        Read-QiehaoQuotaCache -StateDirectory $stateDirectory
+    }
+    $script:guiQuotaCache = $script:guiQuotaCacheRead.Cache
+    $script:guiQuotaCoordinator = New-QiehaoQuotaCoordinatorState
+    $script:guiQuotaJustUpdatedProfile = $null
+    $script:guiQuotaAsyncPowerShell = $null
+    $script:guiQuotaAsyncResult = $null
+    $script:guiQuotaCompletionTimer = $null
+    $script:guiQuotaCompletionTickHandler = $null
+    $script:guiQuotaRequestedProfile = $null
+    $script:guiQuotaAsyncReason = $null
 
     function Get-QiehaoSelectedProfileName {
         if ($null -eq $profilesGrid.SelectedItem) { return $null }
@@ -155,6 +183,15 @@ try {
             -LaunchTargetAvailable:($null -ne $script:guiLaunchTarget -and
                 [bool]$script:guiLaunchTarget.Available)
         $refreshButton.IsEnabled = [bool]$state.Refresh
+        $refreshQuotaButton.IsEnabled = (
+            -not $script:guiIsClosing -and
+            -not $script:guiIsWriteOperationBusy -and
+            -not [bool]$script:guiQuotaCoordinator.QueryInProgress -and
+            -not [string]::IsNullOrWhiteSpace(
+                [string]$script:guiCurrentActiveProfile
+            ) -and
+            [string]$script:guiCurrentActiveProfile -cne '未初始化'
+        )
         $switchButton.IsEnabled = [bool]$state.Switch
         $verifyButton.IsEnabled = [bool]$state.Verify
         $addButton.IsEnabled = [bool]$state.Add
@@ -512,6 +549,10 @@ try {
                 $row.Verification = [string]$script:guiVerificationStates[[string]$row.Name]
             }
         }
+        $rows = @(Update-QiehaoQuotaProfileRows -Rows $rows `
+            -Cache $script:guiQuotaCache `
+            -ActiveProfile ([string]$Snapshot.ActiveProfile) `
+            -JustUpdatedProfile $script:guiQuotaJustUpdatedProfile)
         $script:guiAllProfileRows = @($rows)
         $codexStatusText.Text = [string]$Snapshot.CodexDesktop
         $script:guiCurrentCodexStatus = [string]$Snapshot.CodexDesktop
@@ -564,6 +605,253 @@ try {
             Update-QiehaoActionButtons
         }
         if ($PassThru) { return $refreshSucceeded }
+    }
+
+    function Update-QiehaoQuotaRows {
+        $script:guiAllProfileRows = @(Update-QiehaoQuotaProfileRows `
+            -Rows $script:guiAllProfileRows `
+            -Cache $script:guiQuotaCache `
+            -ActiveProfile $script:guiCurrentActiveProfile `
+            -JustUpdatedProfile $script:guiQuotaJustUpdatedProfile)
+        Update-QiehaoProfileFilter
+    }
+
+    function Stop-QiehaoQuotaCompletionTimer {
+        if ($null -ne $script:guiQuotaCompletionTimer) {
+            try { $script:guiQuotaCompletionTimer.Stop() }
+            catch { }
+            if ($null -ne $script:guiQuotaCompletionTickHandler) {
+                try {
+                    $script:guiQuotaCompletionTimer.Remove_Tick(
+                        $script:guiQuotaCompletionTickHandler
+                    )
+                }
+                catch { }
+            }
+        }
+        $script:guiQuotaCompletionTimer = $null
+        $script:guiQuotaCompletionTickHandler = $null
+    }
+
+    function Stop-QiehaoQuotaAsync {
+        param([switch]$ForClosing)
+        Stop-QiehaoQuotaCompletionTimer
+        $powerShell = $script:guiQuotaAsyncPowerShell
+        $asyncResult = $script:guiQuotaAsyncResult
+        if ($null -ne $powerShell -and $null -ne $asyncResult -and
+            -not $asyncResult.IsCompleted) {
+            if ($ForClosing) {
+                try { $null = $powerShell.BeginStop($null, $null) }
+                catch { }
+            }
+            else {
+                try { $powerShell.Stop() }
+                catch { }
+            }
+        }
+        if (-not $ForClosing -and $null -ne $powerShell) {
+            try { $powerShell.Dispose() }
+            catch { }
+        }
+        $script:guiQuotaAsyncPowerShell = $null
+        $script:guiQuotaAsyncResult = $null
+        $script:guiQuotaRequestedProfile = $null
+        $script:guiQuotaAsyncReason = $null
+        $script:guiQuotaCoordinator.QueryInProgress = $false
+        if (-not $ForClosing) { Update-QiehaoActionButtons }
+    }
+
+    function Complete-QiehaoQuotaAsync {
+        Stop-QiehaoQuotaCompletionTimer
+        $powerShell = $script:guiQuotaAsyncPowerShell
+        $asyncResult = $script:guiQuotaAsyncResult
+        $requestedProfile = $script:guiQuotaRequestedProfile
+        $reason = $script:guiQuotaAsyncReason
+        $providerResult = $null
+        try {
+            if ($null -ne $powerShell -and $null -ne $asyncResult) {
+                $output = @($powerShell.EndInvoke($asyncResult))
+                $providerResult = @($output | Where-Object {
+                    $null -ne $_ -and
+                    $null -ne $_.PSObject.Properties['Succeeded']
+                } | Select-Object -Last 1)
+                if ($providerResult.Count -eq 1) {
+                    $providerResult = $providerResult[0]
+                }
+                else {
+                    $providerResult = $null
+                }
+            }
+        }
+        catch {
+            $providerResult = $null
+        }
+        finally {
+            if ($null -ne $powerShell) {
+                try { $powerShell.Dispose() }
+                catch { }
+            }
+            $script:guiQuotaAsyncPowerShell = $null
+            $script:guiQuotaAsyncResult = $null
+            $script:guiQuotaRequestedProfile = $null
+            $script:guiQuotaAsyncReason = $null
+            $script:guiQuotaCoordinator.QueryInProgress = $false
+        }
+
+        $stillCurrent = (
+            -not [string]::IsNullOrWhiteSpace($requestedProfile) -and
+            ([string]$script:guiCurrentActiveProfile).Equals(
+                $requestedProfile,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        )
+        $updated = $false
+        if ($stillCurrent -and $null -ne $providerResult -and
+            [bool]$providerResult.Succeeded) {
+            $saved = Save-QiehaoQuotaSnapshot `
+                -StateDirectory $stateDirectory `
+                -Cache $script:guiQuotaCache `
+                -ProfileName $requestedProfile `
+                -Snapshot $providerResult.Snapshot
+            if ($saved.Succeeded) {
+                $script:guiQuotaCache = $saved.Cache
+                $script:guiQuotaJustUpdatedProfile = $requestedProfile
+                $updated = $true
+                $refreshStatusText.Text = Get-QiehaoQuotaUiText -Key 'Updated'
+            }
+        }
+        if (-not $updated) {
+            $existing = if ([string]::IsNullOrWhiteSpace($requestedProfile)) {
+                $null
+            }
+            else {
+                Get-QiehaoQuotaCacheSnapshot -Cache $script:guiQuotaCache `
+                    -ProfileName $requestedProfile
+            }
+            if ($reason -ceq 'SwitchAfter') {
+                $refreshStatusText.Text =
+                    Get-QiehaoQuotaUiText -Key 'SwitchNewFailed'
+            }
+            elseif ($null -ne $existing) {
+                $refreshStatusText.Text =
+                    Get-QiehaoQuotaUiText -Key 'UpdateFailedCached'
+            }
+            else {
+                $refreshStatusText.Text =
+                    Get-QiehaoQuotaUiText -Key 'UpdateFailedNoCache'
+            }
+        }
+        Update-QiehaoQuotaRows
+        Update-QiehaoActionButtons
+    }
+
+    function Start-QiehaoQuotaAsync {
+        param(
+            [Parameter(Mandatory = $true)]
+            [ValidateSet('Open', 'Manual', 'SwitchAfter')]
+            [string]$Reason
+        )
+        if ($script:guiIsClosing -or
+            [bool]$script:guiQuotaCoordinator.QueryInProgress) {
+            return $false
+        }
+        if ($Reason -ceq 'Open') {
+            if ([bool]$script:guiQuotaCoordinator.StartupAttempted) {
+                return $false
+            }
+            $script:guiQuotaCoordinator.StartupAttempted = $true
+        }
+        $activeProfile = [string]$script:guiCurrentActiveProfile
+        if ([string]::IsNullOrWhiteSpace($activeProfile) -or
+            $activeProfile -ceq '未初始化') {
+            return $false
+        }
+
+        $script:guiQuotaCoordinator.QueryInProgress = $true
+        $script:guiQuotaRequestedProfile = $activeProfile
+        $script:guiQuotaAsyncReason = $Reason
+        $refreshStatusText.Text = Get-QiehaoQuotaUiText -Key 'Updating'
+        Update-QiehaoActionButtons
+        try {
+            $powerShell = [PowerShell]::Create()
+            $queryScript = {
+                param($ClientModulePath)
+                Import-Module -Name $ClientModulePath -Force -ErrorAction Stop
+                Get-QiehaoCurrentQuotaSnapshot -TimeoutSeconds 10
+            }
+            $null = $powerShell.AddScript($queryScript.ToString()).
+                AddArgument($quotaClientModulePath)
+            $script:guiQuotaAsyncPowerShell = $powerShell
+            $script:guiQuotaAsyncResult = $powerShell.BeginInvoke()
+
+            $timer = New-Object System.Windows.Threading.DispatcherTimer
+            $timer.Interval = [TimeSpan]::FromMilliseconds(125)
+            $tickHandler = [System.EventHandler]({
+                param($sender, $eventArgs)
+                if ($script:guiIsClosing) { return }
+                if ($null -ne $script:guiQuotaAsyncResult -and
+                    $script:guiQuotaAsyncResult.IsCompleted) {
+                    Complete-QiehaoQuotaAsync
+                }
+            }.GetNewClosure())
+            $script:guiQuotaCompletionTimer = $timer
+            $script:guiQuotaCompletionTickHandler = $tickHandler
+            $timer.Add_Tick($tickHandler)
+            $timer.Start()
+            return $true
+        }
+        catch {
+            Stop-QiehaoQuotaAsync
+            $refreshStatusText.Text =
+                Get-QiehaoQuotaUiText -Key 'UpdateFailedNoCache'
+            return $false
+        }
+    }
+
+    function Invoke-QiehaoQuotaBeforeSwitch {
+        Stop-QiehaoQuotaAsync
+        $activeProfile = [string]$script:guiCurrentActiveProfile
+        if ([string]::IsNullOrWhiteSpace($activeProfile) -or
+            $activeProfile -ceq '未初始化') {
+            return
+        }
+        $result = Invoke-QiehaoQuotaCacheRefresh `
+            -Reason SwitchBefore `
+            -Coordinator $script:guiQuotaCoordinator `
+            -StateDirectory $stateDirectory `
+            -Cache $script:guiQuotaCache `
+            -ActiveProfile $activeProfile `
+            -SelectedProfile (Get-QiehaoSelectedProfileName) `
+            -QuotaProvider {
+                param($IgnoredProfile)
+                Get-QiehaoCurrentQuotaSnapshot -TimeoutSeconds 10
+            }
+        if ($result.Succeeded) {
+            $script:guiQuotaCache = $result.Cache
+            $script:guiQuotaJustUpdatedProfile = $activeProfile
+            Update-QiehaoQuotaRows
+        }
+        else {
+            $refreshStatusText.Text =
+                Get-QiehaoQuotaUiText -Key 'SwitchOldFailed'
+        }
+    }
+
+    function Invoke-QiehaoManualQuotaRefresh {
+        if ($script:guiIsWriteOperationBusy -or
+            [bool]$script:guiQuotaCoordinator.QueryInProgress) {
+            return
+        }
+        $selectedProfile = Get-QiehaoSelectedProfileName
+        if (-not [string]::IsNullOrWhiteSpace($selectedProfile) -and
+            -not $selectedProfile.Equals(
+                [string]$script:guiCurrentActiveProfile,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            $refreshStatusText.Text =
+                Get-QiehaoQuotaUiText -Key 'RefreshCurrentOnly'
+        }
+        $null = Start-QiehaoQuotaAsync -Reason Manual
     }
 
     function Set-QiehaoSwitchUiState {
@@ -721,6 +1009,7 @@ try {
             [bool]$script:guiManualSwitchWaitRuntime.Active
         )
         $script:guiIsClosing = $true
+        Stop-QiehaoQuotaAsync -ForClosing
         Stop-QiehaoProcessMonitor
         Stop-QiehaoLaunchWaitTimer
         Stop-QiehaoManualSwitchWaitTimer -Result 'WindowClosing'
@@ -1463,6 +1752,7 @@ try {
             'SwitchSucceeded' {
                 Show-QiehaoSafeMessage `
                     -Message "切换成功。`n`n当前账号：$TargetProfile"
+                $null = Start-QiehaoQuotaAsync -Reason SwitchAfter
             }
             'SwitchSucceededUiRefreshFailed' {
                 Show-QiehaoSafeMessage `
@@ -1490,6 +1780,11 @@ try {
             [switch]$DeferPresentation
         )
         try {
+            try { Invoke-QiehaoQuotaBeforeSwitch }
+            catch {
+                $refreshStatusText.Text =
+                    Get-QiehaoQuotaUiText -Key 'SwitchOldFailed'
+            }
             $result = Invoke-QiehaoOperationProvider -Operation 'SWITCH' `
                 -Provider { param($Name) Switch-CodexAccountProfile -Name $Name } `
                 -ArgumentList @($TargetProfile)
@@ -1525,6 +1820,8 @@ try {
             )
             return
         }
+        # A user-requested Switch takes priority over an in-flight quota read.
+        Stop-QiehaoQuotaAsync
         $liveStatus = Get-QiehaoLiveCodexStatus
         if ($liveStatus -ceq '未知') {
             Show-QiehaoOperationResult -Result (
@@ -1598,8 +1895,10 @@ try {
         $newName = Show-QiehaoNameDialog -Title '重命名账号' `
             -Prompt '新名称：' -CurrentName $oldName
         if ([string]::IsNullOrWhiteSpace($newName)) { return }
+        Stop-QiehaoQuotaAsync
         Set-QiehaoWriteBusy -Value $true -StatusText '正在重命名账号…'
         try {
+            $quotaCacheWarning = $null
             $result = Invoke-QiehaoOperationProvider -Operation 'RENAME' `
                 -Provider {
                     param($From, $To)
@@ -1610,8 +1909,32 @@ try {
                 $script:guiVerificationStates[$newName] = $script:guiVerificationStates[$oldName]
                 $script:guiVerificationStates.Remove($oldName)
             }
+            if ($result.IsSuccess) {
+                $quotaRename = Rename-QiehaoQuotaCacheProfile `
+                    -StateDirectory $stateDirectory `
+                    -Cache $script:guiQuotaCache `
+                    -OldName $oldName -NewName $newName
+                if ($quotaRename.Succeeded) {
+                    $script:guiQuotaCache = $quotaRename.Cache
+                    if (-not [string]::IsNullOrWhiteSpace(
+                        $script:guiQuotaJustUpdatedProfile
+                    ) -and $script:guiQuotaJustUpdatedProfile.Equals(
+                        $oldName,
+                        [StringComparison]::OrdinalIgnoreCase
+                    )) {
+                        $script:guiQuotaJustUpdatedProfile = $newName
+                    }
+                }
+                else {
+                    $quotaCacheWarning =
+                        Get-QiehaoQuotaUiText -Key 'RenameCacheFailed'
+                }
+            }
             Show-QiehaoOperationResult -Result $result
             if ($result.RefreshRequired) { Invoke-QiehaoReadOnlyRefresh }
+            if (-not [string]::IsNullOrWhiteSpace($quotaCacheWarning)) {
+                $refreshStatusText.Text = $quotaCacheWarning
+            }
         }
         finally { Set-QiehaoWriteBusy -Value $false }
     }
@@ -1627,14 +1950,32 @@ try {
             '不会删除 OpenAI 账号、订阅或网页登录状态。'
         if (-not (Show-QiehaoChoiceDialog -Title '删除本地账号' `
             -Message $message -ConfirmText '删除')) { return }
+        Stop-QiehaoQuotaAsync
         Set-QiehaoWriteBusy -Value $true -StatusText '正在删除本地账号…'
         try {
+            $quotaCacheWarning = $null
             $result = Invoke-QiehaoOperationProvider -Operation 'DELETE' `
                 -Provider { param($Name) Remove-CodexProfile -Name $Name -ConfirmDelete } `
                 -ArgumentList @($profileName)
-            if ($result.IsSuccess) { $script:guiVerificationStates.Remove($profileName) }
+            if ($result.IsSuccess) {
+                $script:guiVerificationStates.Remove($profileName)
+                $quotaDelete = Remove-QiehaoQuotaCacheProfile `
+                    -StateDirectory $stateDirectory `
+                    -Cache $script:guiQuotaCache `
+                    -ProfileName $profileName
+                if ($quotaDelete.Succeeded) {
+                    $script:guiQuotaCache = $quotaDelete.Cache
+                }
+                else {
+                    $quotaCacheWarning =
+                        Get-QiehaoQuotaUiText -Key 'DeleteCacheFailed'
+                }
+            }
             Show-QiehaoOperationResult -Result $result
             if ($result.RefreshRequired) { Invoke-QiehaoReadOnlyRefresh }
+            if (-not [string]::IsNullOrWhiteSpace($quotaCacheWarning)) {
+                $refreshStatusText.Text = $quotaCacheWarning
+            }
         }
         finally { Set-QiehaoWriteBusy -Value $false }
     }
@@ -1702,6 +2043,7 @@ try {
                 -Severity Warning
             return
         }
+        Stop-QiehaoQuotaAsync
         Set-QiehaoWriteBusy -Value $true -StatusText '准备添加账号…'
         if ($liveStatus -ceq '运行中') {
             Set-QiehaoWriteBusy -Value $false
@@ -1795,6 +2137,13 @@ try {
             $themes.Count -ne 5 -or -not $startupImageResult.Loaded) {
             throw 'GUI_SELFTEST_BINDING_FAILED'
         }
+        if ($refreshQuotaButton.Content -cne
+            (Get-QiehaoQuotaUiText -Key 'RefreshButton') -or
+            $null -eq $profilesGrid.ItemsSource[0].PSObject.Properties[
+                'QuotaSummary'
+            ]) {
+            throw 'GUI_SELFTEST_QUOTA_BINDING_FAILED'
+        }
         $profileSearchTextBox.Text = 'team'
         Update-QiehaoProfileFilter
         if (@($profilesGrid.ItemsSource).Count -ne 1 -or
@@ -1811,6 +2160,7 @@ try {
     $profilesGrid.Add_SelectionChanged({ Update-QiehaoActionButtons })
     $profileSearchTextBox.Add_TextChanged({ Update-QiehaoProfileFilter })
     $refreshButton.Add_Click({ Invoke-QiehaoReadOnlyRefresh })
+    $refreshQuotaButton.Add_Click({ Invoke-QiehaoManualQuotaRefresh })
     $switchButton.Add_Click({ Invoke-QiehaoSwitchSelectedProfile })
     $verifyButton.Add_Click({ Invoke-QiehaoVerifySelectedProfile })
     $addButton.Add_Click({ Invoke-QiehaoAddAccount })
@@ -1849,6 +2199,11 @@ try {
     $profileContextMenu.Add_Opened({ Update-QiehaoActionButtons })
     $window.Add_Loaded({
         Invoke-QiehaoReadOnlyRefresh
+        if (-not [bool]$script:guiQuotaCacheRead.IsValid) {
+            $refreshStatusText.Text =
+                Get-QiehaoQuotaUiText -Key 'CacheUnavailable'
+        }
+        $null = Start-QiehaoQuotaAsync -Reason Open
         Start-QiehaoProcessMonitor
         $script:guiThemePersistenceReady = $true
     })
