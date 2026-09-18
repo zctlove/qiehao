@@ -252,6 +252,8 @@
                         </DataGrid.ContextMenu>
                         <DataGrid.RowStyle>
                             <Style TargetType="DataGridRow">
+                                <Setter Property="MinHeight" Value="30" />
+                                <Setter Property="VerticalContentAlignment" Value="Center" />
                                 <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
                                 <Setter Property="BorderBrush" Value="Transparent" />
                                 <Setter Property="BorderThickness" Value="1,0,1,0" />
@@ -316,15 +318,12 @@
                             <DataGridTemplateColumn x:Name="QuotaColumn" Header="" MinWidth="190" Width="220">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
-                                        <StackPanel Margin="6,4" ToolTip="{Binding QuotaToolTip}">
-                                            <TextBlock Text="{Binding QuotaSummary}" TextWrapping="Wrap" />
-                                            <TextBlock Text="{Binding QuotaAvailability}"
-                                                       Margin="0,2,0,0" FontSize="11"
-                                                       Foreground="{DynamicResource TextSecondaryBrush}" />
-                                            <TextBlock Text="{Binding QuotaFreshness}"
-                                                       Margin="0,2,0,0" FontSize="11"
-                                                       Foreground="{DynamicResource AccentBrush}" />
-                                        </StackPanel>
+                                        <TextBlock Margin="6,2"
+                                                   VerticalAlignment="Center"
+                                                   Text="{Binding QuotaSummary}"
+                                                   TextWrapping="NoWrap"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   ToolTip="{Binding QuotaToolTip}" />
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>

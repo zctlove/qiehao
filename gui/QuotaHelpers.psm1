@@ -6,7 +6,8 @@ $script:QuotaUiStrings = [ordered]@{
     ColumnHeader = '额度快照'
     RefreshCurrentOnly = '仅刷新当前账号额度。'
     Updating = '正在更新当前账号额度……'
-    Updated = '额度已更新'
+    Updated = '当前账号额度已更新。'
+    UpdateFailedRetry = '额度更新失败，可稍后点击“刷新额度”重试。'
     UpdateFailedCached = '额度更新失败，保留原缓存。'
     UpdateFailedNoCache = '额度更新失败；当前账号尚无额度快照。'
     CacheUnavailable = '额度缓存不可用；不影响账号管理。'
@@ -648,7 +649,76 @@ function Get-QiehaoQuotaCompactLabel {
     param([AllowNull()][object]$Duration, [string]$Label)
     if ($null -ne $Duration -and [long]$Duration -eq 300) { return '5h' }
     if ($null -ne $Duration -and [long]$Duration -eq 10080) { return 'Week' }
-    return $Label
+    if ($null -ne $Duration -and [long]$Duration -gt 0) {
+        $minutes = [long]$Duration
+        if (($minutes % 1440) -eq 0) {
+            return ([string]($minutes / 1440) + 'd')
+        }
+        if (($minutes % 60) -eq 0) {
+            return ([string]($minutes / 60) + 'h')
+        }
+        return ([string]$minutes + 'm')
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Label)) { return $Label }
+    return 'Window'
+}
+
+function Format-QiehaoQuotaPercent {
+    param([Parameter(Mandatory = $true)][object]$Value)
+    return ([Convert]::ToDouble(
+        $Value,
+        [Globalization.CultureInfo]::InvariantCulture
+    )).ToString('0.#', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-QiehaoQuotaSnapshotTooltip {
+    param(
+        [Parameter(Mandatory = $true)][object]$Entry,
+        [Parameter(Mandatory = $true)][bool]$IsActive,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$Now,
+        [Parameter(Mandatory = $true)][string]$Availability
+    )
+
+    $lines = New-Object 'System.Collections.Generic.List[string]'
+    $null = $lines.Add($(if ($IsActive) {
+        '当前账号额度'
+    } else { '额度快照' }))
+    $null = $lines.Add('')
+    foreach ($window in @($Entry.windows)) {
+        $label = [string]$window.label
+        if ([string]::IsNullOrWhiteSpace($label)) {
+            $label = Get-QiehaoQuotaDurationLabel `
+                -DurationMinutes $window.duration_minutes
+        }
+        $null = $lines.Add($label)
+        $null = $lines.Add(
+            '剩余：' + (Format-QiehaoQuotaPercent `
+                -Value $window.remaining_percent) + '%'
+        )
+        $reset = Format-QiehaoQuotaReset `
+            -ResetsAt $window.resets_at -Now $Now
+        if (-not [string]::IsNullOrWhiteSpace($reset)) {
+            $null = $lines.Add('重置：' + $reset)
+        }
+        $null = $lines.Add('')
+    }
+    $null = $lines.Add($Availability)
+    $null = $lines.Add('')
+    $null = $lines.Add('查询于：')
+    $queried = [DateTimeOffset]::Parse(
+        [string]$Entry.queried_at,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind
+    ).ToLocalTime()
+    $null = $lines.Add($queried.ToString('yyyy-MM-dd HH:mm'))
+    if (-not $IsActive) {
+        $null = $lines.Add('')
+        $null = $lines.Add(
+            '这是该账号上次作为当前账号时保存的额度快照。'
+        )
+        $null = $lines.Add('切换为当前账号后可刷新。')
+    }
+    return $lines.ToArray() -join [Environment]::NewLine
 }
 
 function Update-QiehaoQuotaProfileRows {
@@ -672,21 +742,24 @@ function Update-QiehaoQuotaProfileRows {
         $freshness = ''
         $availability = ''
         if ($null -ne $entry) {
-            $lines = New-Object 'System.Collections.Generic.List[string]'
+            $summaryParts = New-Object 'System.Collections.Generic.List[string]'
+            $windowCount = @($entry.windows).Count
+            $windowIndex = 0
             foreach ($window in @($entry.windows)) {
+                if ($windowIndex -ge 3) { break }
                 $compact = Get-QiehaoQuotaCompactLabel `
                     -Duration $window.duration_minutes -Label ([string]$window.label)
-                $reset = Format-QiehaoQuotaReset `
-                    -ResetsAt $window.resets_at -Now $Now
-                $line = $compact + ' ' + [string]$window.remaining_percent + '%'
-                if (-not [string]::IsNullOrWhiteSpace($reset)) {
-                    $line += ' · ' + $reset
-                }
-                $null = $lines.Add($line)
+                $part = $compact + ' ' + (Format-QiehaoQuotaPercent `
+                    -Value $window.remaining_percent) + '%'
+                $null = $summaryParts.Add($part)
+                $windowIndex++
             }
-            $summary = if ($lines.Count -eq 0) {
+            if ($windowCount -gt 3) {
+                $null = $summaryParts.Add('+' + [string]($windowCount - 3))
+            }
+            $summary = if ($summaryParts.Count -eq 0) {
                 Get-QiehaoQuotaUiText -Key 'NoWindows'
-            } else { $lines.ToArray() -join [Environment]::NewLine }
+            } else { $summaryParts.ToArray() -join ' · ' }
             if ($null -ne $entry.ordinary_usage_allowed) {
                 $availability = if ([bool]$entry.ordinary_usage_allowed) {
                     Get-QiehaoQuotaUiText -Key 'UsageAvailable'
@@ -717,16 +790,16 @@ function Update-QiehaoQuotaProfileRows {
                     ' · ' + $stamp
             }
         }
-        $tooltip = if ($isActive) {
-            if ($null -eq $entry) {
-                Get-QiehaoQuotaUiText -Key 'CurrentNoSnapshotTooltip'
-            }
-            else { Get-QiehaoQuotaUiText -Key 'CurrentTooltip' }
+        $tooltip = if ($null -ne $entry) {
+            Get-QiehaoQuotaSnapshotTooltip -Entry $entry `
+                -IsActive $isActive -Now $Now -Availability $availability
         }
-        elseif ($null -eq $entry) {
+        elseif ($isActive) {
+            Get-QiehaoQuotaUiText -Key 'CurrentNoSnapshotTooltip'
+        }
+        else {
             Get-QiehaoQuotaUiText -Key 'InactiveNoSnapshotTooltip'
         }
-        else { Get-QiehaoQuotaUiText -Key 'InactiveTooltip' }
         $row | Add-Member -NotePropertyName QuotaSummary `
             -NotePropertyValue $summary -Force
         $row | Add-Member -NotePropertyName QuotaFreshness `

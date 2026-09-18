@@ -133,7 +133,11 @@ try {
         -Cache $noCache.Cache -ActiveProfile 'Team')
     Assert-QuotaTest (
         $noCache.UsedEmpty -and $noCacheDecorated.Count -eq 2 -and
-        @($noCacheDecorated | Where-Object { $_.Name -ceq 'Team' }).Count -eq 1
+        @($noCacheDecorated | Where-Object {
+            $_.Name -ceq 'Team' -and
+            [string]$_.QuotaSummary -ceq '尚无额度快照' -and
+            [string]$_.QuotaSummary -notmatch '[\r\n]'
+        }).Count -eq 1
     ) 'NO_QUOTA_CACHE_CORE_STILL_LOADS'
 
     # B/C/D. Empty, corrupt and unsupported cache all degrade independently.
@@ -323,12 +327,33 @@ try {
     $rows = @(Update-QiehaoQuotaProfileRows -Rows $rows `
         -Cache $dynamicSave.Cache -ActiveProfile 'Plus' `
         -Now ([DateTimeOffset]::Parse('2030-01-02T01:00:00Z')))
+    $plusRow = @($rows | Where-Object { $_.Name -ceq 'Plus' })[0]
     $teamRow = @($rows | Where-Object { $_.Name -ceq 'Team' })[0]
-    $dynamicLines = @(([string]$teamRow.QuotaSummary) -split [Environment]::NewLine)
-    Assert-QuotaTest ($dynamicLines.Count -eq 3 -and
-        $teamRow.QuotaSummary -notmatch '5h|Week') `
+    Assert-QuotaTest (
+        [string]$plusRow.QuotaSummary -ceq '5h 84% · Week 61%' -and
+        [string]$plusRow.QuotaSummary -notmatch '[\r\n]' -and
+        [string]$plusRow.QuotaToolTip -match '当前账号额度' -and
+        [string]$plusRow.QuotaToolTip -match '5-hour' -and
+        [string]$plusRow.QuotaToolTip -match 'Weekly' -and
+        [string]$plusRow.QuotaToolTip -match '剩余：84%' -and
+        [string]$plusRow.QuotaToolTip -match '包含额度：可用' -and
+        [string]$plusRow.QuotaToolTip -match '查询于：'
+    ) 'QUOTA_TWO_WINDOW_SUMMARY_OR_TOOLTIP_FAILED'
+    Assert-QuotaTest (
+        [string]$teamRow.QuotaSummary -ceq
+            '1h 90% · 2h 80% · 3h 70%' -and
+        [string]$teamRow.QuotaSummary -notmatch '[\r\n]' -and
+        $teamRow.QuotaSummary -notmatch '5h|Week'
+    ) `
         'QUOTA_DYNAMIC_WINDOWS_OR_FAKE_STANDARD_WINDOW'
-    Assert-QuotaTest ($teamRow.QuotaToolTip -match '上次') `
+    Assert-QuotaTest (
+        $teamRow.QuotaToolTip -match
+            '这是该账号上次作为当前账号时保存的额度快照。' -and
+        $teamRow.QuotaToolTip -match '切换为当前账号后可刷新。' -and
+        $teamRow.QuotaToolTip -match '1-hour' -and
+        $teamRow.QuotaToolTip -match '2-hour' -and
+        $teamRow.QuotaToolTip -match '3-hour'
+    ) `
         'QUOTA_INACTIVE_TOOLTIP_MISSING'
 
     $singleSave = Save-QiehaoQuotaSnapshot -StateDirectory $testRoot `
@@ -343,6 +368,34 @@ try {
         @((Get-QiehaoQuotaCacheSnapshot -Cache $emptySave.Cache `
             -ProfileName 'Empty').windows).Count -eq 0
     ) 'QUOTA_SINGLE_OR_EMPTY_WINDOWS_FAILED'
+    $singleRows = @(
+        [pscustomobject]@{ Name = 'Single'; Active = '是' },
+        [pscustomobject]@{ Name = 'Empty'; Active = '否' }
+    )
+    $singleRows = @(Update-QiehaoQuotaProfileRows -Rows $singleRows `
+        -Cache $emptySave.Cache -ActiveProfile 'Single')
+    Assert-QuotaTest (
+        [string]$singleRows[0].QuotaSummary -ceq '30d 55%' -and
+        [string]$singleRows[0].QuotaSummary -notmatch '[\r\n]' -and
+        [string]$singleRows[1].QuotaSummary -ceq '未返回额度窗口' -and
+        [string]$singleRows[1].QuotaSummary -notmatch '[\r\n]'
+    ) 'QUOTA_ONE_OR_ZERO_WINDOW_NOT_COMPACT'
+
+    $fourSave = Save-QiehaoQuotaSnapshot -StateDirectory $testRoot `
+        -Cache $emptySave.Cache -ProfileName 'Four' `
+        -Snapshot (New-FakeQuotaSnapshot `
+            -Durations @(60, 120, 180, 240) `
+            -Remaining @(90, 80, 70, 60))
+    $fourRows = @(Update-QiehaoQuotaProfileRows `
+        -Rows @([pscustomobject]@{ Name = 'Four'; Active = '是' }) `
+        -Cache $fourSave.Cache -ActiveProfile 'Four')
+    Assert-QuotaTest (
+        [string]$fourRows[0].QuotaSummary -ceq
+            '1h 90% · 2h 80% · 3h 70% · +1' -and
+        [string]$fourRows[0].QuotaSummary -notmatch '[\r\n]' -and
+        [string]$fourRows[0].QuotaToolTip -match '4-hour' -and
+        [string]$fourRows[0].QuotaToolTip -match '剩余：60%'
+    ) 'QUOTA_FOUR_WINDOW_SUMMARY_NOT_BOUNDED'
 
     $order = New-Object 'System.Collections.Generic.List[string]'
     $switchBefore = Invoke-QiehaoQuotaCacheRefresh -Reason SwitchBefore `
@@ -490,6 +543,20 @@ try {
     Assert-QuotaTest ($xaml -match 'x:Name="QuotaColumn"' -and
         $xaml -match 'x:Name="RefreshQuotaButton"') `
         'QUOTA_UI_CONTROLS_MISSING'
+    $quotaCellTemplate = [regex]::Match(
+        $xaml,
+        '(?s)<DataGridTemplateColumn x:Name="QuotaColumn".*?</DataGridTemplateColumn>'
+    ).Value
+    Assert-QuotaTest (
+        -not [string]::IsNullOrWhiteSpace($quotaCellTemplate) -and
+        $quotaCellTemplate -match 'TextWrapping="NoWrap"' -and
+        $quotaCellTemplate -match 'TextTrimming="CharacterEllipsis"' -and
+        $quotaCellTemplate -match 'VerticalAlignment="Center"' -and
+        $quotaCellTemplate -match 'ToolTip="{Binding QuotaToolTip}"' -and
+        $quotaCellTemplate -notmatch '<StackPanel' -and
+        $quotaCellTemplate -notmatch 'QuotaFreshness|QuotaAvailability' -and
+        $quotaCellTemplate -notmatch '(?i)\b(?:Min)?Height='
+    ) 'QUOTA_CELL_TEMPLATE_NOT_COMPACT_SINGLE_LINE'
     $gitIgnore = [System.IO.File]::ReadAllText($gitIgnorePath)
     Assert-QuotaTest ($gitIgnore -match '(?m)^state/\*$') `
         'QUOTA_CACHE_NOT_GIT_IGNORED'
@@ -503,6 +570,10 @@ try {
         FailurePreservesOld = 'PASS'
         DynamicOneTwoThreeUnknown = 'PASS'
         NoSyntheticFiveHourOrWeekly = 'PASS'
+        CompactOneTwoThreeWindows = 'PASS'
+        BoundedFourWindowSummary = 'PASS'
+        FullQuotaTooltip = 'PASS'
+        QuotaCellSingleLine = 'PASS'
         SwitchBeforeCommit = 'PASS'
         SwitchBeforeFailureNonBlocking = 'PASS'
         SwitchAfterNewActive = 'PASS'

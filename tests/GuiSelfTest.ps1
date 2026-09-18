@@ -479,6 +479,73 @@ Assert-GuiTest -Condition (
     $ps7Xaml.Output -ccontains 'XAML_PARSE_PASS'
 ) -Code 'GUI_POWERSHELL_7_XAML_PARSE_FAILED'
 
+$quotaLayoutWindow = Read-TestWindow
+try {
+    $quotaLayoutWindow.WindowStartupLocation = 'Manual'
+    $quotaLayoutWindow.Left = -10000
+    $quotaLayoutWindow.Top = -10000
+    $quotaLayoutWindow.Opacity = 0
+    $quotaLayoutWindow.ShowInTaskbar = $false
+    $quotaLayoutGrid = $quotaLayoutWindow.FindName('ProfilesGrid')
+    $quotaLayoutItems = @(
+        [pscustomobject]@{
+            Name = 'One'; QuotaSummary = '30d 72%'
+            QuotaToolTip = 'One window'
+        },
+        [pscustomobject]@{
+            Name = 'Two'; QuotaSummary = '5h 35% - Week 15%'
+            QuotaToolTip = 'Two windows'
+        },
+        [pscustomobject]@{
+            Name = 'Three'; QuotaSummary = '1h 90% - 2h 80% - 3h 70%'
+            QuotaToolTip = 'Three windows'
+        }
+    )
+    $quotaLayoutGrid.ItemsSource = $quotaLayoutItems
+    $quotaLayoutWindow.Show()
+    $quotaLayoutWindow.UpdateLayout()
+    $quotaRows = @(0..2 | ForEach-Object {
+        $quotaLayoutGrid.ItemContainerGenerator.ContainerFromIndex($_)
+    })
+    Assert-GuiTest -Condition (
+        @($quotaRows | Where-Object { $null -eq $_ }).Count -eq 0 -and
+        @($quotaRows | Where-Object {
+            $_.ActualHeight -lt 28 -or $_.ActualHeight -gt 34
+        }).Count -eq 0 -and
+        @($quotaRows | Select-Object -ExpandProperty ActualHeight -Unique).
+            Count -eq 1
+    ) -Code 'GUI_QUOTA_WINDOW_COUNT_CHANGED_ROW_HEIGHT'
+
+    $quotaLayoutGrid.ItemsSource = @(
+        [pscustomobject]@{
+            Name = 'NoSnapshot'; QuotaSummary = 'No snapshot'
+            QuotaToolTip = 'No snapshot'
+        },
+        $quotaLayoutItems[2]
+    )
+    $quotaLayoutWindow.UpdateLayout()
+    $noSnapshotRow =
+        $quotaLayoutGrid.ItemContainerGenerator.ContainerFromIndex(0)
+    $threeWindowRow =
+        $quotaLayoutGrid.ItemContainerGenerator.ContainerFromIndex(1)
+    $quotaScrollViewer = $quotaLayoutGrid.Template.FindName(
+        'DG_ScrollViewer',
+        $quotaLayoutGrid
+    )
+    Assert-GuiTest -Condition (
+        $null -ne $noSnapshotRow -and $null -ne $threeWindowRow -and
+        $noSnapshotRow.ActualHeight -ge 28 -and
+        $noSnapshotRow.ActualHeight -le 34 -and
+        $threeWindowRow.ActualHeight -eq $noSnapshotRow.ActualHeight -and
+        $null -ne $quotaScrollViewer -and
+        $quotaScrollViewer.ComputedVerticalScrollBarVisibility -eq
+            [System.Windows.Visibility]::Collapsed
+    ) -Code 'GUI_TWO_PROFILE_QUOTA_TEMPLATE_FORCED_VERTICAL_SCROLL'
+}
+finally {
+    $quotaLayoutWindow.Close()
+}
+
 $ps51ModalLifecycle = Invoke-PowerShellFileTest `
     -HostPath $ps51Command.Source -ScriptPath $PSCommandPath `
     -AdditionalArguments @('-ModalLifecycleOnly')
@@ -573,6 +640,41 @@ Assert-GuiTest -Condition (
         'QUOTA_REFRESH_BUTTON_ENABLED=True' -and
     $guiQueryFailure7.Output -ccontains 'GUI_SELFTEST_READY'
 ) -Code 'GUI_QUERY_FAILURE_DISABLED_QUOTA_PS7'
+
+$requiredQuotaAsyncOutputs = @(
+    'StartupQuotaSuccessClearsBusy=True',
+    'StartupQuotaFailureClearsBusy=True',
+    'StartupQuotaTimeoutClearsBusy=True',
+    'StartupQuotaCompletionTimerStops=True',
+    'StartupQuotaCompletionHandlerRemoved=True',
+    'StartupQuotaSuccessReEnablesRefresh=True',
+    'StartupQuotaFailureReEnablesRefresh=True',
+    'QueryFailureDoesNotDisableQuotaRuntime=True',
+    'AsyncCompletionExceptionStillCleansUp=True',
+    'GuiClosingDuringQuotaQueryCleansUp=True',
+    'StartupSendsAtMostOneQuery=True',
+    'StartupUsesActiveProfile=True',
+    'QUOTA_ASYNC_LIFECYCLE_SELFTEST_PASS'
+)
+$quotaAsync51 = Invoke-PowerShellFileTest `
+    -HostPath $ps51Command.Source -ScriptPath $guiScriptPath `
+    -AdditionalArguments @('-SelfTest', '-QuotaAsyncLifecycleSelfTest')
+Assert-GuiTest -Condition (
+    $quotaAsync51.ExitCode -eq 0 -and
+    @($requiredQuotaAsyncOutputs | Where-Object {
+        $quotaAsync51.Output -cnotcontains $_
+    }).Count -eq 0
+) -Code 'GUI_QUOTA_ASYNC_LIFECYCLE_PS51_FAILED'
+
+$quotaAsync7 = Invoke-PowerShellFileTest `
+    -HostPath $ps7Command.Source -ScriptPath $guiScriptPath `
+    -AdditionalArguments @('-SelfTest', '-QuotaAsyncLifecycleSelfTest')
+Assert-GuiTest -Condition (
+    $quotaAsync7.ExitCode -eq 0 -and
+    @($requiredQuotaAsyncOutputs | Where-Object {
+        $quotaAsync7.Output -cnotcontains $_
+    }).Count -eq 0
+) -Code 'GUI_QUOTA_ASYNC_LIFECYCLE_PS7_FAILED'
 
 $tempBase = [System.IO.Path]::GetFullPath(
     [System.IO.Path]::GetTempPath()
@@ -2351,6 +2453,24 @@ Assert-GuiTest -Condition (
     $guiSource -match 'Invoke-QiehaoReadOnlyRefresh' -and
     $guiSource -match 'guiIsWriteOperationBusy'
 ) -Code 'GUI_OPERATION_WIRING_MISSING'
+
+$quotaAsyncSourceSection = [regex]::Match(
+    $guiSource,
+    '(?s)function Stop-QiehaoQuotaCompletionTimer.*?function Invoke-QiehaoQuotaBeforeSwitch'
+).Value
+Assert-GuiTest -Condition (
+    -not [string]::IsNullOrWhiteSpace($quotaAsyncSourceSection) -and
+    $quotaAsyncSourceSection -match 'Remove_Tick' -and
+    $quotaAsyncSourceSection -match 'EndInvoke' -and
+    $quotaAsyncSourceSection -match 'finally' -and
+    $quotaAsyncSourceSection -match
+        'guiQuotaCoordinator\.QueryInProgress = \$false' -and
+    $quotaAsyncSourceSection -match 'AddMilliseconds\(' -and
+    $quotaAsyncSourceSection -match 'else \{ 15000 \}' -and
+    $quotaAsyncSourceSection -match
+        'Get-QiehaoQuotaUiTextSafe -Key ''UpdateFailedRetry''' -and
+    $quotaAsyncSourceSection -notmatch 'GetNewClosure'
+) -Code 'GUI_QUOTA_ASYNC_SOURCE_LIFECYCLE_INVALID'
 Assert-GuiTest -Condition (
     $guiSource -match 'Codex 已安全退出，可以切换账号。' -and
     $guiSource -match '文件 → 退出' -and
@@ -2532,12 +2652,28 @@ finally {
     QuotaAvailableWithNoCache = 'PASS'
     NoCacheDoesNotDisableRefreshButton = 'PASS'
     QueryFailureDoesNotDisableQuotaFeature = 'PASS'
+    StartupQuotaSuccessClearsBusy = 'PASS'
+    StartupQuotaFailureClearsBusy = 'PASS'
+    StartupQuotaTimeoutClearsBusy = 'PASS'
+    StartupQuotaCompletionTimerStops = 'PASS'
+    StartupQuotaCompletionHandlerRemoved = 'PASS'
+    StartupQuotaSuccessReEnablesRefresh = 'PASS'
+    StartupQuotaFailureReEnablesRefresh = 'PASS'
+    AsyncCompletionExceptionStillCleansUp = 'PASS'
+    GuiClosingDuringQuotaQueryCleansUp = 'PASS'
+    StartupSendsAtMostOneQuery = 'PASS'
+    QuotaTimerNoDynamicClosure = 'PASS'
+    QuotaGuiHardFailSafe15Seconds = 'PASS'
     QuotaAvailableFromForeignWorkingDirectory = 'PASS'
     QuotaModuleUnavailablePowerShell51 = 'PASS'
     QuotaModuleUnavailablePowerShell7 = 'PASS'
     QuotaSnapshotGuiCache = 'PASS'
     PowerShell51XamlParse = 'PASS'
     PowerShell7XamlParse = 'PASS'
+    QuotaRowsCompact28To34 = 'PASS'
+    QuotaWindowCountDoesNotChangeRowHeight = 'PASS'
+    NoSnapshotSingleLineHeight = 'PASS'
+    TwoProfilesNoQuotaVerticalScroll = 'PASS'
     ModalSwitchLifecyclePowerShell51 = 'PASS'
     ModalSwitchLifecyclePowerShell7 = 'PASS'
     FiveThemesLoad = 'PASS'

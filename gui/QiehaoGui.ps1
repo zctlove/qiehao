@@ -2,10 +2,12 @@
 param(
     [switch]$SelfTest,
     [switch]$SimulateQuotaModuleUnavailable,
-    [switch]$SimulateQuotaQueryFailure
+    [switch]$SimulateQuotaQueryFailure,
+    [switch]$QuotaAsyncLifecycleSelfTest
 )
 
-if (($SimulateQuotaModuleUnavailable -or $SimulateQuotaQueryFailure) -and
+if (($SimulateQuotaModuleUnavailable -or $SimulateQuotaQueryFailure -or
+    $QuotaAsyncLifecycleSelfTest) -and
     -not $SelfTest) {
     throw 'SIMULATED_QUOTA_FAILURE_REQUIRES_SELFTEST'
 }
@@ -123,6 +125,7 @@ $script:guiQuotaFallbackStrings = [ordered]@{
     RefreshButton = '刷新额度'
     ColumnHeader = '额度快照'
     CacheUnavailable = '额度功能不可用，账号管理功能不受影响。'
+    UpdateFailedRetry = '额度更新失败，可稍后点击“刷新额度”重试。'
     NoSnapshot = '额度不可用'
     InactiveTooltip = '额度功能当前不可用；账号管理功能不受影响。'
 }
@@ -318,6 +321,14 @@ try {
     $script:guiQuotaCompletionTickHandler = $null
     $script:guiQuotaRequestedProfile = $null
     $script:guiQuotaAsyncReason = $null
+    $script:guiQuotaDeadlineUtc = $null
+    $script:guiQuotaLastQueryFailed = $false
+    $script:guiQuotaCompletionTimerStopped = $false
+    $script:guiQuotaCompletionHandlerRemoved = $false
+    $script:guiQuotaEndInvokeAttempted = $false
+    $script:guiQuotaSelfTestScenario = $null
+    $script:guiQuotaSelfTestQueryCount = 0
+    $script:guiQuotaSelfTestHardCeilingMilliseconds = 0
 
     function Set-QiehaoQuotaUnavailableRows {
         param(
@@ -849,13 +860,17 @@ try {
 
     function Stop-QiehaoQuotaCompletionTimer {
         if ($null -ne $script:guiQuotaCompletionTimer) {
-            try { $script:guiQuotaCompletionTimer.Stop() }
+            try {
+                $script:guiQuotaCompletionTimer.Stop()
+                $script:guiQuotaCompletionTimerStopped = $true
+            }
             catch { }
             if ($null -ne $script:guiQuotaCompletionTickHandler) {
                 try {
                     $script:guiQuotaCompletionTimer.Remove_Tick(
                         $script:guiQuotaCompletionTickHandler
                     )
+                    $script:guiQuotaCompletionHandlerRemoved = $true
                 }
                 catch { }
             }
@@ -869,30 +884,30 @@ try {
         Stop-QiehaoQuotaCompletionTimer
         $powerShell = $script:guiQuotaAsyncPowerShell
         $asyncResult = $script:guiQuotaAsyncResult
-        if ($null -ne $powerShell -and $null -ne $asyncResult -and
-            -not $asyncResult.IsCompleted) {
-            if ($ForClosing) {
-                try { $null = $powerShell.BeginStop($null, $null) }
-                catch { }
-            }
-            else {
+        try {
+            if ($null -ne $powerShell -and $null -ne $asyncResult -and
+                -not $asyncResult.IsCompleted) {
                 try { $powerShell.Stop() }
                 catch { }
             }
         }
-        if (-not $ForClosing -and $null -ne $powerShell) {
-            try { $powerShell.Dispose() }
-            catch { }
+        finally {
+            if ($null -ne $powerShell) {
+                try { $powerShell.Dispose() }
+                catch { }
+            }
+            $script:guiQuotaAsyncPowerShell = $null
+            $script:guiQuotaAsyncResult = $null
+            $script:guiQuotaRequestedProfile = $null
+            $script:guiQuotaAsyncReason = $null
+            $script:guiQuotaDeadlineUtc = $null
+            $script:guiQuotaCoordinator.QueryInProgress = $false
         }
-        $script:guiQuotaAsyncPowerShell = $null
-        $script:guiQuotaAsyncResult = $null
-        $script:guiQuotaRequestedProfile = $null
-        $script:guiQuotaAsyncReason = $null
-        $script:guiQuotaCoordinator.QueryInProgress = $false
         if (-not $ForClosing) { Update-QiehaoActionButtons }
     }
 
     function Complete-QiehaoQuotaAsync {
+        param([switch]$HardTimeout)
         Stop-QiehaoQuotaCompletionTimer
         $powerShell = $script:guiQuotaAsyncPowerShell
         $asyncResult = $script:guiQuotaAsyncResult
@@ -900,7 +915,13 @@ try {
         $reason = $script:guiQuotaAsyncReason
         $providerResult = $null
         try {
-            if ($null -ne $powerShell -and $null -ne $asyncResult) {
+            if ($HardTimeout -and $null -ne $powerShell -and
+                $null -ne $asyncResult -and -not $asyncResult.IsCompleted) {
+                try { $powerShell.Stop() }
+                catch { }
+            }
+            elseif ($null -ne $powerShell -and $null -ne $asyncResult) {
+                $script:guiQuotaEndInvokeAttempted = $true
                 $output = @($powerShell.EndInvoke($asyncResult))
                 $providerResult = @($output | Where-Object {
                     $null -ne $_ -and
@@ -926,6 +947,7 @@ try {
             $script:guiQuotaAsyncResult = $null
             $script:guiQuotaRequestedProfile = $null
             $script:guiQuotaAsyncReason = $null
+            $script:guiQuotaDeadlineUtc = $null
             $script:guiQuotaCoordinator.QueryInProgress = $false
         }
 
@@ -937,43 +959,47 @@ try {
             )
         )
         $updated = $false
-        if ($stillCurrent -and $null -ne $providerResult -and
-            [bool]$providerResult.Succeeded) {
-            $saved = Save-QiehaoQuotaSnapshot `
-                -StateDirectory $stateDirectory `
-                -Cache $script:guiQuotaCache `
-                -ProfileName $requestedProfile `
-                -Snapshot $providerResult.Snapshot
-            if ($saved.Succeeded) {
-                $script:guiQuotaCache = $saved.Cache
-                $script:guiQuotaJustUpdatedProfile = $requestedProfile
-                $updated = $true
-                $refreshStatusText.Text = Get-QiehaoQuotaUiTextSafe -Key 'Updated'
+        try {
+            if (-not $HardTimeout -and $stillCurrent -and
+                $null -ne $providerResult -and
+                [bool]$providerResult.Succeeded) {
+                $saved = Save-QiehaoQuotaSnapshot `
+                    -StateDirectory $stateDirectory `
+                    -Cache $script:guiQuotaCache `
+                    -ProfileName $requestedProfile `
+                    -Snapshot $providerResult.Snapshot
+                if ($saved.Succeeded) {
+                    $script:guiQuotaCache = $saved.Cache
+                    $script:guiQuotaJustUpdatedProfile = $requestedProfile
+                    $updated = $true
+                }
             }
         }
-        if (-not $updated) {
-            $existing = if ([string]::IsNullOrWhiteSpace($requestedProfile)) {
-                $null
-            }
-            else {
-                Get-QiehaoQuotaCacheSnapshot -Cache $script:guiQuotaCache `
-                    -ProfileName $requestedProfile
-            }
+        catch {
+            $updated = $false
+        }
+
+        $script:guiQuotaLastQueryFailed = -not $updated
+        if ($updated) {
+            $refreshStatusText.Text =
+                Get-QiehaoQuotaUiTextSafe -Key 'Updated'
+        }
+        else {
             if ($reason -ceq 'SwitchAfter') {
                 $refreshStatusText.Text =
                     Get-QiehaoQuotaUiTextSafe -Key 'SwitchNewFailed'
             }
-            elseif ($null -ne $existing) {
-                $refreshStatusText.Text =
-                    Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedCached'
-            }
             else {
                 $refreshStatusText.Text =
-                    Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedNoCache'
+                    Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry'
             }
         }
-        Update-QiehaoQuotaRows
-        Update-QiehaoActionButtons
+        try {
+            Update-QiehaoQuotaRows
+        }
+        finally {
+            Update-QiehaoActionButtons
+        }
     }
 
     function Start-QiehaoQuotaAsync {
@@ -1000,32 +1026,135 @@ try {
         }
 
         $script:guiQuotaCoordinator.QueryInProgress = $true
+        $script:guiQuotaLastQueryFailed = $false
+        $script:guiQuotaCompletionTimerStopped = $false
+        $script:guiQuotaCompletionHandlerRemoved = $false
+        $script:guiQuotaEndInvokeAttempted = $false
         $script:guiQuotaRequestedProfile = $activeProfile
         $script:guiQuotaAsyncReason = $Reason
+        $hardCeilingMilliseconds = if (
+            $SelfTest -and
+            -not [string]::IsNullOrWhiteSpace(
+                [string]$script:guiQuotaSelfTestScenario
+            ) -and
+            $script:guiQuotaSelfTestHardCeilingMilliseconds -gt 0
+        ) {
+            $script:guiQuotaSelfTestHardCeilingMilliseconds
+        }
+        else { 15000 }
+        $script:guiQuotaDeadlineUtc = [DateTime]::UtcNow.AddMilliseconds(
+            $hardCeilingMilliseconds
+        )
         $refreshStatusText.Text = Get-QiehaoQuotaUiTextSafe -Key 'Updating'
         Update-QiehaoActionButtons
         try {
             $powerShell = [PowerShell]::Create()
-            $queryScript = {
-                param($ClientModulePath)
-                Import-Module -Name $ClientModulePath -ErrorAction Stop
-                Get-QiehaoCurrentQuotaSnapshot -TimeoutSeconds 10
+            if ($SelfTest -and -not [string]::IsNullOrWhiteSpace(
+                [string]$script:guiQuotaSelfTestScenario
+            )) {
+                $queryScript = {
+                    param($Scenario)
+                    switch ($Scenario) {
+                        'Success' {
+                            return [pscustomobject]@{
+                                Succeeded = $true
+                                FailureCode = $null
+                                Snapshot = [pscustomobject]@{
+                                    Plan = 'team'
+                                    OrdinaryUsageAllowed = $true
+                                    Windows = @(
+                                        [pscustomobject]@{
+                                            DurationMinutes = 300
+                                            RemainingPercent = 35
+                                            ResetsAt = 1893542400
+                                        },
+                                        [pscustomobject]@{
+                                            DurationMinutes = 10080
+                                            RemainingPercent = 15
+                                            ResetsAt = 1893628800
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        'Failure' {
+                            return [pscustomobject]@{
+                                Succeeded = $false
+                                FailureCode = 'FAKE_PROVIDER_FAILURE'
+                                Snapshot = $null
+                            }
+                        }
+                        'Timeout' {
+                            Start-Sleep -Seconds 5
+                            return [pscustomobject]@{
+                                Succeeded = $false
+                                FailureCode = 'FAKE_LATE_RESULT'
+                                Snapshot = $null
+                            }
+                        }
+                        'Throw' {
+                            throw 'FAKE_ASYNC_COMPLETION_EXCEPTION'
+                        }
+                        'Closing' {
+                            Start-Sleep -Seconds 5
+                            return [pscustomobject]@{
+                                Succeeded = $false
+                                FailureCode = 'FAKE_CLOSING_RESULT'
+                                Snapshot = $null
+                            }
+                        }
+                        default { throw 'FAKE_QUOTA_SCENARIO_INVALID' }
+                    }
+                }
+                $null = $powerShell.AddScript($queryScript.ToString()).
+                    AddArgument($script:guiQuotaSelfTestScenario)
             }
-            $null = $powerShell.AddScript($queryScript.ToString()).
-                AddArgument($quotaClientModulePath)
+            else {
+                $queryScript = {
+                    param($ClientModulePath)
+                    Import-Module -Name $ClientModulePath -ErrorAction Stop
+                    Get-QiehaoCurrentQuotaSnapshot -TimeoutSeconds 10
+                }
+                $null = $powerShell.AddScript($queryScript.ToString()).
+                    AddArgument($quotaClientModulePath)
+            }
             $script:guiQuotaAsyncPowerShell = $powerShell
             $script:guiQuotaAsyncResult = $powerShell.BeginInvoke()
+            if ($SelfTest -and -not [string]::IsNullOrWhiteSpace(
+                [string]$script:guiQuotaSelfTestScenario
+            )) {
+                $script:guiQuotaSelfTestQueryCount++
+            }
 
             $timer = New-Object System.Windows.Threading.DispatcherTimer
             $timer.Interval = [TimeSpan]::FromMilliseconds(125)
             $tickHandler = [System.EventHandler]({
                 param($sender, $eventArgs)
-                if ($script:guiIsClosing) { return }
-                if ($null -ne $script:guiQuotaAsyncResult -and
-                    $script:guiQuotaAsyncResult.IsCompleted) {
-                    Complete-QiehaoQuotaAsync
+                try {
+                    if ($script:guiIsClosing) {
+                        Stop-QiehaoQuotaAsync -ForClosing
+                        return
+                    }
+                    if ($null -ne $script:guiQuotaAsyncResult -and
+                        $script:guiQuotaAsyncResult.IsCompleted) {
+                        Complete-QiehaoQuotaAsync
+                        return
+                    }
+                    if ($null -ne $script:guiQuotaDeadlineUtc -and
+                        [DateTime]::UtcNow -ge
+                            [DateTime]$script:guiQuotaDeadlineUtc) {
+                        Complete-QiehaoQuotaAsync -HardTimeout
+                    }
                 }
-            }.GetNewClosure())
+                catch {
+                    Stop-QiehaoQuotaAsync
+                    $script:guiQuotaLastQueryFailed = $true
+                    $refreshStatusText.Text =
+                        Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry'
+                    try { Update-QiehaoQuotaRows }
+                    finally { Update-QiehaoActionButtons }
+                }
+            })
             $script:guiQuotaCompletionTimer = $timer
             $script:guiQuotaCompletionTickHandler = $tickHandler
             $timer.Add_Tick($tickHandler)
@@ -1034,8 +1163,9 @@ try {
         }
         catch {
             Stop-QiehaoQuotaAsync
+            $script:guiQuotaLastQueryFailed = $true
             $refreshStatusText.Text =
-                Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedNoCache'
+                Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry'
             return $false
         }
     }
@@ -2395,6 +2525,250 @@ try {
             [string]$profilesGrid.ItemsSource[0].QuotaSummary -cne
                 (Get-QiehaoQuotaUiTextSafe -Key 'NoSnapshot')) {
             throw 'GUI_SELFTEST_NO_CACHE_PRESENTATION_FAILED'
+        }
+        if ($QuotaAsyncLifecycleSelfTest) {
+            $tempBase = [System.IO.Path]::GetFullPath(
+                [System.IO.Path]::GetTempPath()
+            ).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+            $quotaAsyncTestDirectory = [System.IO.Path]::GetFullPath(
+                (Join-Path $tempBase (
+                    'qiehao-quota-async-' +
+                    [Guid]::NewGuid().ToString('N')
+                ))
+            )
+            if (-not $quotaAsyncTestDirectory.StartsWith(
+                $tempBase + [System.IO.Path]::DirectorySeparatorChar,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+                throw 'GUI_QUOTA_ASYNC_TEST_PATH_INVALID'
+            }
+            [System.IO.Directory]::CreateDirectory(
+                $quotaAsyncTestDirectory
+            ) | Out-Null
+            $originalStateDirectory = $stateDirectory
+
+            function Wait-QiehaoQuotaSelfTestUntilIdle {
+                param([int]$TimeoutMilliseconds = 4000)
+                $deadline = [DateTime]::UtcNow.AddMilliseconds(
+                    $TimeoutMilliseconds
+                )
+                while ([bool]$script:guiQuotaCoordinator.QueryInProgress -and
+                    [DateTime]::UtcNow -lt $deadline) {
+                    $frame = New-Object `
+                        System.Windows.Threading.DispatcherFrame
+                    $pumpTimer = New-Object `
+                        System.Windows.Threading.DispatcherTimer
+                    $pumpTimer.Interval =
+                        [TimeSpan]::FromMilliseconds(25)
+                    $pumpHandler = [System.EventHandler]({
+                        param($sender, $eventArgs)
+                        $sender.Stop()
+                        $frame.Continue = $false
+                    }.GetNewClosure())
+                    $pumpTimer.Add_Tick($pumpHandler)
+                    try {
+                        $pumpTimer.Start()
+                        [System.Windows.Threading.Dispatcher]::PushFrame(
+                            $frame
+                        )
+                    }
+                    finally {
+                        $pumpTimer.Remove_Tick($pumpHandler)
+                        $pumpTimer.Stop()
+                    }
+                }
+                return (-not [bool]$script:guiQuotaCoordinator.QueryInProgress)
+            }
+
+            function Reset-QiehaoQuotaSelfTestScenario {
+                param(
+                    [Parameter(Mandatory = $true)][string]$Scenario,
+                    [int]$HardCeilingMilliseconds = 2000
+                )
+                Stop-QiehaoQuotaAsync
+                $script:guiQuotaCoordinator =
+                    New-QiehaoQuotaCoordinatorState
+                $script:guiQuotaCache = New-QiehaoEmptyQuotaCache
+                $script:guiQuotaJustUpdatedProfile = $null
+                $script:guiCurrentActiveProfile = 'Team'
+                $activeProfileText.Text = 'Team'
+                $script:guiIsClosing = $false
+                $script:guiQuotaSelfTestScenario = $Scenario
+                $script:guiQuotaSelfTestQueryCount = 0
+                $script:guiQuotaSelfTestHardCeilingMilliseconds =
+                    $HardCeilingMilliseconds
+                $profileSearchTextBox.Text = ''
+                Update-QiehaoQuotaRows
+                Update-QiehaoActionButtons
+            }
+
+            try {
+                $stateDirectory = $quotaAsyncTestDirectory
+
+                Reset-QiehaoQuotaSelfTestScenario -Scenario 'Success'
+                $successStarted = Start-QiehaoQuotaAsync -Reason Open
+                $successBusyObserved = (
+                    [bool]$script:guiQuotaCoordinator.QueryInProgress -and
+                    -not [bool]$refreshQuotaButton.IsEnabled -and
+                    $refreshStatusText.Text -ceq
+                        (Get-QiehaoQuotaUiTextSafe -Key 'Updating')
+                )
+                $duplicateStartup = Start-QiehaoQuotaAsync -Reason Open
+                $successIdle =
+                    Wait-QiehaoQuotaSelfTestUntilIdle
+                $lateStartup = Start-QiehaoQuotaAsync -Reason Open
+                $successEntry = Get-QiehaoQuotaCacheSnapshot `
+                    -Cache $script:guiQuotaCache -ProfileName 'Team'
+                $successTeamRow = @($script:guiAllProfileRows |
+                    Where-Object { $_.Name -ceq 'Team' })[0]
+                $startupSuccessClearsBusy = (
+                    $successStarted -and $successBusyObserved -and
+                    $successIdle -and
+                    -not [bool]$script:guiQuotaCoordinator.QueryInProgress
+                )
+                $startupSuccessReEnablesRefresh = (
+                    [bool]$refreshQuotaButton.IsEnabled -and
+                    $refreshStatusText.Text -ceq
+                        (Get-QiehaoQuotaUiTextSafe -Key 'Updated')
+                )
+                $startupCompletionTimerStops = (
+                    $script:guiQuotaCompletionTimerStopped -and
+                    $null -eq $script:guiQuotaCompletionTimer
+                )
+                $startupCompletionHandlerRemoved = (
+                    $script:guiQuotaCompletionHandlerRemoved -and
+                    $null -eq $script:guiQuotaCompletionTickHandler
+                )
+                $startupAtMostOneQuery = (
+                    $script:guiQuotaSelfTestQueryCount -eq 1 -and
+                    -not $duplicateStartup -and -not $lateStartup
+                )
+                $startupUsesActiveProfile = (
+                    $null -ne $successEntry -and
+                    [string]$successTeamRow.QuotaSummary -ceq
+                        '5h 35% · Week 15%'
+                )
+
+                Reset-QiehaoQuotaSelfTestScenario -Scenario 'Failure'
+                $failureStarted = Start-QiehaoQuotaAsync -Reason Open
+                $failureIdle = Wait-QiehaoQuotaSelfTestUntilIdle
+                $failureTeamRow = @($script:guiAllProfileRows |
+                    Where-Object { $_.Name -ceq 'Team' })[0]
+                $startupFailureClearsBusy = (
+                    $failureStarted -and $failureIdle -and
+                    -not [bool]$script:guiQuotaCoordinator.QueryInProgress -and
+                    $script:guiQuotaLastQueryFailed
+                )
+                $startupFailureReEnablesRefresh = (
+                    [bool]$refreshQuotaButton.IsEnabled -and
+                    $refreshStatusText.Text -ceq
+                        (Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry') -and
+                    [string]$failureTeamRow.QuotaSummary -ceq
+                        (Get-QiehaoQuotaUiTextSafe -Key 'NoSnapshot')
+                )
+                $queryFailureDoesNotDisableRuntime = (
+                    $script:guiQuotaModulesAvailable -and
+                    $null -eq $script:guiQuotaInitializationFailureCode
+                )
+
+                Reset-QiehaoQuotaSelfTestScenario -Scenario 'Timeout' `
+                    -HardCeilingMilliseconds 250
+                $timeoutStarted = Start-QiehaoQuotaAsync -Reason Open
+                $timeoutIdle = Wait-QiehaoQuotaSelfTestUntilIdle
+                $startupTimeoutClearsBusy = (
+                    $timeoutStarted -and $timeoutIdle -and
+                    -not [bool]$script:guiQuotaCoordinator.QueryInProgress -and
+                    $script:guiQuotaLastQueryFailed -and
+                    [bool]$refreshQuotaButton.IsEnabled -and
+                    $script:guiQuotaCompletionTimerStopped -and
+                    $script:guiQuotaCompletionHandlerRemoved
+                )
+
+                Reset-QiehaoQuotaSelfTestScenario -Scenario 'Throw'
+                $throwStarted = Start-QiehaoQuotaAsync -Reason Open
+                $throwIdle = Wait-QiehaoQuotaSelfTestUntilIdle
+                $asyncCompletionExceptionCleansUp = (
+                    $throwStarted -and $throwIdle -and
+                    $script:guiQuotaEndInvokeAttempted -and
+                    $script:guiQuotaLastQueryFailed -and
+                    -not [bool]$script:guiQuotaCoordinator.QueryInProgress -and
+                    [bool]$refreshQuotaButton.IsEnabled -and
+                    $null -eq $script:guiQuotaAsyncPowerShell -and
+                    $null -eq $script:guiQuotaAsyncResult
+                )
+
+                Reset-QiehaoQuotaSelfTestScenario -Scenario 'Closing' `
+                    -HardCeilingMilliseconds 3000
+                $closingStarted = Start-QiehaoQuotaAsync -Reason Open
+                $closingTimerWasActive = (
+                    $null -ne $script:guiQuotaCompletionTimer -and
+                    $script:guiQuotaCompletionTimer.IsEnabled
+                )
+                $script:guiIsClosing = $true
+                Stop-QiehaoQuotaAsync -ForClosing
+                $guiClosingCleansUp = (
+                    $closingStarted -and $closingTimerWasActive -and
+                    -not [bool]$script:guiQuotaCoordinator.QueryInProgress -and
+                    $script:guiQuotaCompletionTimerStopped -and
+                    $script:guiQuotaCompletionHandlerRemoved -and
+                    $null -eq $script:guiQuotaAsyncPowerShell -and
+                    $null -eq $script:guiQuotaAsyncResult -and
+                    $null -eq $script:guiQuotaDeadlineUtc
+                )
+                $script:guiIsClosing = $false
+                Update-QiehaoActionButtons
+
+                $asyncChecks = [ordered]@{
+                    StartupQuotaSuccessClearsBusy =
+                        $startupSuccessClearsBusy
+                    StartupQuotaFailureClearsBusy =
+                        $startupFailureClearsBusy
+                    StartupQuotaTimeoutClearsBusy =
+                        $startupTimeoutClearsBusy
+                    StartupQuotaCompletionTimerStops =
+                        $startupCompletionTimerStops
+                    StartupQuotaCompletionHandlerRemoved =
+                        $startupCompletionHandlerRemoved
+                    StartupQuotaSuccessReEnablesRefresh =
+                        $startupSuccessReEnablesRefresh
+                    StartupQuotaFailureReEnablesRefresh =
+                        $startupFailureReEnablesRefresh
+                    QueryFailureDoesNotDisableQuotaRuntime =
+                        $queryFailureDoesNotDisableRuntime
+                    AsyncCompletionExceptionStillCleansUp =
+                        $asyncCompletionExceptionCleansUp
+                    GuiClosingDuringQuotaQueryCleansUp =
+                        $guiClosingCleansUp
+                    StartupSendsAtMostOneQuery =
+                        $startupAtMostOneQuery
+                    StartupUsesActiveProfile =
+                        $startupUsesActiveProfile
+                }
+                foreach ($asyncCheck in $asyncChecks.GetEnumerator()) {
+                    if (-not [bool]$asyncCheck.Value) {
+                        throw ('GUI_QUOTA_ASYNC_SELFTEST_FAILED_' +
+                            [string]$asyncCheck.Key)
+                    }
+                    Write-Output ([string]$asyncCheck.Key + '=True')
+                }
+                Write-Output 'QUOTA_ASYNC_LIFECYCLE_SELFTEST_PASS'
+            }
+            finally {
+                $script:guiIsClosing = $false
+                Stop-QiehaoQuotaAsync
+                $script:guiQuotaSelfTestScenario = $null
+                $script:guiQuotaSelfTestHardCeilingMilliseconds = 0
+                $stateDirectory = $originalStateDirectory
+                if ([System.IO.Directory]::Exists(
+                    $quotaAsyncTestDirectory
+                )) {
+                    [System.IO.Directory]::Delete(
+                        $quotaAsyncTestDirectory,
+                        $true
+                    )
+                }
+            }
+            return
         }
         $profileSearchTextBox.Text = 'team'
         Update-QiehaoProfileFilter
