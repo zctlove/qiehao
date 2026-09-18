@@ -45,6 +45,20 @@
         <SolidColorBrush x:Key="CurrentYesBrush" Color="#FF72E6A6" />
         <SolidColorBrush x:Key="CurrentNoBrush" Color="#FFFFC56B" />
         <SolidColorBrush x:Key="AccentBrush" Color="#FF5CC58A" />
+        <SolidColorBrush x:Key="DialogBackgroundBrush" Color="#FF233B55" />
+        <LinearGradientBrush x:Key="DialogCardBrush" StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Color="#96394E66" Offset="0" />
+            <GradientStop Color="#8A1D3046" Offset="1" />
+        </LinearGradientBrush>
+        <SolidColorBrush x:Key="DialogBorderBrush" Color="#FF7EC8FF" />
+        <SolidColorBrush x:Key="DialogForegroundBrush" Color="#FFF4F8FC" />
+        <SolidColorBrush x:Key="DialogSecondaryBrush" Color="#FFD0DCE8" />
+        <SolidColorBrush x:Key="DialogAccentBrush" Color="#FF7EC8FF" />
+        <SolidColorBrush x:Key="DialogWarningBrush" Color="#FFFFAAA4" />
+        <SolidColorBrush x:Key="DialogSuccessBrush" Color="#FF72E6A6" />
+        <SolidColorBrush x:Key="DialogButtonBackgroundBrush" Color="#FFF7FBFF" />
+        <SolidColorBrush x:Key="DialogButtonForegroundBrush" Color="#FF233B55" />
+        <SolidColorBrush x:Key="DialogButtonBorderBrush" Color="#FF7EC8FF" />
         <SolidColorBrush x:Key="GridBackgroundBrush" Color="#4AFFFFFF" />
         <SolidColorBrush x:Key="GridRowBrush" Color="#34FFFFFF" />
         <SolidColorBrush x:Key="GridAltRowBrush" Color="#22FFFFFF" />

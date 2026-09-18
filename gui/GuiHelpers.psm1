@@ -481,6 +481,66 @@ function Invoke-QiehaoOperationProvider {
     return $mapped
 }
 
+function Invoke-QiehaoSwitchUiCompletion {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Result,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$TargetProfile,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$RefreshProvider,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$StateProvider,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$BusyProvider
+    )
+
+    $backendSucceeded = (
+        [bool]$Result.IsSuccess -and
+        [string]$Result.ResultCode -ceq 'SWITCH_SUCCESS'
+    )
+    if (-not $backendSucceeded) {
+        try { $null = & $BusyProvider $false }
+        catch { }
+        try { $null = & $StateProvider 'SwitchFailed' $TargetProfile }
+        catch { }
+        return [pscustomobject]@{
+            State = 'SwitchFailed'
+            BackendSucceeded = $false
+            UiRefreshSucceeded = $false
+            TargetProfile = $TargetProfile
+        }
+    }
+
+    $refreshSucceeded = $false
+    try { $refreshSucceeded = [bool](& $RefreshProvider $TargetProfile) }
+    catch { $refreshSucceeded = $false }
+
+    try { $null = & $BusyProvider $false }
+    catch { }
+    $state = if ($refreshSucceeded) {
+        'SwitchSucceeded'
+    }
+    else {
+        'SwitchSucceededUiRefreshFailed'
+    }
+    try { $null = & $StateProvider $state $TargetProfile }
+    catch { }
+
+    return [pscustomobject]@{
+        State = $state
+        BackendSucceeded = $true
+        UiRefreshSucceeded = $refreshSucceeded
+        TargetProfile = $TargetProfile
+    }
+}
+
 function Select-QiehaoProfileRows {
     [CmdletBinding()]
     param(
@@ -948,6 +1008,29 @@ function Get-QiehaoBackgroundThemes {
             DangerBottom = '#EADDB5BB'
         }
     )
+}
+
+function Get-QiehaoSwitchDialogPalette {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Theme
+    )
+
+    return [pscustomobject]@{
+        Background = [string]$Theme.ColumnHeaderBackgroundTint
+        CardTop = [string]$Theme.CardTop
+        CardBottom = [string]$Theme.CardBottom
+        Border = [string]$Theme.ActiveBorderTint
+        Foreground = [string]$Theme.TextPrimary
+        Secondary = [string]$Theme.TextSecondary
+        Accent = [string]$Theme.ActiveBorderTint
+        Warning = [string]$Theme.RunningWarningTint
+        Success = [string]$Theme.CurrentYesTint
+        ButtonBackground = [string]$Theme.ColumnHeaderForegroundTint
+        ButtonForeground = [string]$Theme.ColumnHeaderBackgroundTint
+        ButtonBorder = [string]$Theme.ActiveBorderTint
+    }
 }
 
 function Get-QiehaoBackgroundTheme {
@@ -1730,6 +1813,7 @@ Export-ModuleMember -Function @(
     'Invoke-QiehaoVerifyRequest',
     'ConvertTo-QiehaoOperationResult',
     'Invoke-QiehaoOperationProvider',
+    'Invoke-QiehaoSwitchUiCompletion',
     'Select-QiehaoProfileRows',
     'Get-QiehaoActionState',
     'Invoke-QiehaoSwitchRequest',
@@ -1737,6 +1821,7 @@ Export-ModuleMember -Function @(
     'Get-QiehaoGuiSnapshot',
     'Get-QiehaoBackgroundThemes',
     'Get-QiehaoBackgroundTheme',
+    'Get-QiehaoSwitchDialogPalette',
     'Resolve-QiehaoProjectStateDirectory',
     'Invoke-QiehaoExitButtonAction',
     'Stop-QiehaoDispatcherTimer',

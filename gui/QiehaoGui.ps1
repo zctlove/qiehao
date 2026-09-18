@@ -131,6 +131,8 @@ try {
     $script:guiManualSwitchWaitCancelButton = $null
     $script:guiManualSwitchWaitOutcome = 'Idle'
     $script:guiManualSwitchResult = $null
+    $script:guiManualSwitchPresentation = $null
+    $script:guiSwitchUiState = 'Idle'
     $script:guiManualSwitchWaitInternalClose = $false
     $script:guiLaunchTarget = $null
     $script:guiLaunchSettings = $null
@@ -375,6 +377,7 @@ try {
 
     function Set-QiehaoThemeResources {
         param([Parameter(Mandatory = $true)][object]$Theme)
+        $dialogPalette = Get-QiehaoSwitchDialogPalette -Theme $Theme
         $values = [ordered]@{
             PanelBrush = New-QiehaoGradientBrush -Top ([string]$Theme.CardTop) `
                 -Bottom ([string]$Theme.CardBottom)
@@ -407,6 +410,29 @@ try {
             CurrentNoBrush = New-QiehaoSolidBrush `
                 -Color ([string]$Theme.CurrentNoTint)
             AccentBrush = New-QiehaoSolidBrush -Color ([string]$Theme.AccentTint)
+            DialogBackgroundBrush = New-QiehaoSolidBrush `
+                -Color ([string]$dialogPalette.Background)
+            DialogCardBrush = New-QiehaoGradientBrush `
+                -Top ([string]$dialogPalette.CardTop) `
+                -Bottom ([string]$dialogPalette.CardBottom)
+            DialogBorderBrush = New-QiehaoSolidBrush `
+                -Color ([string]$dialogPalette.Border)
+            DialogForegroundBrush = New-QiehaoSolidBrush `
+                -Color ([string]$dialogPalette.Foreground)
+            DialogSecondaryBrush = New-QiehaoSolidBrush `
+                -Color ([string]$dialogPalette.Secondary)
+            DialogAccentBrush = New-QiehaoSolidBrush `
+                -Color ([string]$dialogPalette.Accent)
+            DialogWarningBrush = New-QiehaoSolidBrush `
+                -Color ([string]$dialogPalette.Warning)
+            DialogSuccessBrush = New-QiehaoSolidBrush `
+                -Color ([string]$dialogPalette.Success)
+            DialogButtonBackgroundBrush = New-QiehaoSolidBrush `
+                -Color ([string]$dialogPalette.ButtonBackground)
+            DialogButtonForegroundBrush = New-QiehaoSolidBrush `
+                -Color ([string]$dialogPalette.ButtonForeground)
+            DialogButtonBorderBrush = New-QiehaoSolidBrush `
+                -Color ([string]$dialogPalette.ButtonBorder)
             ButtonDisabledBrush = New-QiehaoSolidBrush -Color $(
                 if ([string]$Theme.OverlayMode -ceq 'Dark') { '#705B6472' }
                 else { '#70AAB5BE' }
@@ -507,6 +533,11 @@ try {
     }
 
     function Invoke-QiehaoReadOnlyRefresh {
+        param(
+            [string]$ExpectedActiveProfile = '',
+            [switch]$PassThru
+        )
+        $refreshSucceeded = $false
         try {
             $snapshot = Get-QiehaoGuiSnapshot `
                 -ListProvider { @(Get-CodexAccountSlot) } `
@@ -514,6 +545,16 @@ try {
                 -ProcessProvider { Test-CodexProcessesStopped } `
                 -ActiveIdentityProvider { Test-CodexActiveIdentity }
             Set-QiehaoSnapshot -Snapshot $snapshot
+            $refreshSucceeded = (
+                @($snapshot.ReadOnlyErrors).Count -eq 0 -and
+                (
+                    [string]::IsNullOrWhiteSpace($ExpectedActiveProfile) -or
+                    ([string]$script:guiCurrentActiveProfile).Equals(
+                        $ExpectedActiveProfile,
+                        [StringComparison]::OrdinalIgnoreCase
+                    )
+                )
+            )
         }
         catch {
             $refreshStatusText.Text = '只读刷新失败'
@@ -521,6 +562,43 @@ try {
             $script:guiCurrentCodexStatus = '未知'
             $identityStatusText.Text = '无法确认'
             Update-QiehaoActionButtons
+        }
+        if ($PassThru) { return $refreshSucceeded }
+    }
+
+    function Set-QiehaoSwitchUiState {
+        param(
+            [Parameter(Mandatory = $true)]
+            [ValidateSet(
+                'Idle', 'WaitingForCodexExit', 'Switching',
+                'SwitchSucceeded', 'SwitchSucceededUiRefreshFailed',
+                'SwitchFailed', 'Cancelled', 'Unknown', 'TimedOut', 'Closing'
+            )]
+            [string]$State,
+            [string]$TargetProfile = ''
+        )
+        $script:guiSwitchUiState = $State
+        switch ($State) {
+            'WaitingForCodexExit' {
+                $refreshStatusText.Text =
+                    "正在等待 Codex 安全退出，随后自动切换到 '$TargetProfile'……"
+            }
+            'Switching' {
+                $refreshStatusText.Text =
+                    "已检测到 Codex 完全退出，正在切换到 '$TargetProfile'……"
+            }
+            'SwitchSucceeded' {
+                $refreshStatusText.Text = "切换成功，当前账号：$TargetProfile"
+            }
+            'SwitchSucceededUiRefreshFailed' {
+                $refreshStatusText.Text =
+                    '账号切换已经成功，但界面状态刷新失败。请点击“刷新”重新读取当前状态。'
+            }
+            'SwitchFailed' { $refreshStatusText.Text = '账号切换未完成' }
+            'Cancelled' { $refreshStatusText.Text = '已取消等待，本次未切换账号' }
+            'Unknown' { $refreshStatusText.Text = '进程状态未知，本次未切换账号' }
+            'TimedOut' { $refreshStatusText.Text = '等待超时，本次未切换账号' }
+            'Closing' { $refreshStatusText.Text = '切换等待已停止' }
         }
     }
 
@@ -659,6 +737,8 @@ try {
         $script:guiManualSwitchWaitCancelButton = $null
         $script:guiManualSwitchWaitOutcome = 'Closing'
         $script:guiManualSwitchResult = $null
+        $script:guiManualSwitchPresentation = $null
+        $script:guiSwitchUiState = 'Closing'
         $script:guiIsWriteOperationBusy = $false
         if ($hadActiveWait) {
             try { $refreshStatusText.Text = '切换等待已停止' }
@@ -1006,13 +1086,13 @@ try {
             -not $script:guiIsClosing -and
             -not [string]::IsNullOrWhiteSpace($targetProfile)) {
             Set-QiehaoCodexStatusVisual -Status '已退出'
-            $refreshStatusText.Text =
-                "已检测到 Codex 完全退出，正在切换到 '$targetProfile'……"
+            Set-QiehaoSwitchUiState -State 'Switching' `
+                -TargetProfile $targetProfile
             if ($null -ne $script:guiManualSwitchWaitStatusText) {
                 $script:guiManualSwitchWaitStatusText.Text =
                     '已检测到 Codex 完全退出，正在切换账号……'
                 $script:guiManualSwitchWaitStatusText.Foreground =
-                    $window.Resources['CurrentYesBrush']
+                    $window.Resources['DialogSuccessBrush']
             }
             if ($null -ne $script:guiManualSwitchWaitCancelButton) {
                 $script:guiManualSwitchWaitCancelButton.IsEnabled = $false
@@ -1027,7 +1107,12 @@ try {
                     $script:guiManualSwitchResult =
                         ConvertTo-QiehaoOperationResult -ResultCode 'SWITCH_FAILED'
                 }
-                $script:guiManualSwitchWaitOutcome = 'SwitchCompleted'
+                $script:guiManualSwitchPresentation =
+                    Complete-QiehaoSwitchUiAfterBackend `
+                        -Result $script:guiManualSwitchResult `
+                        -TargetProfile $capturedTarget
+                $script:guiManualSwitchWaitOutcome =
+                    [string]$script:guiManualSwitchPresentation.State
                 Close-QiehaoManualSwitchWaitDialog
             }.GetNewClosure())
             try {
@@ -1039,7 +1124,12 @@ try {
             catch {
                 $script:guiManualSwitchResult =
                     ConvertTo-QiehaoOperationResult -ResultCode 'SWITCH_FAILED'
-                $script:guiManualSwitchWaitOutcome = 'SwitchCompleted'
+                $script:guiManualSwitchPresentation =
+                    Complete-QiehaoSwitchUiAfterBackend `
+                        -Result $script:guiManualSwitchResult `
+                        -TargetProfile $capturedTarget
+                $script:guiManualSwitchWaitOutcome =
+                    [string]$script:guiManualSwitchPresentation.State
                 Close-QiehaoManualSwitchWaitDialog
             }
             return
@@ -1052,6 +1142,13 @@ try {
             'Closing' { 'Closing' }
             default { 'Unknown' }
         }
+        $nonSwitchState = switch ($script:guiManualSwitchWaitOutcome) {
+            'TimedOut' { 'TimedOut' }
+            'Cancelled' { 'Cancelled' }
+            'Closing' { 'Closing' }
+            default { 'Unknown' }
+        }
+        Set-QiehaoSwitchUiState -State $nonSwitchState
         if (-not $DialogAlreadyClosing) {
             Close-QiehaoManualSwitchWaitDialog
         }
@@ -1115,21 +1212,33 @@ try {
 
         $dialog = New-Object System.Windows.Window
         $dialog.Title = '切换账号'
-        $dialog.Width = 500
-        $dialog.Height = 285
-        $dialog.MinWidth = 440
-        $dialog.MinHeight = 250
+        $dialog.Width = 540
+        $dialog.Height = 340
+        $dialog.MinWidth = 480
+        $dialog.MinHeight = 310
         $dialog.WindowStartupLocation = 'CenterOwner'
         $dialog.ResizeMode = 'NoResize'
         $dialog.ShowInTaskbar = $false
         $dialog.Owner = $window
         $dialog.FontFamily = $window.FontFamily
         $dialog.FontSize = $window.FontSize
-        $dialog.Background = $window.Resources['PanelBrush']
-        $dialog.Foreground = $window.Resources['TextPrimaryBrush']
+        foreach ($resourceKey in @(
+            'DialogBackgroundBrush', 'DialogCardBrush', 'DialogBorderBrush',
+            'DialogForegroundBrush', 'DialogSecondaryBrush',
+            'DialogAccentBrush', 'DialogWarningBrush', 'DialogSuccessBrush',
+            'DialogButtonBackgroundBrush', 'DialogButtonForegroundBrush',
+            'DialogButtonBorderBrush', 'TextPrimaryBrush',
+            'TextSecondaryBrush', 'ButtonFaceBrush', 'ButtonHoverBrush',
+            'ButtonPressedBrush', 'ButtonDisabledBrush', 'PanelBorderBrush',
+            'AccentBrush'
+        )) {
+            $dialog.Resources[$resourceKey] = $window.Resources[$resourceKey]
+        }
+        $dialog.Background = $dialog.Resources['DialogBackgroundBrush']
+        $dialog.Foreground = $dialog.Resources['DialogForegroundBrush']
 
         $root = New-Object System.Windows.Controls.Grid
-        $root.Margin = 20
+        $root.Margin = 0
         foreach ($height in @('Auto', '14', '*', '16', 'Auto')) {
             $row = New-Object System.Windows.Controls.RowDefinition
             $row.Height = $height
@@ -1137,26 +1246,37 @@ try {
         }
         $targetText = New-Object System.Windows.Controls.TextBlock
         $targetText.Text = "目标账号：$TargetProfile"
-        $targetText.FontSize = 16
-        $targetText.FontWeight = 'SemiBold'
-        $targetText.Foreground = $window.Resources['TextPrimaryBrush']
+        $targetText.FontSize = 17
+        $targetText.FontWeight = 'Bold'
+        $targetText.Foreground = $dialog.Resources['DialogAccentBrush']
         [System.Windows.Controls.Grid]::SetRow($targetText, 0)
         $root.Children.Add($targetText) | Out-Null
 
+        $instructionsPanel = New-Object System.Windows.Controls.StackPanel
+        $instructionsPanel.Orientation = 'Vertical'
+        $instructionHeading = New-Object System.Windows.Controls.TextBlock
+        $instructionHeading.Text = '请在 Codex 中安全退出'
+        $instructionHeading.FontSize = 16
+        $instructionHeading.FontWeight = 'Bold'
+        $instructionHeading.Foreground =
+            $dialog.Resources['DialogForegroundBrush']
+        $instructionHeading.Margin = '0,0,0,10'
         $instructionsText = New-Object System.Windows.Controls.TextBlock
         $instructionsText.Text =
-            "请在 Codex 中选择：`n「文件 → 退出」`n`n" +
-            "或从系统托盘选择：`n「Quit Codex」`n`n" +
+            "「文件 → 退出」`n或`n系统托盘 →「Quit Codex」`n`n" +
             '检测到完全退出后，本工具将自动继续切换。'
         $instructionsText.TextWrapping = 'Wrap'
-        $instructionsText.Foreground = $window.Resources['TextPrimaryBrush']
-        [System.Windows.Controls.Grid]::SetRow($instructionsText, 2)
-        $root.Children.Add($instructionsText) | Out-Null
+        $instructionsText.Foreground = $dialog.Resources['DialogForegroundBrush']
+        $instructionsPanel.Children.Add($instructionHeading) | Out-Null
+        $instructionsPanel.Children.Add($instructionsText) | Out-Null
+        [System.Windows.Controls.Grid]::SetRow($instructionsPanel, 2)
+        $root.Children.Add($instructionsPanel) | Out-Null
 
         $statusText = New-Object System.Windows.Controls.TextBlock
         $statusText.Text = '正在等待 Codex 安全退出……'
-        $statusText.FontWeight = 'SemiBold'
-        $statusText.Foreground = $window.Resources['RunningWarningBrush']
+        $statusText.FontWeight = 'Bold'
+        $statusText.Foreground = $dialog.Resources['DialogWarningBrush']
+        $statusText.VerticalAlignment = 'Center'
         $cancelButton = New-Object System.Windows.Controls.Button
         $cancelButton.Content = '取消'
         $cancelButton.MinWidth = 90
@@ -1165,6 +1285,12 @@ try {
         $cancelButton.VerticalAlignment = 'Bottom'
         $cancelButton.IsCancel = $false
         $cancelButton.Margin = '0,0,0,0'
+        $cancelButton.Style = $window.Resources['PrimaryButtonStyle']
+        $cancelButton.Background =
+            $dialog.Resources['DialogButtonBackgroundBrush']
+        $cancelButton.Foreground =
+            $dialog.Resources['DialogButtonForegroundBrush']
+        $cancelButton.BorderBrush = $dialog.Resources['DialogButtonBorderBrush']
 
         $footer = New-Object System.Windows.Controls.Grid
         $footer.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
@@ -1178,7 +1304,21 @@ try {
         [System.Windows.Controls.Grid]::SetRow($footer, 4)
         $root.Children.Add($footer) | Out-Null
 
-        $dialog.Content = $root
+        $card = New-Object System.Windows.Controls.Border
+        $card.Background = $dialog.Resources['DialogCardBrush']
+        $card.BorderBrush = $dialog.Resources['DialogBorderBrush']
+        $card.BorderThickness = 1
+        $card.CornerRadius = 14
+        $card.Padding = 20
+        $card.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect
+        $card.Effect.BlurRadius = 18
+        $card.Effect.ShadowDepth = 4
+        $card.Effect.Opacity = 0.28
+        $card.Child = $root
+        $dialogShell = New-Object System.Windows.Controls.Grid
+        $dialogShell.Margin = 18
+        $dialogShell.Children.Add($card) | Out-Null
+        $dialog.Content = $dialogShell
         $script:guiManualSwitchWaitDialog = $dialog
         $script:guiManualSwitchWaitStatusText = $statusText
         $script:guiManualSwitchWaitCancelButton = $cancelButton
@@ -1199,9 +1339,12 @@ try {
         $script:guiManualSwitchWaitInProgress = $true
         $script:guiManualSwitchWaitOutcome = 'Waiting'
         $script:guiManualSwitchResult = $null
+        $script:guiManualSwitchPresentation = $null
         $script:guiManualSwitchWaitInternalClose = $false
         Set-QiehaoWriteBusy -Value $true `
             -StatusText "正在等待 Codex 安全退出，随后自动切换到 '$TargetProfile'……"
+        Set-QiehaoSwitchUiState -State 'WaitingForCodexExit' `
+            -TargetProfile $TargetProfile
         Stop-QiehaoProcessMonitor
 
         try { [void]$dialog.ShowDialog() }
@@ -1218,18 +1361,31 @@ try {
 
         $outcome = $script:guiManualSwitchWaitOutcome
         $switchResult = $script:guiManualSwitchResult
+        $switchPresentation = $script:guiManualSwitchPresentation
         $script:guiManualSwitchWaitDialog = $null
         $script:guiManualSwitchWaitStatusText = $null
         $script:guiManualSwitchWaitCancelButton = $null
         $script:guiManualSwitchWaitInternalClose = $false
         $script:guiManualSwitchResult = $null
+        $script:guiManualSwitchPresentation = $null
         if ($script:guiIsClosing) { return }
 
         Start-QiehaoProcessMonitor
         Set-QiehaoWriteBusy -Value $false
         switch ($outcome) {
-            'SwitchCompleted' {
-                Show-QiehaoSwitchResult -Result $switchResult `
+            'SwitchSucceeded' {
+                Show-QiehaoSwitchCompletionMessage -Result $switchResult `
+                    -Presentation $switchPresentation `
+                    -TargetProfile $TargetProfile
+            }
+            'SwitchSucceededUiRefreshFailed' {
+                Show-QiehaoSwitchCompletionMessage -Result $switchResult `
+                    -Presentation $switchPresentation `
+                    -TargetProfile $TargetProfile
+            }
+            'SwitchFailed' {
+                Show-QiehaoSwitchCompletionMessage -Result $switchResult `
+                    -Presentation $switchPresentation `
                     -TargetProfile $TargetProfile
             }
             'TimedOut' {
@@ -1245,10 +1401,76 @@ try {
                     -Severity Warning
             }
             'Cancelled' {
-                $refreshStatusText.Text = '已取消等待，本次未切换账号'
+                Set-QiehaoSwitchUiState -State 'Cancelled'
             }
         }
         Update-QiehaoActionButtons
+    }
+
+    function Complete-QiehaoSwitchUiAfterBackend {
+        param(
+            [Parameter(Mandatory = $true)][object]$Result,
+            [Parameter(Mandatory = $true)][string]$TargetProfile
+        )
+        try {
+            return Invoke-QiehaoSwitchUiCompletion -Result $Result `
+                -TargetProfile $TargetProfile `
+                -RefreshProvider {
+                    param($ExpectedProfile)
+                    return [bool](Invoke-QiehaoReadOnlyRefresh `
+                        -ExpectedActiveProfile $ExpectedProfile -PassThru)
+                } `
+                -BusyProvider {
+                    param($IsBusy)
+                    Set-QiehaoWriteBusy -Value ([bool]$IsBusy)
+                } `
+                -StateProvider {
+                    param($State, $Profile)
+                    Set-QiehaoSwitchUiState -State $State `
+                        -TargetProfile $Profile
+                }
+        }
+        catch {
+            $backendSucceeded = (
+                [bool]$Result.IsSuccess -and
+                [string]$Result.ResultCode -ceq 'SWITCH_SUCCESS'
+            )
+            Set-QiehaoWriteBusy -Value $false
+            $fallbackState = if ($backendSucceeded) {
+                'SwitchSucceededUiRefreshFailed'
+            }
+            else {
+                'SwitchFailed'
+            }
+            Set-QiehaoSwitchUiState -State $fallbackState `
+                -TargetProfile $TargetProfile
+            return [pscustomobject]@{
+                State = $fallbackState
+                BackendSucceeded = $backendSucceeded
+                UiRefreshSucceeded = $false
+                TargetProfile = $TargetProfile
+            }
+        }
+    }
+
+    function Show-QiehaoSwitchCompletionMessage {
+        param(
+            [Parameter(Mandatory = $true)][object]$Result,
+            [Parameter(Mandatory = $true)][object]$Presentation,
+            [Parameter(Mandatory = $true)][string]$TargetProfile
+        )
+        switch ([string]$Presentation.State) {
+            'SwitchSucceeded' {
+                Show-QiehaoSafeMessage `
+                    -Message "切换成功。`n`n当前账号：$TargetProfile"
+            }
+            'SwitchSucceededUiRefreshFailed' {
+                Show-QiehaoSafeMessage `
+                    -Message '账号切换已经成功，但界面状态刷新失败。请点击“刷新”重新读取当前状态。' `
+                    -Severity Warning
+            }
+            default { Show-QiehaoOperationResult -Result $Result }
+        }
     }
 
     function Show-QiehaoSwitchResult {
@@ -1256,14 +1478,10 @@ try {
             [Parameter(Mandatory = $true)][object]$Result,
             [Parameter(Mandatory = $true)][string]$TargetProfile
         )
-        if ([bool]$Result.RefreshRequired) { Invoke-QiehaoReadOnlyRefresh }
-        if ([bool]$Result.IsSuccess -and
-            [string]$Result.ResultCode -ceq 'SWITCH_SUCCESS') {
-            Show-QiehaoSafeMessage `
-                -Message "切换成功。`n`n当前账号：$TargetProfile"
-            return
-        }
-        Show-QiehaoOperationResult -Result $Result
+        $presentation = Complete-QiehaoSwitchUiAfterBackend `
+            -Result $Result -TargetProfile $TargetProfile
+        Show-QiehaoSwitchCompletionMessage -Result $Result `
+            -Presentation $presentation -TargetProfile $TargetProfile
     }
 
     function Invoke-QiehaoSwitchCore {

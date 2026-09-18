@@ -1,6 +1,7 @@
 ﻿[CmdletBinding()]
 param(
-    [switch]$XamlOnly
+    [switch]$XamlOnly,
+    [switch]$ModalLifecycleOnly
 )
 
 Set-StrictMode -Version 2.0
@@ -125,6 +126,189 @@ if ($XamlOnly) {
     return
 }
 
+if ($ModalLifecycleOnly) {
+    Add-Type -AssemblyName PresentationCore -ErrorAction Stop
+    Add-Type -AssemblyName PresentationFramework -ErrorAction Stop
+    Add-Type -AssemblyName WindowsBase -ErrorAction Stop
+    Import-Module -Name $helperModulePath -Force -ErrorAction Stop
+
+    $modalState = [pscustomobject]@{
+        Busy = $true
+        UiState = 'WaitingForCodexExit'
+        ActiveProfile = 'Plus'
+        PlusCurrent = '是'
+        PlusActive = $true
+        TeamCurrent = '否'
+        TeamActive = $false
+        SwitchCalls = 0
+        RefreshCalls = 0
+        LaunchCalls = 0
+        MainTimerCalls = 0
+        NotificationPreconditions = $false
+        HandlerRemoved = $false
+        TickHandler = $null
+        TickCount = 0
+        CallbackError = ''
+        Order = @()
+        Presentation = $null
+    }
+    $dialog = New-Object System.Windows.Window
+    $dialog.Width = 1
+    $dialog.Height = 1
+    $dialog.WindowStyle = 'None'
+    $dialog.ShowInTaskbar = $false
+    $dialog.Opacity = 0
+    $timer = New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromMilliseconds(15)
+    $tickHandler = [System.EventHandler]({
+        param($sender, $eventArgs)
+        try {
+            $modalState.TickCount++
+            if ($modalState.TickCount -eq 1) {
+                $modalState.Order += 'Running'
+                return
+            }
+            $sender.Stop()
+            $sender.Remove_Tick($modalState.TickHandler)
+            $modalState.HandlerRemoved = $true
+            $modalState.SwitchCalls++
+            $modalState.Order += 'Switch'
+            $backendResult = ConvertTo-QiehaoOperationResult `
+                -ResultCode 'SWITCH_SUCCESS'
+            $modalState.Presentation = Invoke-QiehaoSwitchUiCompletion `
+                -Result $backendResult -TargetProfile 'Team' `
+                -RefreshProvider ({
+                    param($Target)
+                    $modalState.RefreshCalls++
+                    $modalState.ActiveProfile = $Target
+                    $modalState.PlusCurrent = '否'
+                    $modalState.PlusActive = $false
+                    $modalState.TeamCurrent = '是'
+                    $modalState.TeamActive = $true
+                    $modalState.Order += 'Refresh'
+                    return $true
+                }.GetNewClosure()) `
+                -BusyProvider ({
+                    param($Value)
+                    $modalState.Busy = [bool]$Value
+                    $modalState.Order += 'BusyFalse'
+                }.GetNewClosure()) `
+                -StateProvider ({
+                    param($State, $Target)
+                    $modalState.UiState = $State
+                    $modalState.Order += ('State:' + $State)
+                }.GetNewClosure())
+            $modalState.NotificationPreconditions = (
+                $modalState.RefreshCalls -eq 1 -and
+                $modalState.ActiveProfile -ceq 'Team' -and
+                $modalState.TeamCurrent -ceq '是' -and $modalState.TeamActive -and
+                $modalState.PlusCurrent -ceq '否' -and
+                -not $modalState.PlusActive -and
+                $modalState.UiState -ceq 'SwitchSucceeded' -and
+                -not $modalState.Busy
+            )
+            $dialog.Close()
+        }
+        catch {
+            $modalState.CallbackError =
+                $_.Exception.GetType().FullName + ':' + $_.Exception.Message
+            try { $sender.Stop() }
+            catch { }
+            try { $sender.Remove_Tick($modalState.TickHandler) }
+            catch { }
+            try { $dialog.Close() }
+            catch { }
+        }
+    }.GetNewClosure())
+    $modalState.TickHandler = $tickHandler
+    $dialog.Tag = [pscustomobject]@{
+        Timer = $timer
+        TickHandler = $tickHandler
+    }
+    $loadedHandler = [System.Windows.RoutedEventHandler]{
+        param($sender, $eventArgs)
+        $sender.Tag.Timer.Add_Tick($sender.Tag.TickHandler)
+        $sender.Tag.Timer.Start()
+    }
+    $dialog.Add_Loaded($loadedHandler)
+    $fallbackTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $fallbackTimer.Interval = [TimeSpan]::FromSeconds(2)
+    $fallbackHandler = [System.EventHandler]({
+        param($sender, $eventArgs)
+        $sender.Stop()
+        if ([string]::IsNullOrWhiteSpace($modalState.CallbackError)) {
+            $modalState.CallbackError = 'MODAL_TEST_TIMEOUT'
+        }
+        $dialog.Close()
+    }.GetNewClosure())
+    $fallbackTimer.Add_Tick($fallbackHandler)
+    try {
+        $fallbackTimer.Start()
+        [void]$dialog.ShowDialog()
+    }
+    finally {
+        $fallbackTimer.Stop()
+        try { $fallbackTimer.Remove_Tick($fallbackHandler) }
+        catch { }
+        $timer.Stop()
+        try { $timer.Remove_Tick($tickHandler) }
+        catch { }
+        try { $dialog.Remove_Loaded($loadedHandler) }
+        catch { }
+    }
+    $modalState.Order += 'WindowClosed'
+    if (-not [string]::IsNullOrWhiteSpace($modalState.CallbackError)) {
+        throw ('GUI_MODAL_CALLBACK_FAILED:' + $modalState.CallbackError)
+    }
+    if ($modalState.NotificationPreconditions) {
+        $modalState.Order += 'Success'
+    }
+    Assert-GuiTest -Condition (
+        $modalState.SwitchCalls -eq 1 -and
+        $modalState.RefreshCalls -eq 1 -and
+        $modalState.LaunchCalls -eq 0 -and
+        $modalState.MainTimerCalls -eq 0 -and
+        $modalState.NotificationPreconditions -and
+        $modalState.HandlerRemoved -and -not $timer.IsEnabled -and
+        $modalState.Presentation.State -ceq 'SwitchSucceeded' -and
+        (@($modalState.Order) -join '|') -ceq
+            'Running|Switch|Refresh|BusyFalse|State:SwitchSucceeded|WindowClosed|Success'
+    ) -Code 'GUI_MODAL_SWITCH_REFRESH_ORDER_FAILED'
+
+    $failureState = [pscustomobject]@{
+        Busy = $true; UiState = 'Switching'; SwitchCalls = 1
+        RefreshCalls = 0; RollbackCalls = 0
+    }
+    $failureResult = ConvertTo-QiehaoOperationResult `
+        -ResultCode 'SWITCH_SUCCESS'
+    $failurePresentation = Invoke-QiehaoSwitchUiCompletion `
+        -Result $failureResult -TargetProfile 'Team' `
+        -RefreshProvider ({
+            param($Target)
+            $failureState.RefreshCalls++
+            throw 'FAKE_UI_REFRESH_FAILURE'
+        }.GetNewClosure()) `
+        -BusyProvider ({
+            param($Value)
+            $failureState.Busy = [bool]$Value
+        }.GetNewClosure()) `
+        -StateProvider ({
+            param($State, $Target)
+            $failureState.UiState = $State
+        }.GetNewClosure())
+    Assert-GuiTest -Condition (
+        $failureState.SwitchCalls -eq 1 -and
+        $failureState.RefreshCalls -eq 1 -and
+        $failureState.RollbackCalls -eq 0 -and
+        -not $failureState.Busy -and
+        $failureState.UiState -ceq 'SwitchSucceededUiRefreshFailed' -and
+        $failurePresentation.BackendSucceeded -and
+        -not $failurePresentation.UiRefreshSucceeded
+    ) -Code 'GUI_BACKEND_SUCCESS_REFRESH_FAILURE_NOT_DISTINGUISHED'
+    Write-Output 'MODAL_SWITCH_LIFECYCLE_PASS'
+    return
+}
+
 Import-Module -Name $helperModulePath -Force -ErrorAction Stop
 Import-Module -Name $coreModulePath -Force -ErrorAction Stop
 
@@ -233,6 +417,22 @@ Assert-GuiTest -Condition (
     $ps7Xaml.Output -ccontains 'XAML_PARSE_PASS'
 ) -Code 'GUI_POWERSHELL_7_XAML_PARSE_FAILED'
 
+$ps51ModalLifecycle = Invoke-PowerShellFileTest `
+    -HostPath $ps51Command.Source -ScriptPath $PSCommandPath `
+    -AdditionalArguments @('-ModalLifecycleOnly')
+Assert-GuiTest -Condition (
+    $ps51ModalLifecycle.ExitCode -eq 0 -and
+    $ps51ModalLifecycle.Output -ccontains 'MODAL_SWITCH_LIFECYCLE_PASS'
+) -Code 'GUI_POWERSHELL_51_MODAL_SWITCH_LIFECYCLE_FAILED'
+
+$ps7ModalLifecycle = Invoke-PowerShellFileTest `
+    -HostPath $ps7Command.Source -ScriptPath $PSCommandPath `
+    -AdditionalArguments @('-ModalLifecycleOnly')
+Assert-GuiTest -Condition (
+    $ps7ModalLifecycle.ExitCode -eq 0 -and
+    $ps7ModalLifecycle.Output -ccontains 'MODAL_SWITCH_LIFECYCLE_PASS'
+) -Code 'GUI_POWERSHELL_7_MODAL_SWITCH_LIFECYCLE_FAILED'
+
 $guiStartup51 = Invoke-PowerShellFileTest -HostPath $ps51Command.Source `
     -ScriptPath $guiScriptPath -AdditionalArguments @('-SelfTest')
 Assert-GuiTest -Condition (
@@ -290,6 +490,29 @@ foreach ($theme in $themes) {
             -Foreground ([string]$theme.RunningWarningTint) `
             -Background ([string]$theme.CardBottom)) -ge 4.5
     ) -Code ('GUI_THEME_SEMANTIC_CONTRAST_FAILED_' + $theme.Id)
+    $dialogPalette = Get-QiehaoSwitchDialogPalette -Theme $theme
+    foreach ($dialogProperty in @(
+        'Background', 'CardTop', 'CardBottom', 'Border', 'Foreground',
+        'Secondary', 'Accent', 'Warning', 'Success', 'ButtonBackground',
+        'ButtonForeground', 'ButtonBorder'
+    )) {
+        Assert-GuiTest -Condition (
+            $null -ne $dialogPalette.PSObject.Properties[$dialogProperty] -and
+            [string]$dialogPalette.$dialogProperty -match '^#[0-9A-Fa-f]{8}$'
+        ) -Code ('GUI_DIALOG_THEME_RESOURCE_MISSING_' + $theme.Id + '_' +
+            $dialogProperty)
+    }
+    Assert-GuiTest -Condition (
+        ([string]$dialogPalette.Background).StartsWith('#FF') -and
+        (Get-TestContrastRatio -Foreground $dialogPalette.Foreground `
+            -Background $dialogPalette.Background) -ge 4.5 -and
+        (Get-TestContrastRatio -Foreground $dialogPalette.Warning `
+            -Background $dialogPalette.Background) -ge 4.5 -and
+        (Get-TestContrastRatio -Foreground $dialogPalette.Success `
+            -Background $dialogPalette.Background) -ge 4.5 -and
+        (Get-TestContrastRatio -Foreground $dialogPalette.ButtonForeground `
+            -Background $dialogPalette.ButtonBackground) -ge 4.5
+    ) -Code ('GUI_DIALOG_THEME_CONTRAST_FAILED_' + $theme.Id)
     $loadResult = Get-QiehaoBackgroundImage -Theme $theme `
         -BackgroundDirectory (Join-Path -Path $guiRoot `
             -ChildPath 'assets\backgrounds')
@@ -1613,6 +1836,12 @@ function New-TestManualSwitchRuntime {
         SwitchSawWaitWindowOpen = $false
         RefreshCalls = 0
         ActiveProfile = 'Plus'
+        PlusCurrent = '是'
+        PlusActive = $true
+        TeamCurrent = '否'
+        TeamActive = $false
+        UiState = 'WaitingForCodexExit'
+        NotificationPreconditions = $false
         SuccessMessage = ''
         Order = @()
         Runtime = $null
@@ -1629,7 +1858,6 @@ function New-TestManualSwitchRuntime {
         $manualState.Result = $Result
         $manualState.PendingAction = $null
         $manualState.PendingTarget = $null
-        $manualState.Busy = $false
         if ($Result -ceq 'Succeeded') {
             $manualState.CleanupBeforeSwitch =
                 [bool]$Runtime.Stopped -and [bool]$Runtime.HandlerRemoved -and
@@ -1638,16 +1866,34 @@ function New-TestManualSwitchRuntime {
             $manualState.SwitchSawWaitWindowOpen = $manualState.WaitWindowOpen
             $manualState.SwitchCalls++
             $manualState.Order += 'Switch'
-            $manualState.WaitWindowOpen = $false
-            $manualState.Order += 'WindowClosed'
             $manualState.RefreshCalls++
             $manualState.ActiveProfile = 'Team'
+            $manualState.PlusCurrent = '否'
+            $manualState.PlusActive = $false
+            $manualState.TeamCurrent = '是'
+            $manualState.TeamActive = $true
             $manualState.Order += 'Refresh'
+            $manualState.Busy = $false
+            $manualState.Order += 'BusyFalse'
+            $manualState.UiState = 'SwitchSucceeded'
+            $manualState.Order += 'State:SwitchSucceeded'
+            $manualState.NotificationPreconditions = (
+                $manualState.ActiveProfile -ceq 'Team' -and
+                $manualState.TeamCurrent -ceq '是' -and
+                $manualState.TeamActive -and
+                $manualState.PlusCurrent -ceq '否' -and
+                -not $manualState.PlusActive -and
+                $manualState.UiState -ceq 'SwitchSucceeded' -and
+                -not $manualState.Busy
+            )
+            $manualState.WaitWindowOpen = $false
+            $manualState.Order += 'WindowClosed'
             $manualState.SuccessMessage =
                 '切换成功。' + [Environment]::NewLine + '当前账号：Team'
             $manualState.Order += 'Success'
         }
         else {
+            $manualState.Busy = $false
             $manualState.WaitWindowOpen = $false
         }
     }.GetNewClosure()
@@ -1691,9 +1937,15 @@ Assert-GuiTest -Condition (
     -not $manualStoppedWait.WaitWindowOpen -and
     $manualStoppedWait.RefreshCalls -eq 1 -and
     $manualStoppedWait.ActiveProfile -ceq 'Team' -and
+    $manualStoppedWait.PlusCurrent -ceq '否' -and
+    -not $manualStoppedWait.PlusActive -and
+    $manualStoppedWait.TeamCurrent -ceq '是' -and
+    $manualStoppedWait.TeamActive -and
+    $manualStoppedWait.UiState -ceq 'SwitchSucceeded' -and
+    $manualStoppedWait.NotificationPreconditions -and
     $manualStoppedWait.SuccessMessage -match '当前账号：Team' -and
     (@($manualStoppedWait.Order) -join '|') -ceq
-        'Switch|WindowClosed|Refresh|Success' -and
+        'Switch|Refresh|BusyFalse|State:SwitchSucceeded|WindowClosed|Success' -and
     $manualStoppedWait.Runtime.Stopped -and
     $manualStoppedWait.Runtime.HandlerRemoved -and
     -not $manualStoppedWait.Runtime.Active -and
@@ -2005,6 +2257,16 @@ Assert-GuiTest -Condition (
     $waitDialogSection -match 'Add_Loaded' -and
     $waitDialogSection -match 'Start-QiehaoManualSwitchWaitTimer' -and
     $waitDialogSection -match 'Add_Closing' -and
+    $waitDialogSection -match "DialogBackgroundBrush" -and
+    $waitDialogSection -match "DialogCardBrush" -and
+    $waitDialogSection -match "DialogBorderBrush" -and
+    $waitDialogSection -match "DialogForegroundBrush" -and
+    $waitDialogSection -match "DialogAccentBrush" -and
+    $waitDialogSection -match "DialogWarningBrush" -and
+    $waitDialogSection -match "DialogSuccessBrush" -and
+    $waitDialogSection -match "PrimaryButtonStyle" -and
+    $waitDialogSection -match 'New-Object System\.Windows\.Controls\.Border' -and
+    $waitDialogSection -notmatch 'SystemColors|ControlBrush|#FFD4D0C8' -and
     $waitDialogSection -notmatch "Button\.Content\s*=\s*'(开始等待|开始检测|继续切换)" -and
     $waitDialogSection -notmatch 'ConfirmText'
 ) -Code 'GUI_WAIT_DIALOG_SECOND_STAGE_ACTION_PRESENT'
@@ -2020,8 +2282,13 @@ Assert-GuiTest -Condition (
 ) -Code 'GUI_SWITCH_STILL_REQUIRES_SECOND_CLICK'
 Assert-GuiTest -Condition (
     $guiSource -match '切换成功。`n`n当前账号：\$TargetProfile' -and
-    $guiSource -match 'Show-QiehaoSwitchResult -Result \$switchResult' -and
-    $guiSource -match 'Invoke-QiehaoReadOnlyRefresh'
+    $guiSource -match 'Complete-QiehaoSwitchUiAfterBackend' -and
+    $guiSource -match 'ExpectedActiveProfile \$ExpectedProfile -PassThru' -and
+    $guiSource -match "'SwitchSucceededUiRefreshFailed'" -and
+    $guiSource -match '账号切换已经成功，但界面状态刷新失败' -and
+    $helperSource -match 'function Invoke-QiehaoSwitchUiCompletion' -and
+    $helperSource -match "'SwitchSucceeded'" -and
+    $helperSource -match "'SwitchSucceededUiRefreshFailed'"
 ) -Code 'GUI_SWITCH_SUCCESS_PRESENTATION_INCOMPLETE'
 Assert-GuiTest -Condition (
     $guiSource -notmatch 'Request-CodexDesktopNativeQuit|Request-CodexDesktopClose|CloseMainWindow|ExitCodexButton|Request-QiehaoNormalExit' -and
@@ -2085,8 +2352,12 @@ finally {
     GuiStartupPowerShell7 = 'PASS'
     PowerShell51XamlParse = 'PASS'
     PowerShell7XamlParse = 'PASS'
+    ModalSwitchLifecyclePowerShell51 = 'PASS'
+    ModalSwitchLifecyclePowerShell7 = 'PASS'
     FiveThemesLoad = 'PASS'
     FiveThemesGlassProperties = 'PASS'
+    FiveThemesDialogResources = 'PASS'
+    FiveThemesDialogContrast = 'PASS'
     MissingThemeFallback = 'PASS'
     CorruptThemeFallback = 'PASS'
     BackgroundUniformToFill = 'PASS'
@@ -2132,6 +2403,10 @@ finally {
     GenericWaitWindowCloseCleanup = 'PASS'
     ManualWaitRunningNoSwitch = 'PASS'
     ManualWaitStoppedSwitchOnce = 'PASS'
+    SwitchRefreshBeforeNotification = 'PASS'
+    SwitchActiveMigrationWithoutLaunch = 'PASS'
+    SwitchActiveMigrationWithoutMainTimer = 'PASS'
+    SwitchSuccessRefreshFailureDistinct = 'PASS'
     ManualWaitUnknownFailClosed = 'PASS'
     ManualWaitInjectedTimeout = 'PASS'
     ManualWaitCancelCleanup = 'PASS'
