@@ -95,7 +95,10 @@ else {
             -RequiredCommands @('ConvertTo-QiehaoQuotaSnapshot')
         $clientContract = Test-QiehaoModuleExportContract `
             -Module $quotaClientModule `
-            -RequiredCommands @('Get-QiehaoCurrentQuotaSnapshot')
+            -RequiredCommands @(
+                'Get-QiehaoCurrentQuotaSnapshot',
+                'Invoke-QiehaoQuotaBackgroundWorker'
+            )
         $helperContract = Test-QiehaoModuleExportContract `
             -Module $quotaHelperModule -RequiredCommands @(
                 'Get-QiehaoQuotaUiText',
@@ -140,6 +143,41 @@ function Get-QiehaoQuotaUiTextSafe {
         return [string]$script:guiQuotaFallbackStrings[$Key]
     }
     return '额度不可用'
+}
+
+function Get-QiehaoSafeQuotaFailureCode {
+    param(
+        [AllowNull()][object]$Value,
+        [string]$Fallback = 'QUOTA_BACKGROUND_WORKER_FAILED'
+    )
+    $candidate = if ($null -eq $Value) { '' } else { [string]$Value }
+    $allowed = @(
+        'QUOTA_CODEX_NOT_FOUND',
+        'QUOTA_APP_SERVER_START_FAILED',
+        'QUOTA_INITIALIZE_TIMEOUT',
+        'QUOTA_INITIALIZE_ERROR',
+        'QUOTA_RATE_LIMITS_TIMEOUT',
+        'QUOTA_RATE_LIMITS_RPC_ERROR',
+        'QUOTA_RESPONSE_INVALID',
+        'QUOTA_PARSE_FAILED',
+        'QUOTA_CHILD_CLEANUP_FAILED',
+        'QUOTA_BACKGROUND_WORKER_FAILED',
+        'QUOTA_RESULT_MISSING',
+        'QUOTA_QUERY_FAILED',
+        'QUOTA_CACHE_WRITE_FAILED',
+        'OPERATION_BUSY'
+    )
+    if ($allowed -ccontains $candidate) { return $candidate }
+    return $Fallback
+}
+
+function Format-QiehaoQuotaFailureStatus {
+    param(
+        [Parameter(Mandatory = $true)][string]$BaseText,
+        [Parameter(Mandatory = $true)][string]$FailureCode
+    )
+    return ($BaseText + ' 错误代码：' +
+        (Get-QiehaoSafeQuotaFailureCode -Value $FailureCode))
 }
 
 function Read-QiehaoMainWindow {
@@ -323,6 +361,9 @@ try {
     $script:guiQuotaAsyncReason = $null
     $script:guiQuotaDeadlineUtc = $null
     $script:guiQuotaLastQueryFailed = $false
+    $script:guiQuotaLastFailureCode = $null
+    $script:guiQuotaLastDiagnostics = $null
+    $script:guiQuotaWorkerOutputCount = 0
     $script:guiQuotaCompletionTimerStopped = $false
     $script:guiQuotaCompletionHandlerRemoved = $false
     $script:guiQuotaEndInvokeAttempted = $false
@@ -914,6 +955,12 @@ try {
         $requestedProfile = $script:guiQuotaRequestedProfile
         $reason = $script:guiQuotaAsyncReason
         $providerResult = $null
+        $completionFailureCode = if ($HardTimeout) {
+            'QUOTA_BACKGROUND_WORKER_FAILED'
+        }
+        else { $null }
+        $script:guiQuotaWorkerOutputCount = 0
+        $script:guiQuotaLastDiagnostics = $null
         try {
             if ($HardTimeout -and $null -ne $powerShell -and
                 $null -ne $asyncResult -and -not $asyncResult.IsCompleted) {
@@ -923,20 +970,43 @@ try {
             elseif ($null -ne $powerShell -and $null -ne $asyncResult) {
                 $script:guiQuotaEndInvokeAttempted = $true
                 $output = @($powerShell.EndInvoke($asyncResult))
-                $providerResult = @($output | Where-Object {
-                    $null -ne $_ -and
-                    $null -ne $_.PSObject.Properties['Succeeded']
-                } | Select-Object -Last 1)
-                if ($providerResult.Count -eq 1) {
-                    $providerResult = $providerResult[0]
+                $script:guiQuotaWorkerOutputCount = $output.Count
+                if ($output.Count -eq 1 -and
+                    $null -ne $output[0] -and
+                    $null -ne $output[0].PSObject.Properties['Succeeded']) {
+                    $providerResult = $output[0]
+                    $diagnosticsProperty =
+                        $providerResult.PSObject.Properties['Diagnostics']
+                    if ($null -ne $diagnosticsProperty) {
+                        $script:guiQuotaLastDiagnostics =
+                            $diagnosticsProperty.Value
+                        if ($null -ne $script:guiQuotaLastDiagnostics) {
+                            $script:guiQuotaLastDiagnostics | Add-Member `
+                                -NotePropertyName WorkerOutputCount `
+                                -NotePropertyValue $output.Count -Force
+                        }
+                    }
+                    if (-not [bool]$providerResult.Succeeded) {
+                        $failureProperty =
+                            $providerResult.PSObject.Properties['FailureCode']
+                        $completionFailureCode =
+                            Get-QiehaoSafeQuotaFailureCode -Value $(
+                                if ($null -eq $failureProperty) {
+                                    $null
+                                }
+                                else { $failureProperty.Value }
+                            )
+                    }
                 }
                 else {
                     $providerResult = $null
+                    $completionFailureCode = 'QUOTA_RESULT_MISSING'
                 }
             }
         }
         catch {
             $providerResult = $null
+            $completionFailureCode = 'QUOTA_BACKGROUND_WORKER_FAILED'
         }
         finally {
             if ($null -ne $powerShell) {
@@ -973,25 +1043,40 @@ try {
                     $script:guiQuotaJustUpdatedProfile = $requestedProfile
                     $updated = $true
                 }
+                else {
+                    $completionFailureCode = Get-QiehaoSafeQuotaFailureCode `
+                        -Value $saved.FailureCode
+                }
             }
         }
         catch {
             $updated = $false
+            $completionFailureCode = 'QUOTA_CACHE_WRITE_FAILED'
         }
 
         $script:guiQuotaLastQueryFailed = -not $updated
         if ($updated) {
+            $script:guiQuotaLastFailureCode = $null
             $refreshStatusText.Text =
                 Get-QiehaoQuotaUiTextSafe -Key 'Updated'
         }
         else {
+            if ([string]::IsNullOrWhiteSpace($completionFailureCode)) {
+                $completionFailureCode = 'QUOTA_RESULT_MISSING'
+            }
+            $script:guiQuotaLastFailureCode =
+                Get-QiehaoSafeQuotaFailureCode -Value $completionFailureCode
             if ($reason -ceq 'SwitchAfter') {
-                $refreshStatusText.Text =
-                    Get-QiehaoQuotaUiTextSafe -Key 'SwitchNewFailed'
+                $refreshStatusText.Text = Format-QiehaoQuotaFailureStatus `
+                    -BaseText (
+                        Get-QiehaoQuotaUiTextSafe -Key 'SwitchNewFailed'
+                    ) -FailureCode $script:guiQuotaLastFailureCode
             }
             else {
-                $refreshStatusText.Text =
-                    Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry'
+                $refreshStatusText.Text = Format-QiehaoQuotaFailureStatus `
+                    -BaseText (
+                        Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry'
+                    ) -FailureCode $script:guiQuotaLastFailureCode
             }
         }
         try {
@@ -1027,6 +1112,9 @@ try {
 
         $script:guiQuotaCoordinator.QueryInProgress = $true
         $script:guiQuotaLastQueryFailed = $false
+        $script:guiQuotaLastFailureCode = $null
+        $script:guiQuotaLastDiagnostics = $null
+        $script:guiQuotaWorkerOutputCount = 0
         $script:guiQuotaCompletionTimerStopped = $false
         $script:guiQuotaCompletionHandlerRemoved = $false
         $script:guiQuotaEndInvokeAttempted = $false
@@ -1049,12 +1137,26 @@ try {
         Update-QiehaoActionButtons
         try {
             $powerShell = [PowerShell]::Create()
-            if ($SelfTest -and -not [string]::IsNullOrWhiteSpace(
-                [string]$script:guiQuotaSelfTestScenario
-            )) {
-                $queryScript = {
-                    param($Scenario)
-                    switch ($Scenario) {
+            $queryScript = {
+                param($ClientModulePath, $Scenario)
+                $ErrorActionPreference = 'Stop'
+                $clientModule = @(Import-Module -Name $ClientModulePath `
+                    -PassThru -ErrorAction Stop |
+                    Select-Object -Last 1)[0]
+                if ($null -eq $clientModule -or
+                    -not $clientModule.ExportedCommands.ContainsKey(
+                        'Invoke-QiehaoQuotaBackgroundWorker'
+                    )) {
+                    throw 'QUOTA_BACKGROUND_WORKER_FAILED'
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace([string]$Scenario)) {
+                    if ($Scenario -ceq 'Throw') {
+                        throw 'FAKE_ASYNC_COMPLETION_EXCEPTION'
+                    }
+                    $fakeProvider = {
+                        param($IgnoredTimeoutSeconds, $ProviderScenario)
+                        switch ([string]$ProviderScenario) {
                         'Success' {
                             return [pscustomobject]@{
                                 Succeeded = $true
@@ -1065,59 +1167,81 @@ try {
                                     Windows = @(
                                         [pscustomobject]@{
                                             DurationMinutes = 300
+                                            Label = '5-hour'
                                             RemainingPercent = 35
                                             ResetsAt = 1893542400
+                                            ResetLocal = ''
                                         },
                                         [pscustomobject]@{
                                             DurationMinutes = 10080
+                                            Label = 'Weekly'
                                             RemainingPercent = 15
                                             ResetsAt = 1893628800
+                                            ResetLocal = ''
                                         }
                                     )
                                 }
+                                Diagnostics = [pscustomobject]@{
+                                    AccountStabilityLockAcquired = $true
+                                    AppServerStarted = $false
+                                    InitializeMatched = $false
+                                    RateLimitsResponseMatched = $false
+                                }
+                                ElapsedMilliseconds = 1
+                                ChildCleanup = 'NotStarted'
+                                AccountStabilityLockCleanup = 'Released'
                             }
                         }
                         'Failure' {
                             return [pscustomobject]@{
                                 Succeeded = $false
-                                FailureCode = 'FAKE_PROVIDER_FAILURE'
+                                FailureCode = 'QUOTA_RATE_LIMITS_TIMEOUT'
                                 Snapshot = $null
+                                Diagnostics = [pscustomobject]@{
+                                    AccountStabilityLockAcquired = $true
+                                    AppServerStarted = $true
+                                    InitializeMatched = $true
+                                    RateLimitsResponseMatched = $false
+                                }
+                                ElapsedMilliseconds = 2
+                                ChildCleanup = 'Normal'
+                                AccountStabilityLockCleanup = 'Released'
                             }
                         }
                         'Timeout' {
                             Start-Sleep -Seconds 5
                             return [pscustomobject]@{
                                 Succeeded = $false
-                                FailureCode = 'FAKE_LATE_RESULT'
+                                FailureCode = 'QUOTA_RATE_LIMITS_TIMEOUT'
                                 Snapshot = $null
                             }
-                        }
-                        'Throw' {
-                            throw 'FAKE_ASYNC_COMPLETION_EXCEPTION'
                         }
                         'Closing' {
                             Start-Sleep -Seconds 5
                             return [pscustomobject]@{
                                 Succeeded = $false
-                                FailureCode = 'FAKE_CLOSING_RESULT'
+                                FailureCode = 'QUOTA_BACKGROUND_WORKER_FAILED'
                                 Snapshot = $null
                             }
                         }
                         default { throw 'FAKE_QUOTA_SCENARIO_INVALID' }
                     }
+                    }
+                    Invoke-QiehaoQuotaBackgroundWorker -TimeoutSeconds 10 `
+                        -QuotaProvider $fakeProvider `
+                        -QuotaProviderArgument $Scenario
+                    return
                 }
-                $null = $powerShell.AddScript($queryScript.ToString()).
-                    AddArgument($script:guiQuotaSelfTestScenario)
+
+                Invoke-QiehaoQuotaBackgroundWorker -TimeoutSeconds 10
             }
-            else {
-                $queryScript = {
-                    param($ClientModulePath)
-                    Import-Module -Name $ClientModulePath -ErrorAction Stop
-                    Get-QiehaoCurrentQuotaSnapshot -TimeoutSeconds 10
-                }
-                $null = $powerShell.AddScript($queryScript.ToString()).
-                    AddArgument($quotaClientModulePath)
+            $workerScenario = if ($SelfTest) {
+                [string]$script:guiQuotaSelfTestScenario
             }
+            else { '' }
+            $null = $powerShell.AddScript($queryScript.ToString()).
+                AddArgument($quotaClientModulePath).
+                AddArgument($workerScenario)
             $script:guiQuotaAsyncPowerShell = $powerShell
             $script:guiQuotaAsyncResult = $powerShell.BeginInvoke()
             if ($SelfTest -and -not [string]::IsNullOrWhiteSpace(
@@ -1149,8 +1273,13 @@ try {
                 catch {
                     Stop-QiehaoQuotaAsync
                     $script:guiQuotaLastQueryFailed = $true
+                    $script:guiQuotaLastFailureCode =
+                        'QUOTA_BACKGROUND_WORKER_FAILED'
                     $refreshStatusText.Text =
-                        Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry'
+                        Format-QiehaoQuotaFailureStatus -BaseText (
+                            Get-QiehaoQuotaUiTextSafe `
+                                -Key 'UpdateFailedRetry'
+                        ) -FailureCode $script:guiQuotaLastFailureCode
                     try { Update-QiehaoQuotaRows }
                     finally { Update-QiehaoActionButtons }
                 }
@@ -1164,8 +1293,12 @@ try {
         catch {
             Stop-QiehaoQuotaAsync
             $script:guiQuotaLastQueryFailed = $true
+            $script:guiQuotaLastFailureCode =
+                'QUOTA_BACKGROUND_WORKER_FAILED'
             $refreshStatusText.Text =
-                Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry'
+                Format-QiehaoQuotaFailureStatus -BaseText (
+                    Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry'
+                ) -FailureCode $script:guiQuotaLastFailureCode
             return $false
         }
     }
@@ -2648,12 +2781,58 @@ try {
                     [string]$successTeamRow.QuotaSummary -ceq
                         '5h 35% · Week 15%'
                 )
+                $successDiagnostics = $script:guiQuotaLastDiagnostics
+                $backgroundWorkerImportsQuotaClient = (
+                    $null -ne $successDiagnostics -and
+                    [bool]$successDiagnostics.ModulesLoaded -and
+                    [bool]$successDiagnostics.QuotaClientCommandAvailable
+                )
+                $backgroundWorkerImportsQuotaParser = (
+                    $null -ne $successDiagnostics -and
+                    [bool]$successDiagnostics.QuotaParserCommandAvailable
+                )
+                $backgroundWorkerHasQuotaPublicCommand = (
+                    $null -ne $successDiagnostics -and
+                    [bool]$successDiagnostics.QuotaClientCommandAvailable
+                )
+                $backgroundWorkerReturnsStructuredResult = (
+                    $null -ne $successDiagnostics -and
+                    $null -ne $successEntry -and
+                    $null -ne $successEntry.PSObject.Properties['Windows']
+                )
+                $backgroundWorkerOwnsDependencies = (
+                    $null -ne $successDiagnostics -and
+                    [bool]$successDiagnostics.CodexAuthReferenceValid -and
+                    [bool]$successDiagnostics.ModulesLoaded
+                )
+                $workerOutputCountOne = (
+                    $script:guiQuotaWorkerOutputCount -eq 1 -and
+                    [int]$successDiagnostics.WorkerOutputCount -eq 1 -and
+                    [int]$successDiagnostics.ProviderOutputCount -eq 1
+                )
+                $workerSnapshotSurvivesEndInvoke = (
+                    $null -ne $successEntry -and
+                    @($successEntry.Windows).Count -eq 2
+                )
+                $workerExecutableDiscoverySucceeded = (
+                    [bool]$successDiagnostics.ExecutableDiscoverySucceeded -and
+                    @(
+                        'BundledCodex',
+                        'PathCommand',
+                        'ExplicitKnownPath'
+                    ) -ccontains [string]$successDiagnostics.ExecutableSource
+                )
+                $workerLockDiagnosticSurvives = (
+                    [bool]$successDiagnostics.AccountStabilityLockAcquired
+                )
 
                 Reset-QiehaoQuotaSelfTestScenario -Scenario 'Failure'
                 $failureStarted = Start-QiehaoQuotaAsync -Reason Open
                 $failureIdle = Wait-QiehaoQuotaSelfTestUntilIdle
                 $failureTeamRow = @($script:guiAllProfileRows |
                     Where-Object { $_.Name -ceq 'Team' })[0]
+                $failureBaseText =
+                    Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry'
                 $startupFailureClearsBusy = (
                     $failureStarted -and $failureIdle -and
                     -not [bool]$script:guiQuotaCoordinator.QueryInProgress -and
@@ -2661,10 +2840,18 @@ try {
                 )
                 $startupFailureReEnablesRefresh = (
                     [bool]$refreshQuotaButton.IsEnabled -and
-                    $refreshStatusText.Text -ceq
-                        (Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry') -and
+                    $refreshStatusText.Text.StartsWith(
+                        $failureBaseText,
+                        [StringComparison]::Ordinal
+                    ) -and
                     [string]$failureTeamRow.QuotaSummary -ceq
                         (Get-QiehaoQuotaUiTextSafe -Key 'NoSnapshot')
+                )
+                $workerFailureCodeSurvivesEndInvoke = (
+                    $script:guiQuotaLastFailureCode -ceq
+                        'QUOTA_RATE_LIMITS_TIMEOUT' -and
+                    $refreshStatusText.Text -match
+                        '错误代码：QUOTA_RATE_LIMITS_TIMEOUT'
                 )
                 $queryFailureDoesNotDisableRuntime = (
                     $script:guiQuotaModulesAvailable -and
@@ -2743,6 +2930,26 @@ try {
                         $startupAtMostOneQuery
                     StartupUsesActiveProfile =
                         $startupUsesActiveProfile
+                    BackgroundWorkerImportsQuotaClient =
+                        $backgroundWorkerImportsQuotaClient
+                    BackgroundWorkerImportsQuotaParser =
+                        $backgroundWorkerImportsQuotaParser
+                    BackgroundWorkerHasQuotaPublicCommand =
+                        $backgroundWorkerHasQuotaPublicCommand
+                    BackgroundWorkerReturnsStructuredResult =
+                        $backgroundWorkerReturnsStructuredResult
+                    BackgroundWorkerFailureCodeSurvivesEndInvoke =
+                        $workerFailureCodeSurvivesEndInvoke
+                    BackgroundWorkerDoesNotRequireCallerScopeModules =
+                        $backgroundWorkerOwnsDependencies
+                    WorkerOutputCountOne =
+                        $workerOutputCountOne
+                    WorkerSnapshotSurvivesEndInvoke =
+                        $workerSnapshotSurvivesEndInvoke
+                    WorkerExecutableDiscoverySucceeded =
+                        $workerExecutableDiscoverySucceeded
+                    WorkerLockDiagnosticSurvives =
+                        $workerLockDiagnosticSurvives
                 }
                 foreach ($asyncCheck in $asyncChecks.GetEnumerator()) {
                     if (-not [bool]$asyncCheck.Value) {

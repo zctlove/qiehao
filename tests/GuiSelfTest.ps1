@@ -16,6 +16,8 @@ $quotaGuiSelfTestPath = Join-Path -Path $PSScriptRoot `
     -ChildPath 'QuotaGuiSelfTest.ps1'
 $quotaImportContractPath = Join-Path -Path $PSScriptRoot `
     -ChildPath 'QuotaImportContractSelfTest.ps1'
+$quotaBackgroundWorkerTestPath = Join-Path -Path $PSScriptRoot `
+    -ChildPath 'QuotaBackgroundWorkerSelfTest.ps1'
 $coreModulePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 
 function Assert-GuiTest {
@@ -440,6 +442,12 @@ Assert-GuiTest -Condition (
         'QUOTA_AUTH_MODULE_REFERENCE_VALID=True' -and
     $productionImport51.Output -ccontains
         'QUOTA_MUTEX_HELPER_PRESENT=True' -and
+    $productionImport51.Output -ccontains
+        'QUOTA_MUTEX_ACQUIRE_SUCCEEDED=True' -and
+    $productionImport51.Output -ccontains
+        'QUOTA_PARSER_MODULE_PATH_ABSOLUTE=True' -and
+    $productionImport51.Output -ccontains
+        'QUOTA_AUTH_MODULE_PATH_ABSOLUTE=True' -and
     $productionImport51.Output -ccontains 'QUOTA_RUNTIME_AVAILABLE=True' -and
     $productionImport51.Output -ccontains 'PRODUCTION_IMPORT_ORDER_PASS'
 ) -Code 'GUI_PRODUCTION_IMPORT_ORDER_PS51_FAILED'
@@ -461,9 +469,50 @@ Assert-GuiTest -Condition (
         'QUOTA_AUTH_MODULE_REFERENCE_VALID=True' -and
     $productionImport7.Output -ccontains
         'QUOTA_MUTEX_HELPER_PRESENT=True' -and
+    $productionImport7.Output -ccontains
+        'QUOTA_MUTEX_ACQUIRE_SUCCEEDED=True' -and
+    $productionImport7.Output -ccontains
+        'QUOTA_PARSER_MODULE_PATH_ABSOLUTE=True' -and
+    $productionImport7.Output -ccontains
+        'QUOTA_AUTH_MODULE_PATH_ABSOLUTE=True' -and
     $productionImport7.Output -ccontains 'QUOTA_RUNTIME_AVAILABLE=True' -and
     $productionImport7.Output -ccontains 'PRODUCTION_IMPORT_ORDER_PASS'
 ) -Code 'GUI_PRODUCTION_IMPORT_ORDER_PS7_FAILED'
+
+$requiredWorkerContractOutput = @(
+    'BackgroundWorkerImportsQuotaClient=True',
+    'BackgroundWorkerImportsQuotaParser=True',
+    'BackgroundWorkerHasQuotaPublicCommand=True',
+    'BackgroundWorkerReturnsStructuredResult=True',
+    'BackgroundWorkerFailureCodeSurvivesEndInvoke=True',
+    'BackgroundWorkerDoesNotRequireCallerScopeModules=True',
+    'BackgroundWorkerOutputCount=1',
+    'BackgroundWorkerRejectsPipelinePollution=True',
+    'BackgroundWorkerStreamsDoNotOverrideSuccess=True',
+    'BackgroundWorkerSnapshotSurvivesEndInvoke=True',
+    'BackgroundWorkerDiagnosticsSurviveEndInvoke=True',
+    'BackgroundWorkerBundledDiscoveryWithoutPath=True',
+    'QUOTA_BACKGROUND_WORKER_SELFTEST_PASS'
+)
+$workerContract51 = Invoke-PowerShellFileTest `
+    -HostPath $ps51Command.Source `
+    -ScriptPath $quotaBackgroundWorkerTestPath
+Assert-GuiTest -Condition (
+    $workerContract51.ExitCode -eq 0 -and
+    @($requiredWorkerContractOutput | Where-Object {
+        $workerContract51.Output -cnotcontains $_
+    }).Count -eq 0
+) -Code 'GUI_BACKGROUND_WORKER_CONTRACT_PS51_FAILED'
+
+$workerContract7 = Invoke-PowerShellFileTest `
+    -HostPath $ps7Command.Source `
+    -ScriptPath $quotaBackgroundWorkerTestPath
+Assert-GuiTest -Condition (
+    $workerContract7.ExitCode -eq 0 -and
+    @($requiredWorkerContractOutput | Where-Object {
+        $workerContract7.Output -cnotcontains $_
+    }).Count -eq 0
+) -Code 'GUI_BACKGROUND_WORKER_CONTRACT_PS7_FAILED'
 
 $ps51Xaml = Invoke-PowerShellFileTest -HostPath $ps51Command.Source `
     -ScriptPath $PSCommandPath -AdditionalArguments @('-XamlOnly')
@@ -654,6 +703,16 @@ $requiredQuotaAsyncOutputs = @(
     'GuiClosingDuringQuotaQueryCleansUp=True',
     'StartupSendsAtMostOneQuery=True',
     'StartupUsesActiveProfile=True',
+    'BackgroundWorkerImportsQuotaClient=True',
+    'BackgroundWorkerImportsQuotaParser=True',
+    'BackgroundWorkerHasQuotaPublicCommand=True',
+    'BackgroundWorkerReturnsStructuredResult=True',
+    'BackgroundWorkerFailureCodeSurvivesEndInvoke=True',
+    'BackgroundWorkerDoesNotRequireCallerScopeModules=True',
+    'WorkerOutputCountOne=True',
+    'WorkerSnapshotSurvivesEndInvoke=True',
+    'WorkerExecutableDiscoverySucceeded=True',
+    'WorkerLockDiagnosticSurvives=True',
     'QUOTA_ASYNC_LIFECYCLE_SELFTEST_PASS'
 )
 $quotaAsync51 = Invoke-PowerShellFileTest `
@@ -2468,7 +2527,16 @@ Assert-GuiTest -Condition (
     $quotaAsyncSourceSection -match 'AddMilliseconds\(' -and
     $quotaAsyncSourceSection -match 'else \{ 15000 \}' -and
     $quotaAsyncSourceSection -match
+        'Invoke-QiehaoQuotaBackgroundWorker -TimeoutSeconds 10' -and
+    $quotaAsyncSourceSection -match
+        '\$script:guiQuotaWorkerOutputCount = \$output\.Count' -and
+    $quotaAsyncSourceSection -match '\$output\.Count -eq 1' -and
+    $quotaAsyncSourceSection -match
+        'Format-QiehaoQuotaFailureStatus' -and
+    $quotaAsyncSourceSection -match
         'Get-QiehaoQuotaUiTextSafe -Key ''UpdateFailedRetry''' -and
+    $quotaAsyncSourceSection -notmatch
+        'Get-QiehaoCurrentQuotaSnapshot -TimeoutSeconds 10' -and
     $quotaAsyncSourceSection -notmatch 'GetNewClosure'
 ) -Code 'GUI_QUOTA_ASYNC_SOURCE_LIFECYCLE_INVALID'
 Assert-GuiTest -Condition (
@@ -2644,6 +2712,8 @@ finally {
     Result = 'PASS'
     ProductionImportOrderPowerShell51 = 'PASS'
     ProductionImportOrderPowerShell7 = 'PASS'
+    BackgroundWorkerContractPowerShell51 = 'PASS'
+    BackgroundWorkerContractPowerShell7 = 'PASS'
     QuotaCommandsExportedPowerShell51 = 'PASS'
     QuotaCommandsExportedPowerShell7 = 'PASS'
     CoreCommandsSurviveAllQuotaImports = 'PASS'
@@ -2662,6 +2732,16 @@ finally {
     AsyncCompletionExceptionStillCleansUp = 'PASS'
     GuiClosingDuringQuotaQueryCleansUp = 'PASS'
     StartupSendsAtMostOneQuery = 'PASS'
+    BackgroundWorkerImportsQuotaClient = 'PASS'
+    BackgroundWorkerImportsQuotaParser = 'PASS'
+    BackgroundWorkerHasQuotaPublicCommand = 'PASS'
+    BackgroundWorkerReturnsStructuredResult = 'PASS'
+    BackgroundWorkerFailureCodeSurvivesEndInvoke = 'PASS'
+    BackgroundWorkerDoesNotRequireCallerScopeModules = 'PASS'
+    WorkerOutputCountOne = 'PASS'
+    WorkerSnapshotSurvivesEndInvoke = 'PASS'
+    WorkerExecutableDiscoverySucceeded = 'PASS'
+    WorkerLockDiagnosticSurvives = 'PASS'
     QuotaTimerNoDynamicClosure = 'PASS'
     QuotaGuiHardFailSafe15Seconds = 'PASS'
     QuotaAvailableFromForeignWorkingDirectory = 'PASS'
