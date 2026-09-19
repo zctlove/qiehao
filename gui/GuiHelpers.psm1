@@ -80,6 +80,35 @@ function ConvertTo-QiehaoProfileDisplayValue {
     }
 }
 
+function ConvertTo-QiehaoUpdatedDisplay {
+    param(
+        [AllowNull()]
+        [object]$Value
+    )
+
+    $candidate = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        return '<UNAVAILABLE>'
+    }
+    if ($candidate -ceq '<UNAVAILABLE>' -or
+        $candidate -ceq '<INVALID_METADATA>') {
+        return $candidate
+    }
+    $parsed = [DateTime]::MinValue
+    if ([DateTime]::TryParse(
+        $candidate,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$parsed
+    )) {
+        return $parsed.ToString(
+            'yyyy-MM-dd HH:mm:ss',
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+    }
+    return $candidate
+}
+
 function ConvertTo-QiehaoGuiProfileRows {
     [CmdletBinding()]
     param(
@@ -136,14 +165,15 @@ function ConvertTo-QiehaoGuiProfileRows {
             -Name 'IdentityMarker' -DefaultValue 'UNKNOWN')
         $metadataCode = [string](Get-ObjectPropertyValue -InputObject $item `
             -Name 'Metadata' -DefaultValue 'UNKNOWN')
-        $updated = [string](Get-ObjectPropertyValue -InputObject $item `
+        $updatedRaw = [string](Get-ObjectPropertyValue -InputObject $item `
             -Name 'UpdatedAt' -DefaultValue '<UNAVAILABLE>')
-        if ([string]::IsNullOrWhiteSpace($updated)) {
-            $updated = '<UNAVAILABLE>'
+        if ([string]::IsNullOrWhiteSpace($updatedRaw)) {
+            $updatedRaw = '<UNAVAILABLE>'
         }
-        switch ($updated) {
-            '<UNAVAILABLE>' { $updated = '不可用' }
-            '<INVALID_METADATA>' { $updated = '元数据异常' }
+        $updatedDisplay = ConvertTo-QiehaoUpdatedDisplay -Value $updatedRaw
+        switch ($updatedDisplay) {
+            '<UNAVAILABLE>' { $updatedDisplay = '不可用' }
+            '<INVALID_METADATA>' { $updatedDisplay = '元数据异常' }
         }
 
         $rows += [pscustomobject]@{
@@ -164,12 +194,14 @@ function ConvertTo-QiehaoGuiProfileRows {
             MetadataCode = $metadataCode
             Metadata = ConvertTo-QiehaoProfileDisplayValue -Category 'Metadata' `
                 -Value $metadataCode
-            UpdatedCode = if ($updated -eq '不可用') {
+            UpdatedCode = if ($updatedDisplay -eq '不可用') {
                 'Unavailable'
             }
-            elseif ($updated -eq '元数据异常') { 'InvalidMetadata' }
+            elseif ($updatedDisplay -eq '元数据异常') { 'InvalidMetadata' }
             else { 'Value' }
-            Updated = $updated
+            UpdatedRaw = $updatedRaw
+            UpdatedDisplay = $updatedDisplay
+            Updated = $updatedDisplay
         }
     }
     return @($rows)

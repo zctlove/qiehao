@@ -5,8 +5,8 @@
     Title="Codex 账号管理器"
     Width="1040"
     Height="690"
-    MinWidth="920"
-    MinHeight="560"
+    MinWidth="960"
+    MinHeight="690"
     WindowStartupLocation="CenterScreen"
     Background="#FF172436"
     Foreground="{DynamicResource TextPrimaryBrush}"
@@ -145,9 +145,24 @@
             <Setter Property="BorderBrush" Value="{DynamicResource ColumnHeaderBorderBrush}" />
             <Setter Property="BorderThickness" Value="0,0,1,1" />
             <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="MinHeight" Value="34" />
             <Setter Property="VerticalContentAlignment" Value="Center" />
-            <Setter Property="HorizontalContentAlignment" Value="Left" />
-            <Setter Property="Padding" Value="8,6" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="Padding" Value="4,4" />
+            <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+            <Setter Property="TextOptions.TextRenderingMode" Value="ClearType" />
+        </Style>
+        <Style x:Key="AccountGridLeftTextStyle" TargetType="TextBlock">
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="TextAlignment" Value="Left" />
+            <Setter Property="TextWrapping" Value="NoWrap" />
+            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+            <Setter Property="Padding" Value="6,0" />
+        </Style>
+        <Style x:Key="AccountGridCenterTextStyle" TargetType="TextBlock" BasedOn="{StaticResource AccountGridLeftTextStyle}">
+            <Setter Property="TextAlignment" Value="Center" />
         </Style>
     </Window.Resources>
 
@@ -237,11 +252,12 @@
                         CanUserAddRows="False" CanUserDeleteRows="False" CanUserReorderColumns="True"
                         IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                         Background="{DynamicResource GridBackgroundBrush}"
-                        RowBackground="{DynamicResource GridRowBrush}"
-                        AlternatingRowBackground="{DynamicResource GridAltRowBrush}"
+                        AlternationCount="2"
                         Foreground="{DynamicResource TextPrimaryBrush}"
                         BorderBrush="{DynamicResource PanelBorderBrush}" BorderThickness="1"
                         RowHeaderWidth="0" SelectionMode="Single" SelectionUnit="FullRow"
+                        CanUserResizeColumns="True" ColumnHeaderHeight="34" RowHeight="32"
+                        TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="ClearType"
                         VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
                         <DataGrid.ContextMenu>
                             <ContextMenu x:Name="ProfileContextMenu">
@@ -252,21 +268,41 @@
                                 <MenuItem x:Name="ContextDeleteMenuItem" Header="删除账号" />
                             </ContextMenu>
                         </DataGrid.ContextMenu>
+                        <DataGrid.CellStyle>
+                            <Style TargetType="DataGridCell">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="VerticalContentAlignment" Value="Center" />
+                                <Setter Property="Padding" Value="0" />
+                                <Setter Property="BorderBrush" Value="Transparent" />
+                                <Setter Property="BorderThickness" Value="0" />
+                                <Style.Triggers>
+                                    <MultiDataTrigger>
+                                        <MultiDataTrigger.Conditions>
+                                            <Condition Binding="{Binding ActiveCode}" Value="Yes" />
+                                            <Condition Binding="{Binding RelativeSource={RelativeSource Self}, Path=Column.DisplayIndex}" Value="0" />
+                                        </MultiDataTrigger.Conditions>
+                                        <Setter Property="BorderBrush" Value="{DynamicResource ActiveBorderBrush}" />
+                                        <Setter Property="BorderThickness" Value="4,0,0,0" />
+                                    </MultiDataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </DataGrid.CellStyle>
                         <DataGrid.RowStyle>
                             <Style TargetType="DataGridRow">
-                                <Setter Property="MinHeight" Value="30" />
+                                <Setter Property="MinHeight" Value="32" />
                                 <Setter Property="VerticalContentAlignment" Value="Center" />
                                 <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
-                                <Setter Property="BorderBrush" Value="Transparent" />
-                                <Setter Property="BorderThickness" Value="1,0,1,0" />
+                                <Setter Property="Background" Value="{DynamicResource GridRowBrush}" />
+                                <Setter Property="BorderThickness" Value="0" />
                                 <Style.Triggers>
+                                    <Trigger Property="AlternationIndex" Value="1">
+                                        <Setter Property="Background" Value="{DynamicResource GridAltRowBrush}" />
+                                    </Trigger>
                                     <Trigger Property="IsSelected" Value="True">
                                         <Setter Property="Background" Value="{DynamicResource SelectedRowBrush}" />
                                     </Trigger>
                                     <DataTrigger Binding="{Binding ActiveCode}" Value="Yes">
                                         <Setter Property="Background" Value="{DynamicResource ActiveRowBrush}" />
-                                        <Setter Property="BorderBrush" Value="{DynamicResource ActiveBorderBrush}" />
-                                        <Setter Property="BorderThickness" Value="4,0,1,0" />
                                         <Setter Property="FontWeight" Value="SemiBold" />
                                     </DataTrigger>
                                     <MultiDataTrigger>
@@ -280,11 +316,16 @@
                             </Style>
                         </DataGrid.RowStyle>
                         <DataGrid.Columns>
-                            <DataGridTextColumn x:Name="ProfileColumn" Header="名称" Binding="{Binding Name}" MinWidth="105" Width="*" />
-                            <DataGridTextColumn x:Name="CurrentColumn" Header="当前" Binding="{Binding Active}" MinWidth="72" Width="Auto">
+                            <DataGridTextColumn x:Name="ProfileColumn" Header="名称" Binding="{Binding Name}" MinWidth="120" Width="*">
                                 <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="Padding" Value="6,2" />
+                                    <Style TargetType="TextBlock" BasedOn="{StaticResource AccountGridLeftTextStyle}">
+                                        <Setter Property="ToolTip" Value="{Binding Name}" />
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn x:Name="CurrentColumn" Header="当前" Binding="{Binding Active}" MinWidth="55" Width="60">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock" BasedOn="{StaticResource AccountGridCenterTextStyle}">
                                         <Setter Property="FontWeight" Value="SemiBold" />
                                         <Setter Property="Foreground" Value="{DynamicResource CurrentNoBrush}" />
                                         <Style.Triggers>
@@ -299,11 +340,11 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn x:Name="VerificationColumn" Header="槽位验证" Binding="{Binding Verification}" MinWidth="100" Width="Auto" />
-                            <DataGridTextColumn x:Name="HealthColumn" Header="状态" Binding="{Binding Health}" MinWidth="105" Width="Auto">
+                            <DataGridTextColumn x:Name="VerificationColumn" Header="槽位验证" Binding="{Binding Verification}" MinWidth="80" Width="86" ElementStyle="{StaticResource AccountGridCenterTextStyle}" />
+                            <DataGridTextColumn x:Name="HealthColumn" Header="状态" Binding="{Binding Health}" MinWidth="64" Width="68">
                                 <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="Padding" Value="6,2" /><Setter Property="FontWeight" Value="SemiBold" />
+                                    <Style TargetType="TextBlock" BasedOn="{StaticResource AccountGridCenterTextStyle}">
+                                        <Setter Property="FontWeight" Value="SemiBold" />
                                         <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
                                         <Style.Triggers>
                                             <DataTrigger Binding="{Binding HealthCode}" Value="READY"><Setter Property="Foreground" Value="#FF59D48B" /></DataTrigger>
@@ -313,15 +354,17 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn x:Name="AuthColumn" Header="凭证" Binding="{Binding Auth}" MinWidth="82" Width="Auto" />
-                            <DataGridTextColumn x:Name="IdentityColumn" Header="身份标记" Binding="{Binding Identity}" MinWidth="88" Width="Auto" />
-                            <DataGridTextColumn x:Name="MetadataColumn" Header="元数据" Binding="{Binding Metadata}" MinWidth="82" Width="Auto" />
-                            <DataGridTextColumn x:Name="UpdatedColumn" Header="更新时间" Binding="{Binding Updated}" MinWidth="170" Width="Auto" />
-                            <DataGridTemplateColumn x:Name="QuotaColumn" Header="" MinWidth="190" Width="220">
+                            <DataGridTextColumn x:Name="AuthColumn" Header="凭证" Binding="{Binding Auth}" MinWidth="64" Width="70" ElementStyle="{StaticResource AccountGridCenterTextStyle}" />
+                            <DataGridTextColumn x:Name="IdentityColumn" Header="身份标记" Binding="{Binding Identity}" MinWidth="72" Width="78" ElementStyle="{StaticResource AccountGridCenterTextStyle}" />
+                            <DataGridTextColumn x:Name="MetadataColumn" Header="元数据" Binding="{Binding Metadata}" MinWidth="68" Width="74" ElementStyle="{StaticResource AccountGridCenterTextStyle}" />
+                            <DataGridTextColumn x:Name="UpdatedColumn" Header="更新时间" Binding="{Binding UpdatedDisplay}" MinWidth="145" Width="148" ElementStyle="{StaticResource AccountGridCenterTextStyle}" />
+                            <DataGridTemplateColumn x:Name="QuotaColumn" Header="" MinWidth="150" Width="1.4*">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
-                                        <TextBlock Margin="6,2"
+                                        <TextBlock Margin="6,0"
+                                                   HorizontalAlignment="Stretch"
                                                    VerticalAlignment="Center"
+                                                   TextAlignment="Left"
                                                    Text="{Binding QuotaSummary}"
                                                    TextWrapping="NoWrap"
                                                    TextTrimming="CharacterEllipsis"

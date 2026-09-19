@@ -541,12 +541,16 @@ try {
             $row.Identity = Get-QiehaoGuiText -Key $identityKey
             $row.Metadata = Get-QiehaoGuiText -Key $metadataKey
             if ([string]$row.UpdatedCode -ceq 'Unavailable') {
-                $row.Updated = Get-QiehaoGuiText `
+                $updatedText = Get-QiehaoGuiText `
                     -Key 'Profile.Updated.Unavailable'
+                $row.Updated = $updatedText
+                $row.UpdatedDisplay = $updatedText
             }
             elseif ([string]$row.UpdatedCode -ceq 'InvalidMetadata') {
-                $row.Updated = Get-QiehaoGuiText `
+                $updatedText = Get-QiehaoGuiText `
                     -Key 'Profile.Updated.InvalidMetadata'
+                $row.Updated = $updatedText
+                $row.UpdatedDisplay = $updatedText
             }
         }
     }
@@ -3445,7 +3449,7 @@ try {
                 $englishHeaderFits -and
                 @($englishButtonsRemainSingleLine).Count -eq 0 -and
                 $xamlSourceForLayout -match
-                    '<Setter Property="MinHeight" Value="30"' -and
+                    '<Setter Property="MinHeight" Value="32"' -and
                 $xamlSourceForLayout -match 'TextWrapping="NoWrap"'
             )
             if (-not $englishLayoutMeasured) {
@@ -3461,7 +3465,7 @@ try {
                         [string]$_.Name
                     }) -join ',') +
                     ';RowContract:' + ($xamlSourceForLayout -match
-                        '<Setter Property="MinHeight" Value="30"') +
+                        '<Setter Property="MinHeight" Value="32"') +
                     ';NoWrapContract:' + ($xamlSourceForLayout -match
                         'TextWrapping="NoWrap"')
                 )

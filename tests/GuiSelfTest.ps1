@@ -26,6 +26,8 @@ $switchBeforeQuotaTestPath = Join-Path -Path $PSScriptRoot `
     -ChildPath 'SwitchBeforeQuotaSelfTest.ps1'
 $localizationSelfTestPath = Join-Path -Path $PSScriptRoot `
     -ChildPath 'LocalizationSelfTest.ps1'
+$accountGridLayoutSelfTestPath = Join-Path -Path $PSScriptRoot `
+    -ChildPath 'AccountGridLayoutSelfTest.ps1'
 $coreModulePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 
 function Assert-GuiTest {
@@ -137,7 +139,8 @@ if ($XamlOnly) {
             [double]$testWindow.FindName('LanguageComboBox').Width -ge 105 -and
             $null -ne $testWindow.FindName('ThemeComboBox') -and
             [double]$testWindow.FindName('ThemeComboBox').Width -ge 132 -and
-            [double]$testWindow.MinWidth -ge 920
+            [double]$testWindow.MinWidth -ge 960 -and
+            [double]$testWindow.MinHeight -ge 690
         ) -Code 'GUI_XAML_LOCALIZATION_LAYOUT_CONTRACT_MISSING'
         Write-Output 'XAML_PARSE_PASS'
     }
@@ -480,6 +483,55 @@ Assert-GuiTest -Condition (
         $localization7.Output -cnotcontains $_
     }).Count -eq 0
 ) -Code 'GUI_LOCALIZATION_CONTRACT_PS7_FAILED'
+
+$requiredAccountGridLayoutOutput = @(
+    'AccountGridHeadersCentered=True',
+    'FixedColumnsCentered=True',
+    'NameColumnLeftAligned=True',
+    'QuotaColumnLeftAligned=True',
+    'UpdatedDisplayCompact=True',
+    'ResponsiveColumnsAtDefaultWidth=True',
+    'ResponsiveColumnsAtMinWidth=True',
+    'NameColumnShrinksWithWindow=True',
+    'QuotaColumnShrinksWithWindow=True',
+    'HorizontalScrollCollapsedAtDefault=True',
+    'HorizontalScrollCollapsedAtMinWidth=True',
+    'WindowMinHeightKeepsCoreVisible=True',
+    'WindowCannotCollapseAccountArea=True',
+    'TwoProfilesNoVerticalScroll=True',
+    'FourProfilesAccessible=True',
+    'SixProfilesAccessible=True',
+    'TenProfilesAccessible=True',
+    'TenProfilesUsesInternalVerticalScroll=True',
+    'SearchBarRemainsVisible=True',
+    'ActionButtonsRemainVisible=True',
+    'ScrollToLastProfile=True',
+    'ScrollBackToFirstProfile=True',
+    'ActiveProfileSurvivesVirtualization=True',
+    'ProfileRowsUniformHeight=True',
+    'ManualWideColumnShowsHorizontal=True',
+    'ManualRestoreHidesHorizontal=True',
+    'ZhCnLayoutPass=True',
+    'EnUsLayoutPass=True',
+    'ACCOUNT_GRID_LAYOUT_SELFTEST_PASS'
+)
+$accountGridLayout51 = Invoke-PowerShellFileTest `
+    -HostPath $ps51Command.Source -ScriptPath $accountGridLayoutSelfTestPath
+Assert-GuiTest -Condition (
+    $accountGridLayout51.ExitCode -eq 0 -and
+    @($requiredAccountGridLayoutOutput | Where-Object {
+        $accountGridLayout51.Output -cnotcontains $_
+    }).Count -eq 0
+) -Code 'GUI_ACCOUNT_GRID_LAYOUT_PS51_FAILED'
+
+$accountGridLayout7 = Invoke-PowerShellFileTest `
+    -HostPath $ps7Command.Source -ScriptPath $accountGridLayoutSelfTestPath
+Assert-GuiTest -Condition (
+    $accountGridLayout7.ExitCode -eq 0 -and
+    @($requiredAccountGridLayoutOutput | Where-Object {
+        $accountGridLayout7.Output -cnotcontains $_
+    }).Count -eq 0
+) -Code 'GUI_ACCOUNT_GRID_LAYOUT_PS7_FAILED'
 
 $productionImport51 = Invoke-PowerShellFileTest `
     -HostPath $ps51Command.Source -ScriptPath $quotaImportContractPath
@@ -2628,7 +2680,8 @@ Assert-GuiTest -Condition (
     $xamlTextForEncoding -match 'DynamicResource SelectedRowBrush' -and
     $xamlTextForEncoding -match 'DynamicResource ActiveBorderBrush' -and
     $xamlTextForEncoding -match 'MultiDataTrigger' -and
-    $xamlTextForEncoding -match 'BorderThickness" Value="4,0,1,0"' -and
+    $xamlTextForEncoding -match 'BorderThickness" Value="4,0,0,0"' -and
+    $xamlTextForEncoding -match 'Path=Column.DisplayIndex' -and
     $xamlTextForEncoding -match 'TargetType="DataGridColumnHeader"' -and
     $xamlTextForEncoding -match 'DynamicResource ColumnHeaderBackgroundBrush' -and
     $xamlTextForEncoding -match 'DynamicResource ColumnHeaderForegroundBrush' -and
@@ -2910,6 +2963,8 @@ finally {
     QuotaSnapshotGuiCache = 'PASS'
     PowerShell51XamlParse = 'PASS'
     PowerShell7XamlParse = 'PASS'
+    AccountGridLayoutPowerShell51 = 'PASS'
+    AccountGridLayoutPowerShell7 = 'PASS'
     QuotaRowsCompact28To34 = 'PASS'
     QuotaWindowCountDoesNotChangeRowHeight = 'PASS'
     NoSnapshotSingleLineHeight = 'PASS'
