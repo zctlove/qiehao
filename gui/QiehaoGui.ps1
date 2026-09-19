@@ -3422,7 +3422,7 @@ try {
             $activeProfileText.Text -cne 'Plus' -or
             $identityStatusText.Text -cne '已确认' -or
             -not [bool]$script:guiLaunchTarget.Available -or
-            $themes.Count -ne 5 -or -not $startupImageResult.Loaded) {
+            $themes.Count -ne 7 -or -not $startupImageResult.Loaded) {
             throw 'GUI_SELFTEST_BINDING_FAILED'
         }
         if ($refreshQuotaButton.Content -cne

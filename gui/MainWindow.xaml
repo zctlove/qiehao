@@ -364,7 +364,7 @@
                         <TextBlock x:Name="HeaderTitleText" Grid.Column="0" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" Text="Codex 账号管理器" />
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                             <TextBlock x:Name="ThemeLabelText" Margin="0,0,8,0" VerticalAlignment="Center" Style="{StaticResource SecondaryTextStyle}" Text="皮肤：" />
-                            <ComboBox x:Name="ThemeComboBox" Width="132" MinHeight="30" DisplayMemberPath="Name" SelectedValuePath="Id" />
+                            <ComboBox x:Name="ThemeComboBox" Width="168" MinHeight="30" DisplayMemberPath="Name" SelectedValuePath="Id" />
                             <TextBlock x:Name="LanguageLabelText" Margin="14,0,8,0" VerticalAlignment="Center" Style="{StaticResource SecondaryTextStyle}" Text="语言：" />
                             <ComboBox x:Name="LanguageComboBox" Width="105" MinHeight="30" DisplayMemberPath="NativeName" SelectedValuePath="Code" />
                         </StackPanel>

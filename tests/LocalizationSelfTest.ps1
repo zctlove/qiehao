@@ -65,7 +65,15 @@ Assert-LocalizationTest (
     (Get-QiehaoLocalizedThemeName -Language 'zh-CN' `
         -ThemeId '04-purple-tech') -ceq '紫蓝星河' -and
     (Get-QiehaoLocalizedThemeName -Language 'en-US' `
-        -ThemeId '04-purple-tech') -ceq 'Purple Nebula'
+        -ThemeId '04-purple-tech') -ceq 'Purple Nebula' -and
+    (Get-QiehaoLocalizedThemeName -Language 'zh-CN' `
+        -ThemeId '06-aurora-silver-blue') -ceq '极光银蓝' -and
+    (Get-QiehaoLocalizedThemeName -Language 'en-US' `
+        -ThemeId '06-aurora-silver-blue') -ceq 'Aurora Silver Blue' -and
+    (Get-QiehaoLocalizedThemeName -Language 'zh-CN' `
+        -ThemeId '07-arctic-sea-glass') -ceq '浅海冰晶' -and
+    (Get-QiehaoLocalizedThemeName -Language 'en-US' `
+        -ThemeId '07-arctic-sea-glass') -ceq 'Arctic Sea Glass'
 ) 'LOCALIZATION_THEME_NAMES_INVALID'
 $diagnostic = Format-QiehaoLocalizedString -Language 'en-US' `
     -Key 'Quota.ErrorCode' -Arguments @('QUOTA_RATE_LIMITS_TIMEOUT')
@@ -93,22 +101,22 @@ try {
     ) 'MISSING_PREFERENCES_NOT_SAFE'
 
     $written = Write-QiehaoUiPreferences -StateDirectory $testRoot `
-        -Background '04-purple-tech' -Language 'en-US'
+        -Background '06-aurora-silver-blue' -Language 'en-US'
     $path = Join-Path $testRoot 'ui-preferences.json'
     $firstText = [System.IO.File]::ReadAllText($path)
     $languageChanged = Write-QiehaoUiPreferences `
         -StateDirectory $testRoot -Language 'zh-CN'
     $themeChanged = Write-QiehaoUiPreferences `
-        -StateDirectory $testRoot -Background '03-ice-glass'
+        -StateDirectory $testRoot -Background '07-arctic-sea-glass'
     $restart = Read-QiehaoUiPreferences -StateDirectory $testRoot
     Assert-LocalizationTest (
-        $written.Background -ceq '04-purple-tech' -and
+        $written.Background -ceq '06-aurora-silver-blue' -and
         $written.Language -ceq 'en-US' -and
-        $languageChanged.Background -ceq '04-purple-tech' -and
+        $languageChanged.Background -ceq '06-aurora-silver-blue' -and
         $languageChanged.Language -ceq 'zh-CN' -and
-        $themeChanged.Background -ceq '03-ice-glass' -and
+        $themeChanged.Background -ceq '07-arctic-sea-glass' -and
         $themeChanged.Language -ceq 'zh-CN' -and
-        $restart.Background -ceq '03-ice-glass' -and
+        $restart.Background -ceq '07-arctic-sea-glass' -and
         $restart.Language -ceq 'zh-CN'
     ) 'LANGUAGE_THEME_PERSISTENCE_NOT_INDEPENDENT'
     Assert-LocalizationTest (
@@ -226,12 +234,14 @@ Write-Output 'NoDuplicateKeys=True'
 Write-Output 'FormattedStringArgumentsWork=True'
 Write-Output 'MissingKeyFailsSafe=True'
 Write-Output 'ThemeDisplayNamesLocalized=True'
+Write-Output 'NewThemeDisplayNamesLocalized=True'
 Write-Output 'DiagnosticCodesRemainUntranslated=True'
 Write-Output 'LanguagePreferencePersists=True'
 Write-Output 'LanguagePreferenceSurvivesRestartSimulation=True'
 Write-Output 'OldPreferencesWithoutLanguageDefaultsZhCn=True'
 Write-Output 'ChangingLanguagePreservesTheme=True'
 Write-Output 'ChangingThemePreservesLanguage=True'
+Write-Output 'NewThemePreferencesPersist=True'
 Write-Output 'CorruptPreferencesFailOpen=True'
 Write-Output 'AtomicPreferenceWrite=True'
 Write-Output 'PowerShell51NullStringReplaceContract=True'

@@ -8,6 +8,8 @@ $script:QiehaoThemeDisplayKeys = [ordered]@{
     '03-ice-glass' = 'Theme.03IceGlass'
     '04-purple-tech' = 'Theme.04PurpleTech'
     '05-light-flow' = 'Theme.05LightFlow'
+    '06-aurora-silver-blue' = 'Theme.06AuroraSilverBlue'
+    '07-arctic-sea-glass' = 'Theme.07ArcticSeaGlass'
 }
 
 $script:QiehaoStrings = [ordered]@{
@@ -41,6 +43,8 @@ Add-QiehaoCatalogPair 'Theme.02NavyGold' '深蓝鎏金' 'Navy Gold'
 Add-QiehaoCatalogPair 'Theme.03IceGlass' '冰蓝玻璃' 'Ice Glass'
 Add-QiehaoCatalogPair 'Theme.04PurpleTech' '紫蓝星河' 'Purple Nebula'
 Add-QiehaoCatalogPair 'Theme.05LightFlow' '清透流光' 'Light Flow'
+Add-QiehaoCatalogPair 'Theme.06AuroraSilverBlue' '极光银蓝' 'Aurora Silver Blue'
+Add-QiehaoCatalogPair 'Theme.07ArcticSeaGlass' '浅海冰晶' 'Arctic Sea Glass'
 Add-QiehaoCatalogPair 'Theme.Saved' '皮肤已切换并保存' 'Theme changed and saved.'
 Add-QiehaoCatalogPair 'Theme.SavedWithFallback' '背景图片不可用，已使用默认纯色并保存选择' 'Background unavailable. Solid fallback active; choice saved.'
 Add-QiehaoCatalogPair 'Theme.SaveFailed' '皮肤已切换，但偏好保存失败' 'Theme changed, but the preference could not be saved.'

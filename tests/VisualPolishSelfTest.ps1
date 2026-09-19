@@ -98,10 +98,45 @@ function New-VisualBrush {
     return $brush
 }
 
+function New-VisualGradientBrush {
+    param(
+        [Parameter(Mandatory = $true)][string]$Top,
+        [Parameter(Mandatory = $true)][string]$Bottom
+    )
+    $brush = New-Object Windows.Media.LinearGradientBrush
+    $brush.StartPoint = New-Object Windows.Point(0, 0)
+    $brush.EndPoint = New-Object Windows.Point(0, 1)
+    $brush.GradientStops.Add((New-Object Windows.Media.GradientStop(
+        ([Windows.Media.ColorConverter]::ConvertFromString($Top)), 0
+    )))
+    $brush.GradientStops.Add((New-Object Windows.Media.GradientStop(
+        ([Windows.Media.ColorConverter]::ConvertFromString($Bottom)), 1
+    )))
+    if ($brush.CanFreeze) { $brush.Freeze() }
+    return $brush
+}
+
+function Set-VisualBackgroundImage {
+    param([object]$Window, [object]$Theme)
+    $path = Join-Path $projectRoot (
+        'gui\assets\backgrounds\' + [string]$Theme.FileName
+    )
+    if (-not [IO.File]::Exists($path)) {
+        throw ('VISUAL_BACKGROUND_MISSING_' + [string]$Theme.Id)
+    }
+    $bitmap = New-Object Windows.Media.Imaging.BitmapImage
+    $bitmap.BeginInit()
+    $bitmap.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+    $bitmap.UriSource = New-Object Uri($path, [UriKind]::Absolute)
+    $bitmap.EndInit()
+    if ($bitmap.CanFreeze) { $bitmap.Freeze() }
+    (Get-VisualNamed $Window 'BackgroundImage').Source = $bitmap
+}
+
 function Set-VisualTheme {
     param([object]$Window, [object]$Theme)
     $map = [ordered]@{
-        PanelBrush = 'CardBackground'; PanelBorderBrush = 'CardBorder'
+        PanelBorderBrush = 'CardBorder'
         TextPrimaryBrush = 'TextPrimary'; TextSecondaryBrush = 'TextSecondary'
         TextMutedBrush = 'TextMuted'; ButtonDisabledBrush = 'DisabledBackground'
         ActiveRowBrush = 'GridActive'; ActiveSelectedRowBrush = 'GridActiveSelected'
@@ -132,6 +167,9 @@ function Set-VisualTheme {
         $brush = New-VisualBrush -Color ([string]$Theme.([string]$entry.Value))
         $Window.Resources[[string]$entry.Key] = $brush.PSObject.BaseObject
     }
+    $panelBrush = New-VisualGradientBrush -Top $Theme.CardTop `
+        -Bottom $Theme.CardBottom
+    $Window.Resources['PanelBrush'] = $panelBrush.PSObject.BaseObject
     $brush = New-VisualBrush $Theme.Warning
     $Window.Resources['RunningWarningBrush'] = $brush.PSObject.BaseObject
     $Window.Resources['UnknownWarningBrush'] = $brush.PSObject.BaseObject
@@ -209,6 +247,39 @@ function Get-ColorDistance {
     )
 }
 
+function Get-VisualColor {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    return [Windows.Media.ColorConverter]::ConvertFromString($Value)
+}
+
+function Get-VisualLuminance {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    $color = Get-VisualColor $Value
+    $linear = @($color.R, $color.G, $color.B | ForEach-Object {
+        $channel = [double]$_ / 255.0
+        if ($channel -le 0.04045) { $channel / 12.92 }
+        else { [Math]::Pow(($channel + 0.055) / 1.055, 2.4) }
+    })
+    return 0.2126 * $linear[0] + 0.7152 * $linear[1] +
+        0.0722 * $linear[2]
+}
+
+function Get-ThemeFingerprint {
+    param(
+        [Parameter(Mandatory = $true)][object]$Theme,
+        [Parameter(Mandatory = $true)][string[]]$Fields
+    )
+    $data = ($Fields | ForEach-Object {
+        $_ + '=' + [string]$Theme.$_
+    }) -join ';'
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($data)) |
+            ForEach-Object { $_.ToString('x2') }) -join ''
+    }
+    finally { $sha.Dispose() }
+}
+
 function Test-ControlInsideWindow {
     param([object]$Window, [object]$Control)
     if (-not $Control.IsVisible -or $Control.ActualWidth -le 0 -or
@@ -223,7 +294,8 @@ function Test-ControlInsideWindow {
 
 $themes = @(Get-QiehaoBackgroundThemes)
 $requiredThemeIds = @(
-    '01-blue-glass','02-navy-gold','03-ice-glass','04-purple-tech','05-light-flow'
+    '01-blue-glass','02-navy-gold','03-ice-glass','04-purple-tech',
+    '05-light-flow','06-aurora-silver-blue','07-arctic-sea-glass'
 )
 $requiredSemantic = @(
     'WindowOverlay','CardBackground','CardBorder','CardShadow','Primary','Positive',
@@ -232,10 +304,36 @@ $requiredSemantic = @(
     'ControlBorder','FocusRing','DisabledBackground','ToolTipBackground',
     'ToolTipBorder','ToolTipForeground'
 )
-Assert-VisualPolish ($themes.Count -eq 5) 'VISUAL_THEME_COUNT_FAILED'
+$themeFingerprintFields = @(
+    'Id','FileName','OverlayMode','OverlayColor','CardTop','CardBottom',
+    'BorderTint','TextPrimary','TextSecondary','ButtonTop','ButtonBottom',
+    'ButtonHover','ButtonPressed','ActiveRowTint','ActiveSelectedRowTint',
+    'SelectedRowTint','ActiveBorderTint','RunningWarningTint',
+    'UnknownWarningTint','ColumnHeaderBackgroundTint',
+    'ColumnHeaderForegroundTint','ColumnHeaderBorderTint','CurrentYesTint',
+    'CurrentNoTint','AccentTint','DangerTop','DangerBottom','WindowOverlay',
+    'CardBackground','CardBorder','CardShadow','TextMuted','Primary',
+    'PrimaryHover','PrimaryPressed','Positive','PositiveHover',
+    'PositivePressed','Info','InfoHover','InfoPressed','Warning','Danger',
+    'DangerHover','DangerPressed','Accent','AccentHover','AccentPressed',
+    'Secondary','SecondaryHover','SecondaryPressed','ControlBackground',
+    'ControlBorder','GridHeader','GridHover','GridSelected','GridActive',
+    'GridActiveSelected','FocusRing','ToolTipBackground','ToolTipBorder',
+    'ToolTipForeground','ButtonOnAccent','DisabledBackground'
+)
+$darkThemeBaselineHashes = [ordered]@{
+    '01-blue-glass' = '9bc4d09c68de41760f5f86b508e4ff9607717c38311ac3e3b292565cb242f3a0'
+    '02-navy-gold' = '7626373fc06f57324f02a71c60cfa84cf0bd785370446ad3937cadfca389f49c'
+    '04-purple-tech' = '2cc07e0ddbb7b2a56e5d28844c86c8869b6f62cf5ea81ef8e9f8767c1417ffef'
+}
+Assert-VisualPolish ($themes.Count -eq 7) 'VISUAL_THEME_COUNT_FAILED'
 Assert-VisualPolish ((@($themes.Id) -join '|') -ceq
     ($requiredThemeIds -join '|')) `
     'VISUAL_THEME_IDS_CHANGED'
+Assert-VisualPolish (
+    (Get-Command Get-QiehaoBackgroundThemes).ScriptBlock.ToString() -notmatch
+        'Get-ChildItem|EnumerateFiles|GetFiles'
+) 'VISUAL_THEME_REGISTRY_MUST_NOT_SCAN_DIRECTORY'
 foreach ($theme in $themes) {
     foreach ($property in $requiredSemantic) {
         Assert-VisualPolish (
@@ -253,6 +351,67 @@ foreach ($theme in $themes) {
             ('VISUAL_COLOR_SANITY_FAILED_' + $theme.Id + '_' + $pair[0])
     }
 }
+foreach ($entry in $darkThemeBaselineHashes.GetEnumerator()) {
+    $theme = @($themes | Where-Object { $_.Id -ceq [string]$entry.Key })[0]
+    Assert-VisualPolish (
+        (Get-ThemeFingerprint -Theme $theme -Fields $themeFingerprintFields) `
+            -ceq [string]$entry.Value
+    ) ('VISUAL_DARK_THEME_BASELINE_CHANGED_' + [string]$entry.Key)
+}
+
+$lightThemes = @($themes | Where-Object { $_.OverlayMode -ceq 'Light' })
+Assert-VisualPolish ($lightThemes.Count -eq 4) 'VISUAL_LIGHT_THEME_COUNT_CHANGED'
+foreach ($theme in $lightThemes) {
+    $overlay = Get-VisualColor $theme.WindowOverlay
+    $cardTop = Get-VisualColor $theme.CardTop
+    $cardBottom = Get-VisualColor $theme.CardBottom
+    $border = Get-VisualColor $theme.CardBorder
+    $control = Get-VisualColor $theme.ControlBackground
+    $secondary = Get-VisualColor $theme.Secondary
+    $header = Get-VisualColor $theme.GridHeader
+    $shadow = Get-VisualColor $theme.CardShadow
+    $tooltip = Get-VisualColor $theme.ToolTipBackground
+    Assert-VisualPolish ($overlay.A -le 0x24) `
+        ('VISUAL_LIGHT_OVERLAY_TOO_HEAVY_' + $theme.Id)
+    Assert-VisualPolish ($cardTop.A -ge 0x70 -and $cardTop.A -le 0x86 -and
+        $cardBottom.A -lt $cardTop.A) `
+        ('VISUAL_LIGHT_CARD_NOT_TRANSLUCENT_' + $theme.Id)
+    Assert-VisualPolish ($border.A -gt $cardTop.A -and
+        $border.B -ge $border.R) `
+        ('VISUAL_LIGHT_EDGE_HIGHLIGHT_MISSING_' + $theme.Id)
+    Assert-VisualPolish ((Get-VisualLuminance $theme.CardTop) -ge 0.88 -and
+        $cardTop.B -ge $cardTop.R -and $cardBottom.B -gt $cardBottom.R) `
+        ('VISUAL_LIGHT_CARD_NOT_COLD_BRIGHT_' + $theme.Id)
+    Assert-VisualPolish ((Get-ColorDistance $theme.CardTop $theme.CardBottom) -gt 20) `
+        ('VISUAL_LIGHT_CARD_GRADIENT_TOO_FLAT_' + $theme.Id)
+    Assert-VisualPolish ($control.A -le 0xA6 -and $secondary.A -le 0xA0 -and
+        $header.A -le 0xA4) `
+        ('VISUAL_LIGHT_CONTROLS_TOO_OPAQUE_' + $theme.Id)
+    Assert-VisualPolish ($shadow.A -le 0x30 -and $tooltip.A -ge 0xE0) `
+        ('VISUAL_LIGHT_DEPTH_OR_TOOLTIP_INVALID_' + $theme.Id)
+}
+$iceTheme = @($lightThemes | Where-Object { $_.Id -ceq '03-ice-glass' })[0]
+$flowTheme = @($lightThemes | Where-Object { $_.Id -ceq '05-light-flow' })[0]
+$auroraTheme = @($lightThemes | Where-Object {
+    $_.Id -ceq '06-aurora-silver-blue'
+})[0]
+$arcticTheme = @($lightThemes | Where-Object {
+    $_.Id -ceq '07-arctic-sea-glass'
+})[0]
+Assert-VisualPolish (
+    (Get-VisualColor $flowTheme.WindowOverlay).A -lt
+        (Get-VisualColor $iceTheme.WindowOverlay).A -and
+    (Get-VisualColor $flowTheme.CardTop).A -lt
+        (Get-VisualColor $iceTheme.CardTop).A
+) 'VISUAL_LIGHT_FLOW_NOT_LIGHTER_THAN_ICE'
+Assert-VisualPolish (
+    $auroraTheme.FileName -ceq '06-aurora-silver-blue.png' -and
+    $arcticTheme.FileName -ceq '07-arctic-sea-glass.png' -and
+    $auroraTheme.Primary -cne $arcticTheme.Primary -and
+    $auroraTheme.Accent -cne $arcticTheme.Accent -and
+    $auroraTheme.GridHeader -cne $arcticTheme.GridHeader -and
+    $auroraTheme.CardShadow -cne $arcticTheme.CardShadow
+) 'VISUAL_NEW_THEME_PALETTES_NOT_INDEPENDENT'
 
 $probe = Read-VisualWindow
 try {
@@ -296,11 +455,13 @@ $allNoPageScroll = $true
 $allDisabledReadable = $true
 $allStateRendering = $true
 $allCardSeparation = $true
+$allLightRenderedLayers = $true
 foreach ($theme in $themes) {
     foreach ($language in @('zh-CN','en-US')) {
         $window = Read-VisualWindow
         try {
             Set-VisualTheme -Window $window -Theme $theme
+            Set-VisualBackgroundImage -Window $window -Theme $theme
             Set-VisualLanguage -Window $window -Language $language
             $grid = Get-VisualNamed $window 'ProfilesGrid'
             $grid.ItemsSource = @(New-VisualRows)
@@ -320,6 +481,30 @@ foreach ($theme in $themes) {
             $allCards = $allCards -and $cards.Count -eq 3 -and
                 $null -ne $cards[0].Effect -and $null -ne $cards[1].Effect -and
                 $null -ne $cards[2].Effect
+            if ($theme.OverlayMode -ceq 'Light') {
+                $panelBrush = $window.Resources['PanelBrush']
+                $overlayBrush = (Get-VisualNamed $window `
+                    'BackgroundOverlay').Background
+                $searchBrush = (Get-VisualNamed $window `
+                    'ProfileSearchTextBox').Background
+                $secondaryBrush = (Get-VisualNamed $window `
+                    'LaunchSettingsButton').Background
+                $allLightRenderedLayers = $allLightRenderedLayers -and
+                    $panelBrush -is [Windows.Media.LinearGradientBrush] -and
+                    $panelBrush.GradientStops.Count -eq 2 -and
+                    $panelBrush.GradientStops[0].Color -eq
+                        (Get-VisualColor $theme.CardTop) -and
+                    $panelBrush.GradientStops[1].Color -eq
+                        (Get-VisualColor $theme.CardBottom) -and
+                    $cards[0].Background -eq $panelBrush -and
+                    $overlayBrush.Color.A -eq
+                        (Get-VisualColor $theme.WindowOverlay).A -and
+                    $searchBrush.Color.A -eq
+                        (Get-VisualColor $theme.ControlBackground).A -and
+                    $secondaryBrush.Color.A -eq
+                        (Get-VisualColor $theme.Secondary).A -and
+                    $null -ne (Get-VisualNamed $window 'BackgroundImage').Source
+            }
             $cardBounds = @($cards | ForEach-Object {
                 $point = $_.TransformToAncestor($window).Transform(
                     (New-Object Windows.Point(0, 0))
@@ -432,8 +617,10 @@ $semanticCodexStateCodes = (
     $codexVisualSection -match 'default.*WarningBrush'
 )
 
-Assert-VisualPolish ($rendered -eq 10) 'VISUAL_TEN_COMBINATIONS_NOT_RENDERED'
+Assert-VisualPolish ($rendered -eq 14) 'VISUAL_FOURTEEN_COMBINATIONS_NOT_RENDERED'
 Assert-VisualPolish $allCards 'VISUAL_GLASS_CARDS_NOT_RENDERED'
+Assert-VisualPolish $allLightRenderedLayers `
+    'VISUAL_LIGHT_THEME_LAYERS_NOT_RENDERED'
 Assert-VisualPolish $allCardSeparation 'VISUAL_GLASS_CARDS_OVERLAP'
 Assert-VisualPolish $allButtons 'VISUAL_BUTTON_DIMENSIONS_FAILED'
 Assert-VisualPolish $allDisabledReadable 'VISUAL_DISABLED_BUTTON_NOT_READABLE'
@@ -448,8 +635,17 @@ Assert-VisualPolish $semanticCodexStateCodes 'VISUAL_CODEX_STATE_USES_DISPLAY_TE
 
 'AllThemesLoad=True'
 'AllThemesExposeRequiredSemanticBrushes=True'
+'SevenThemesRegistered=True'
+'ExplicitThemeRegistryOnly=True'
+'NewThemesHaveIndependentSemanticPalettes=True'
+'DarkThemeBaselineUnchanged=True'
+'IceGlassAirierPalette=True'
+'LightFlowAirierPalette=True'
+'LightThemeOverlayReduced=True'
+'LightThemeGlassEdgeHighlight=True'
+'LightThemeRenderedGlassLayers=True'
 'ZhCnEnUsAllThemesRender=True'
-'TenThemeLanguageCombinationsRendered=10'
+'FourteenThemeLanguageCombinationsRendered=14'
 'PrimaryButtonStyleExists=True'
 'PositiveButtonStyleExists=True'
 'InfoButtonStyleExists=True'

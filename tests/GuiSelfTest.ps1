@@ -140,7 +140,7 @@ if ($XamlOnly) {
             $null -ne $testWindow.FindName('LanguageComboBox') -and
             [double]$testWindow.FindName('LanguageComboBox').Width -ge 105 -and
             $null -ne $testWindow.FindName('ThemeComboBox') -and
-            [double]$testWindow.FindName('ThemeComboBox').Width -ge 132 -and
+            [double]$testWindow.FindName('ThemeComboBox').Width -ge 168 -and
             [double]$testWindow.MinWidth -ge 960 -and
             [double]$testWindow.MinHeight -ge 690
         ) -Code 'GUI_XAML_LOCALIZATION_LAYOUT_CONTRACT_MISSING'
@@ -458,10 +458,12 @@ $requiredLocalizationOutput = @(
     'AllProductionKeysExistZhCn=True',
     'AllProductionKeysExistEnUs=True',
     'NoDuplicateKeys=True',
+    'NewThemeDisplayNamesLocalized=True',
     'LanguagePreferencePersists=True',
     'OldPreferencesWithoutLanguageDefaultsZhCn=True',
     'ChangingLanguagePreservesTheme=True',
     'ChangingThemePreservesLanguage=True',
+    'NewThemePreferencesPersist=True',
     'CorruptPreferencesFailOpen=True',
     'AtomicPreferenceWrite=True',
     'PowerShell51NullStringReplaceContract=True',
@@ -538,8 +540,17 @@ Assert-GuiTest -Condition (
 $requiredVisualPolishOutput = @(
     'AllThemesLoad=True',
     'AllThemesExposeRequiredSemanticBrushes=True',
+    'SevenThemesRegistered=True',
+    'ExplicitThemeRegistryOnly=True',
+    'NewThemesHaveIndependentSemanticPalettes=True',
+    'DarkThemeBaselineUnchanged=True',
+    'IceGlassAirierPalette=True',
+    'LightFlowAirierPalette=True',
+    'LightThemeOverlayReduced=True',
+    'LightThemeGlassEdgeHighlight=True',
+    'LightThemeRenderedGlassLayers=True',
     'ZhCnEnUsAllThemesRender=True',
-    'TenThemeLanguageCombinationsRendered=10',
+    'FourteenThemeLanguageCombinationsRendered=14',
     'PrimaryButtonStyleExists=True',
     'PositiveButtonStyleExists=True',
     'InfoButtonStyleExists=True',
@@ -1015,9 +1026,9 @@ finally {
 
 $themes = @(Get-QiehaoBackgroundThemes)
 Assert-GuiTest -Condition (
-    $themes.Count -eq 5 -and
+    $themes.Count -eq 7 -and
     (@($themes.Name) -join '|') -ceq
-    '科技蓝|深蓝鎏金|冰蓝玻璃|紫蓝星河|清透流光'
+    '科技蓝|深蓝鎏金|冰蓝玻璃|紫蓝星河|清透流光|极光银蓝|浅海冰晶'
 ) -Code 'GUI_THEME_CATALOG_INVALID'
 foreach ($theme in $themes) {
     foreach ($requiredThemeProperty in @(
@@ -1149,10 +1160,10 @@ try {
             }
         }.GetNewClosure()
         $themeCombo.Add_SelectionChanged($themeSelectionHandler)
-        $iceTheme = @($wpfThemes | Where-Object {
-            [string]$_.Id -ceq '03-ice-glass'
+        $arcticTheme = @($wpfThemes | Where-Object {
+            [string]$_.Id -ceq '07-arctic-sea-glass'
         } | Select-Object -First 1)[0]
-        $themeCombo.SelectedItem = $iceTheme
+        $themeCombo.SelectedItem = $arcticTheme
         $beforeLoadedPreference = Read-QiehaoUiPreferences `
             -StateDirectory $fakeStateDirectory
         $themeCombo.SelectedItem = $startupTheme
@@ -1164,7 +1175,7 @@ try {
         $themeWindow.RaiseEvent((New-Object System.Windows.RoutedEventArgs(
             [System.Windows.FrameworkElement]::LoadedEvent
         )))
-        $themeCombo.SelectedItem = $iceTheme
+        $themeCombo.SelectedItem = $arcticTheme
         $immediatePreference = Read-QiehaoUiPreferences `
             -StateDirectory $fakeStateDirectory
         $immediateWriteTime = ([System.IO.FileInfo]$preferencePath).LastWriteTimeUtc
@@ -1195,16 +1206,16 @@ try {
         [System.IO.File]::ReadAllText($preferencePath)
     )
     Assert-GuiTest -Condition (
-        @($themeCombo.ItemsSource).Count -eq 5 -and
+        @($themeCombo.ItemsSource).Count -eq 7 -and
         [string]$startupTheme.Id -ceq '02-navy-gold' -and
         $beforeLoadedPreference.Background -ceq '02-navy-gold' -and
         $themeLifecycle.Ready -and $themeLifecycle.HandlerCalls -ge 3 -and
         $themeLifecycle.PersistCalls -eq 1 -and
-        $immediatePreference.Background -ceq '03-ice-glass' -and
+        $immediatePreference.Background -ceq '07-arctic-sea-glass' -and
         $immediateWriteTime -gt $initialWriteTime -and
-        $restoredPreference.Background -ceq '03-ice-glass' -and
+        $restoredPreference.Background -ceq '07-arctic-sea-glass' -and
         $restoredPreference.Language -ceq 'zh-CN' -and
-        $secondSelectedThemeId -ceq '03-ice-glass' -and
+        $secondSelectedThemeId -ceq '07-arctic-sea-glass' -and
         (@($preferenceData.PSObject.Properties.Name) -join '|') -ceq
             'schema_version|background|language' -and
         [int]$preferenceData.schema_version -eq 2 -and
@@ -3031,6 +3042,12 @@ finally {
     FiveThemesGlassProperties = 'PASS'
     FiveThemesDialogResources = 'PASS'
     FiveThemesDialogContrast = 'PASS'
+    SevenThemesLoad = 'PASS'
+    SevenThemesGlassProperties = 'PASS'
+    SevenThemesDialogResources = 'PASS'
+    SevenThemesDialogContrast = 'PASS'
+    ExplicitThemeRegistryOnly = 'PASS'
+    NewThemePreferencesPersist = 'PASS'
     MissingThemeFallback = 'PASS'
     CorruptThemeFallback = 'PASS'
     BackgroundUniformToFill = 'PASS'
