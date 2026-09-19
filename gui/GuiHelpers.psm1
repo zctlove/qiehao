@@ -1198,6 +1198,7 @@ function Get-QiehaoBackgroundThemes {
             FocusRing = '#FF8CCBFF'; ToolTipBackground = '#F01B2B3D'
             ToolTipBorder = '#CC7EC8FF'; ToolTipForeground = '#FFF7FBFF'
             ButtonOnAccent = '#FFF7FBFF'; DisabledBackground = '#A0445362'
+            BrandWatermark = '#2D7EC8FF'
         }
         '02-navy-gold' = [ordered]@{
             TextMuted = '#FFB5AA90'; Primary = '#FF356D9B'
@@ -1214,6 +1215,7 @@ function Get-QiehaoBackgroundThemes {
             FocusRing = '#FFE0C477'; ToolTipBackground = '#F0181D29'
             ToolTipBorder = '#CCD2B86E'; ToolTipForeground = '#FFFFF9EB'
             ButtonOnAccent = '#FFFFF9EB'; DisabledBackground = '#A04D4D52'
+            BrandWatermark = '#2AD2B86E'
         }
         '03-ice-glass' = [ordered]@{
             TextMuted = '#FF557386'; Primary = '#FF1F74AE'
@@ -1231,6 +1233,7 @@ function Get-QiehaoBackgroundThemes {
             ToolTipBorder = '#D05296BE'; ToolTipForeground = '#FFF7FBFF'
             ButtonOnAccent = '#FFFFFFFF'; DisabledBackground = '#A6C5DCE7'
             CardShadow = '#30285B76'; GridHeader = '#A4D8EFFA'
+            BrandWatermark = '#221F7FB9'
         }
         '04-purple-tech' = [ordered]@{
             TextMuted = '#FFB6A7C8'; Primary = '#FF446EAA'
@@ -1247,6 +1250,7 @@ function Get-QiehaoBackgroundThemes {
             FocusRing = '#FFA9D4FF'; ToolTipBackground = '#F0292244'
             ToolTipBorder = '#CCC2A9F0'; ToolTipForeground = '#FFF8F3FF'
             ButtonOnAccent = '#FFF8F3FF'; DisabledBackground = '#A0524964'
+            BrandWatermark = '#2CA9D4FF'
         }
         '05-light-flow' = [ordered]@{
             TextMuted = '#FF5B7880'; Primary = '#FF287DAD'
@@ -1264,6 +1268,7 @@ function Get-QiehaoBackgroundThemes {
             ToolTipBorder = '#D04F96A5'; ToolTipForeground = '#FFFFFFFF'
             ButtonOnAccent = '#FFFFFFFF'; DisabledBackground = '#A3C4DADE'
             CardShadow = '#2C245765'; GridHeader = '#9FDDF1F4'
+            BrandWatermark = '#1F167F9C'
         }
         '06-aurora-silver-blue' = [ordered]@{
             TextMuted = '#FF55728A'; Primary = '#FF2878B5'
@@ -1281,6 +1286,7 @@ function Get-QiehaoBackgroundThemes {
             ToolTipBorder = '#D05A93BD'; ToolTipForeground = '#FFF8FCFF'
             ButtonOnAccent = '#FFFFFFFF'; DisabledBackground = '#A4C3D5E4'
             CardShadow = '#2E244A67'; GridHeader = '#A1D9EAF7'
+            BrandWatermark = '#202878B5'
         }
         '07-arctic-sea-glass' = [ordered]@{
             TextMuted = '#FF52747C'; Primary = '#FF167D99'
@@ -1298,6 +1304,7 @@ function Get-QiehaoBackgroundThemes {
             ToolTipBorder = '#D04794A2'; ToolTipForeground = '#FFF7FFFF'
             ButtonOnAccent = '#FFFFFFFF'; DisabledBackground = '#A2BDD9DC'
             CardShadow = '#2D174B59'; GridHeader = '#A2D7F0F2'
+            BrandWatermark = '#22087E91'
         }
     }
 

@@ -1017,6 +1017,8 @@ try {
             TextPrimaryBrush = New-QiehaoSolidBrush -Color ([string]$Theme.TextPrimary)
             TextSecondaryBrush = New-QiehaoSolidBrush -Color ([string]$Theme.TextSecondary)
             TextMutedBrush = New-QiehaoSolidBrush -Color ([string]$Theme.TextMuted)
+            BrandWatermarkBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.BrandWatermark)
             ButtonFaceBrush = New-QiehaoGradientBrush -Top ([string]$Theme.ButtonTop) `
                 -Bottom ([string]$Theme.ButtonBottom)
             ButtonHoverBrush = New-QiehaoSolidBrush -Color ([string]$Theme.ButtonHover)

@@ -33,6 +33,7 @@
         <SolidColorBrush x:Key="TextPrimaryBrush" Color="#FFF4F8FC" />
         <SolidColorBrush x:Key="TextSecondaryBrush" Color="#FFD0DCE8" />
         <SolidColorBrush x:Key="TextMutedBrush" Color="#FF9FB2C4" />
+        <SolidColorBrush x:Key="BrandWatermarkBrush" Color="#2D7EC8FF" />
         <SolidColorBrush x:Key="ControlBackgroundBrush" Color="#C41B2B3D" />
         <SolidColorBrush x:Key="ControlBorderBrush" Color="#AA6F91B2" />
         <SolidColorBrush x:Key="FocusRingBrush" Color="#FF8CCBFF" />
@@ -338,6 +339,21 @@
     <Grid>
         <Image x:Name="BackgroundImage" Stretch="UniformToFill" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" />
         <Border x:Name="BackgroundOverlay" Background="#66101D2B" />
+        <Canvas x:Name="BrandWatermarkLayer" IsHitTestVisible="False">
+            <TextBlock x:Name="BrandWatermarkText"
+                       Canvas.Left="36"
+                       Canvas.Top="52"
+                       Text="ZCT"
+                       FontSize="82"
+                       FontWeight="SemiBold"
+                       Foreground="{DynamicResource BrandWatermarkBrush}"
+                       IsHitTestVisible="False"
+                       RenderTransformOrigin="0.5,0.5">
+                <TextBlock.RenderTransform>
+                    <RotateTransform Angle="-30" />
+                </TextBlock.RenderTransform>
+            </TextBlock>
+        </Canvas>
 
         <Grid Margin="16">
             <Grid.RowDefinitions>

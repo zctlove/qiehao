@@ -139,6 +139,7 @@ function Set-VisualTheme {
         PanelBorderBrush = 'CardBorder'
         TextPrimaryBrush = 'TextPrimary'; TextSecondaryBrush = 'TextSecondary'
         TextMutedBrush = 'TextMuted'; ButtonDisabledBrush = 'DisabledBackground'
+        BrandWatermarkBrush = 'BrandWatermark'
         ActiveRowBrush = 'GridActive'; ActiveSelectedRowBrush = 'GridActiveSelected'
         SelectedRowBrush = 'GridSelected'; GridHoverBrush = 'GridHover'
         ActiveBorderBrush = 'ActiveBorderTint'
@@ -302,7 +303,7 @@ $requiredSemantic = @(
     'Info','Warning','Danger','TextPrimary','TextSecondary','TextMuted','GridHeader',
     'GridHover','GridSelected','GridActive','GridActiveSelected','ControlBackground',
     'ControlBorder','FocusRing','DisabledBackground','ToolTipBackground',
-    'ToolTipBorder','ToolTipForeground'
+    'ToolTipBorder','ToolTipForeground','BrandWatermark'
 )
 $themeFingerprintFields = @(
     'Id','FileName','OverlayMode','OverlayColor','CardTop','CardBottom',
@@ -349,6 +350,17 @@ foreach ($theme in $themes) {
     )) {
         Assert-VisualPolish ((Get-ColorDistance $theme.($pair[0]) $theme.($pair[1])) -gt 18) `
             ('VISUAL_COLOR_SANITY_FAILED_' + $theme.Id + '_' + $pair[0])
+    }
+    $brandColor = Get-VisualColor $theme.BrandWatermark
+    if ($theme.OverlayMode -ceq 'Dark') {
+        Assert-VisualPolish (
+            $brandColor.A -ge 0x1F -and $brandColor.A -le 0x2E
+        ) ('VISUAL_DARK_BRAND_OPACITY_INVALID_' + $theme.Id)
+    }
+    else {
+        Assert-VisualPolish (
+            $brandColor.A -ge 0x1A -and $brandColor.A -le 0x24
+        ) ('VISUAL_LIGHT_BRAND_OPACITY_INVALID_' + $theme.Id)
     }
 }
 foreach ($entry in $darkThemeBaselineHashes.GetEnumerator()) {
@@ -413,6 +425,10 @@ Assert-VisualPolish (
     $auroraTheme.CardShadow -cne $arcticTheme.CardShadow
 ) 'VISUAL_NEW_THEME_PALETTES_NOT_INDEPENDENT'
 
+$brandWatermarkExists = $false
+$brandWatermarkTextZct = $false
+$brandWatermarkHitTestDisabled = $false
+$brandWatermarkRotationValid = $false
 $probe = Read-VisualWindow
 try {
     foreach ($style in @(
@@ -442,6 +458,26 @@ try {
         'VISUAL_ACCOUNT_GRID_STAR_LAYOUT_CHANGED'
     Assert-VisualPolish ($grid.RowHeight -eq 32 -and
         $grid.ColumnHeaderHeight -eq 34) 'VISUAL_GRID_HEIGHT_CHANGED'
+    $brandLayer = Get-VisualNamed $probe 'BrandWatermarkLayer'
+    $brandText = Get-VisualNamed $probe 'BrandWatermarkText'
+    $brandRotation = $brandText.RenderTransform
+    $brandWatermarkExists = (
+        $brandLayer -is [Windows.Controls.Canvas] -and
+        $brandText -is [Windows.Controls.TextBlock] -and
+        $probe.Content.Children.IndexOf($brandLayer) -eq 2
+    )
+    $brandWatermarkTextZct = (
+        $brandText.Text -ceq 'ZCT' -and $brandText.FontSize -ge 72 -and
+        $brandText.FontSize -le 88
+    )
+    $brandWatermarkHitTestDisabled = (
+        -not $brandLayer.IsHitTestVisible -and
+        -not $brandText.IsHitTestVisible
+    )
+    $brandWatermarkRotationValid = (
+        $brandRotation -is [Windows.Media.RotateTransform] -and
+        $brandRotation.Angle -ge -32 -and $brandRotation.Angle -le -28
+    )
 }
 finally { $probe.Close() }
 
@@ -456,6 +492,9 @@ $allDisabledReadable = $true
 $allStateRendering = $true
 $allCardSeparation = $true
 $allLightRenderedLayers = $true
+$allBrandRendering = $true
+$allBrandLayoutNeutral = $true
+$brandRenderedThemes = @{}
 foreach ($theme in $themes) {
     foreach ($language in @('zh-CN','en-US')) {
         $window = Read-VisualWindow
@@ -473,7 +512,34 @@ foreach ($theme in $themes) {
             Update-VisualWindow $window
 
             $root = $window.Content
-            $layout = $root.Children[2]
+            $brandLayer = Get-VisualNamed $window 'BrandWatermarkLayer'
+            $brandText = Get-VisualNamed $window 'BrandWatermarkText'
+            $brandBounds = $brandText.TransformToAncestor($window).TransformBounds(
+                (New-Object Windows.Rect(
+                    0, 0, $brandText.ActualWidth, $brandText.ActualHeight
+                ))
+            )
+            $layout = $root.Children[3]
+            $allBrandRendering = $allBrandRendering -and
+                $brandText.Text -ceq 'ZCT' -and
+                $brandText.Visibility -eq [Windows.Visibility]::Visible -and
+                $brandText.ActualWidth -gt 0 -and
+                $brandText.ActualHeight -gt 0 -and
+                $brandText.Foreground -is [Windows.Media.SolidColorBrush] -and
+                $brandText.Foreground.Color -eq
+                    (Get-VisualColor $theme.BrandWatermark) -and
+                $brandBounds.Left -ge 0 -and $brandBounds.Top -ge 0 -and
+                $brandBounds.Right -le $window.ActualWidth -and
+                $brandBounds.Bottom -le $window.ActualHeight
+            $allBrandLayoutNeutral = $allBrandLayoutNeutral -and
+                $root.Children.Count -eq 4 -and
+                $root.Children.IndexOf($brandLayer) -eq 2 -and
+                $root.Children.IndexOf($layout) -eq 3 -and
+                [Math]::Abs($brandLayer.DesiredSize.Width) -lt 0.01 -and
+                [Math]::Abs($brandLayer.DesiredSize.Height) -lt 0.01 -and
+                [Math]::Abs([Windows.Controls.Canvas]::GetLeft($brandText) - 36) -lt 0.01 -and
+                [Math]::Abs([Windows.Controls.Canvas]::GetTop($brandText) - 52) -lt 0.01
+            $brandRenderedThemes[[string]$theme.Id] = $true
             $cards = @($layout.Children | Where-Object {
                 $_ -is [Windows.Controls.Border] -and
                 $_.Style -eq $window.Resources['PanelStyle']
@@ -618,6 +684,14 @@ $semanticCodexStateCodes = (
 )
 
 Assert-VisualPolish ($rendered -eq 14) 'VISUAL_FOURTEEN_COMBINATIONS_NOT_RENDERED'
+Assert-VisualPolish $brandWatermarkExists 'VISUAL_BRAND_WATERMARK_MISSING'
+Assert-VisualPolish $brandWatermarkTextZct 'VISUAL_BRAND_WATERMARK_TEXT_INVALID'
+Assert-VisualPolish $brandWatermarkHitTestDisabled 'VISUAL_BRAND_WATERMARK_HIT_TEST_ENABLED'
+Assert-VisualPolish $brandWatermarkRotationValid 'VISUAL_BRAND_WATERMARK_ROTATION_INVALID'
+Assert-VisualPolish $allBrandLayoutNeutral 'VISUAL_BRAND_WATERMARK_AFFECTS_LAYOUT'
+Assert-VisualPolish (
+    $allBrandRendering -and $brandRenderedThemes.Count -eq 7
+) 'VISUAL_BRAND_WATERMARK_NOT_VISIBLE_IN_SEVEN_THEMES'
 Assert-VisualPolish $allCards 'VISUAL_GLASS_CARDS_NOT_RENDERED'
 Assert-VisualPolish $allLightRenderedLayers `
     'VISUAL_LIGHT_THEME_LAYERS_NOT_RENDERED'
@@ -646,6 +720,12 @@ Assert-VisualPolish $semanticCodexStateCodes 'VISUAL_CODEX_STATE_USES_DISPLAY_TE
 'LightThemeRenderedGlassLayers=True'
 'ZhCnEnUsAllThemesRender=True'
 'FourteenThemeLanguageCombinationsRendered=14'
+'BrandWatermarkExists=True'
+'BrandWatermarkTextZCT=True'
+'BrandWatermarkIsHitTestVisibleFalse=True'
+'BrandWatermarkRotationBetweenMinus28AndMinus32=True'
+'BrandWatermarkDoesNotAffectLayout=True'
+'BrandWatermarkVisibleInSevenThemes=True'
 'PrimaryButtonStyleExists=True'
 'PositiveButtonStyleExists=True'
 'InfoButtonStyleExists=True'
