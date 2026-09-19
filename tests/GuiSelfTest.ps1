@@ -28,6 +28,8 @@ $localizationSelfTestPath = Join-Path -Path $PSScriptRoot `
     -ChildPath 'LocalizationSelfTest.ps1'
 $accountGridLayoutSelfTestPath = Join-Path -Path $PSScriptRoot `
     -ChildPath 'AccountGridLayoutSelfTest.ps1'
+$visualPolishSelfTestPath = Join-Path -Path $PSScriptRoot `
+    -ChildPath 'VisualPolishSelfTest.ps1'
 $coreModulePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 
 function Assert-GuiTest {
@@ -532,6 +534,52 @@ Assert-GuiTest -Condition (
         $accountGridLayout7.Output -cnotcontains $_
     }).Count -eq 0
 ) -Code 'GUI_ACCOUNT_GRID_LAYOUT_PS7_FAILED'
+
+$requiredVisualPolishOutput = @(
+    'AllThemesLoad=True',
+    'AllThemesExposeRequiredSemanticBrushes=True',
+    'ZhCnEnUsAllThemesRender=True',
+    'TenThemeLanguageCombinationsRendered=10',
+    'PrimaryButtonStyleExists=True',
+    'PositiveButtonStyleExists=True',
+    'InfoButtonStyleExists=True',
+    'AccentButtonStyleExists=True',
+    'DangerButtonStyleExists=True',
+    'SecondaryButtonStyleExists=True',
+    'DisabledButtonReadable=True',
+    'AccountGridHeaderStyleApplied=True',
+    'AccountGridRowStyleApplied=True',
+    'ActiveSelectedStatesDistinct=True',
+    'SearchStyleApplied=True',
+    'ComboBoxStyleApplied=True',
+    'TooltipStyleApplied=True',
+    'SwitchDialogUsesThemeResources=True',
+    'VisualStateUsesSemanticCodes=True',
+    'GlassCardsRenderedOffscreen=True',
+    'NoCriticalControlClipping=True',
+    'WindowMinSizePreserved=True',
+    'AccountGridResponsiveLayoutPreserved=True',
+    'QuotaRowHeightPreserved=True',
+    'NoWholePageVerticalScroll=True',
+    'VISUAL_POLISH_SELFTEST_PASS'
+)
+$visualPolish51 = Invoke-PowerShellFileTest `
+    -HostPath $ps51Command.Source -ScriptPath $visualPolishSelfTestPath
+Assert-GuiTest -Condition (
+    $visualPolish51.ExitCode -eq 0 -and
+    @($requiredVisualPolishOutput | Where-Object {
+        $visualPolish51.Output -cnotcontains $_
+    }).Count -eq 0
+) -Code 'GUI_VISUAL_POLISH_PS51_FAILED'
+
+$visualPolish7 = Invoke-PowerShellFileTest `
+    -HostPath $ps7Command.Source -ScriptPath $visualPolishSelfTestPath
+Assert-GuiTest -Condition (
+    $visualPolish7.ExitCode -eq 0 -and
+    @($requiredVisualPolishOutput | Where-Object {
+        $visualPolish7.Output -cnotcontains $_
+    }).Count -eq 0
+) -Code 'GUI_VISUAL_POLISH_PS7_FAILED'
 
 $productionImport51 = Invoke-PowerShellFileTest `
     -HostPath $ps51Command.Source -ScriptPath $quotaImportContractPath
@@ -2813,6 +2861,10 @@ $waitDialogSection = [regex]::Match(
     $guiSource,
     '(?s)function Show-QiehaoManualSwitchWaitDialog\s*\{.*?function Show-QiehaoSwitchResult'
 ).Value
+$dialogResourceSection = [regex]::Match(
+    $guiSource,
+    '(?s)function Copy-QiehaoDialogVisualResources\s*\{.*?function Set-QiehaoThemeResources'
+).Value
 Assert-GuiTest -Condition (
     -not [string]::IsNullOrWhiteSpace($waitDialogSection) -and
     ([regex]::Matches($waitDialogSection,
@@ -2821,14 +2873,16 @@ Assert-GuiTest -Condition (
     $waitDialogSection -match 'Add_Loaded' -and
     $waitDialogSection -match 'Start-QiehaoManualSwitchWaitTimer' -and
     $waitDialogSection -match 'Add_Closing' -and
-    $waitDialogSection -match "DialogBackgroundBrush" -and
-    $waitDialogSection -match "DialogCardBrush" -and
-    $waitDialogSection -match "DialogBorderBrush" -and
-    $waitDialogSection -match "DialogForegroundBrush" -and
-    $waitDialogSection -match "DialogAccentBrush" -and
-    $waitDialogSection -match "DialogWarningBrush" -and
-    $waitDialogSection -match "DialogSuccessBrush" -and
-    $waitDialogSection -match "PrimaryButtonStyle" -and
+    -not [string]::IsNullOrWhiteSpace($dialogResourceSection) -and
+    $dialogResourceSection -match "DialogBackgroundBrush" -and
+    $dialogResourceSection -match "DialogCardBrush" -and
+    $dialogResourceSection -match "DialogBorderBrush" -and
+    $dialogResourceSection -match "DialogForegroundBrush" -and
+    $dialogResourceSection -match "DialogAccentBrush" -and
+    $dialogResourceSection -match "DialogWarningBrush" -and
+    $dialogResourceSection -match "DialogSuccessBrush" -and
+    $waitDialogSection -match 'Copy-QiehaoDialogVisualResources -Dialog \$dialog' -and
+    $waitDialogSection -match "SecondaryButtonStyle" -and
     $waitDialogSection -match 'New-Object System\.Windows\.Controls\.Border' -and
     $waitDialogSection -notmatch 'SystemColors|ControlBrush|#FFD4D0C8' -and
     $waitDialogSection -notmatch "Button\.Content\s*=\s*'(开始等待|开始检测|继续切换)" -and
@@ -2965,6 +3019,8 @@ finally {
     PowerShell7XamlParse = 'PASS'
     AccountGridLayoutPowerShell51 = 'PASS'
     AccountGridLayoutPowerShell7 = 'PASS'
+    VisualPolishPowerShell51 = 'PASS'
+    VisualPolishPowerShell7 = 'PASS'
     QuotaRowsCompact28To34 = 'PASS'
     QuotaWindowCountDoesNotChangeRowHeight = 'PASS'
     NoSnapshotSingleLineHeight = 'PASS'

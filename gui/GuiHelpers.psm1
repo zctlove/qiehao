@@ -969,7 +969,7 @@ function Get-QiehaoBackgroundThemes {
     [CmdletBinding()]
     param()
 
-    return @(
+    $themes = @(
         [pscustomobject]@{
             Id = '01-blue-glass'
             Name = '科技蓝'
@@ -1121,6 +1121,115 @@ function Get-QiehaoBackgroundThemes {
             DangerBottom = '#EADDB5BB'
         }
     )
+
+    $semanticPalettes = [ordered]@{
+        '01-blue-glass' = [ordered]@{
+            TextMuted = '#FF9FB2C4'; Primary = '#FF2E6FAF'
+            PrimaryHover = '#FF3E82C7'; PrimaryPressed = '#FF245A91'
+            Positive = '#FF2D7D5A'; PositiveHover = '#FF38976C'
+            PositivePressed = '#FF246649'; Info = '#FF247A91'
+            InfoHover = '#FF2D91AB'; InfoPressed = '#FF1D6377'
+            Accent = '#FF585FA8'; AccentHover = '#FF6C74C2'
+            AccentPressed = '#FF474D8D'; Secondary = '#B83D5369'
+            SecondaryHover = '#D04B657F'; SecondaryPressed = '#D032465B'
+            Danger = '#FF9D4451'; DangerHover = '#FFB65260'
+            DangerPressed = '#FF833743'; ControlBackground = '#C41B2B3D'
+            ControlBorder = '#AA6F91B2'; GridHover = '#3A7EC8FF'
+            FocusRing = '#FF8CCBFF'; ToolTipBackground = '#F01B2B3D'
+            ToolTipBorder = '#CC7EC8FF'; ToolTipForeground = '#FFF7FBFF'
+            ButtonOnAccent = '#FFF7FBFF'; DisabledBackground = '#A0445362'
+        }
+        '02-navy-gold' = [ordered]@{
+            TextMuted = '#FFB5AA90'; Primary = '#FF356D9B'
+            PrimaryHover = '#FF4383B6'; PrimaryPressed = '#FF2A587F'
+            Positive = '#FF3E7758'; PositiveHover = '#FF4B8C69'
+            PositivePressed = '#FF326047'; Info = '#FF3C7282'
+            InfoHover = '#FF4A8798'; InfoPressed = '#FF305D6A'
+            Accent = '#FF6B5C94'; AccentHover = '#FF806FAC'
+            AccentPressed = '#FF574B79'; Secondary = '#B8444652'
+            SecondaryHover = '#D0565866'; SecondaryPressed = '#D0373945'
+            Danger = '#FFA14C56'; DangerHover = '#FFB95C66'
+            DangerPressed = '#FF853E47'; ControlBackground = '#C4181D29'
+            ControlBorder = '#AA8F8058'; GridHover = '#3AC7A85C'
+            FocusRing = '#FFE0C477'; ToolTipBackground = '#F0181D29'
+            ToolTipBorder = '#CCD2B86E'; ToolTipForeground = '#FFFFF9EB'
+            ButtonOnAccent = '#FFFFF9EB'; DisabledBackground = '#A04D4D52'
+        }
+        '03-ice-glass' = [ordered]@{
+            TextMuted = '#FF687D8D'; Primary = '#FF246FA8'
+            PrimaryHover = '#FF2D83C3'; PrimaryPressed = '#FF1C5B8B'
+            Positive = '#FF2E7657'; PositiveHover = '#FF388C67'
+            PositivePressed = '#FF255F46'; Info = '#FF2C7187'
+            InfoHover = '#FF37869E'; InfoPressed = '#FF245B6D'
+            Accent = '#FF5B569E'; AccentHover = '#FF6C66B6'
+            AccentPressed = '#FF4A4682'; Secondary = '#E6DDEBF2'
+            SecondaryHover = '#F2EDF6FA'; SecondaryPressed = '#E6C6D9E3'
+            Danger = '#FFB03D4A'; DangerHover = '#FFC34D5A'
+            DangerPressed = '#FF922F3B'; ControlBackground = '#EEFFFFFF'
+            ControlBorder = '#B07193AA'; GridHover = '#807EB8D8'
+            FocusRing = '#FF246FAD'; ToolTipBackground = '#F0263E52'
+            ToolTipBorder = '#D05C88A4'; ToolTipForeground = '#FFF7FBFF'
+            ButtonOnAccent = '#FFFFFFFF'; DisabledBackground = '#C9CAD5DB'
+        }
+        '04-purple-tech' = [ordered]@{
+            TextMuted = '#FFB6A7C8'; Primary = '#FF446EAA'
+            PrimaryHover = '#FF5483C2'; PrimaryPressed = '#FF375A8D'
+            Positive = '#FF3A7D5B'; PositiveHover = '#FF47936B'
+            PositivePressed = '#FF2F664A'; Info = '#FF347B92'
+            InfoHover = '#FF4091AA'; InfoPressed = '#FF2A6477'
+            Accent = '#FF6754A3'; AccentHover = '#FF7B66BC'
+            AccentPressed = '#FF554586'; Secondary = '#B84B4162'
+            SecondaryHover = '#D05E5277'; SecondaryPressed = '#D03D3550'
+            Danger = '#FFA34861'; DangerHover = '#FFBA5972'
+            DangerPressed = '#FF863A50'; ControlBackground = '#C4292244'
+            ControlBorder = '#AAA18AC9'; GridHover = '#3AAE8DE0'
+            FocusRing = '#FFA9D4FF'; ToolTipBackground = '#F0292244'
+            ToolTipBorder = '#CCC2A9F0'; ToolTipForeground = '#FFF8F3FF'
+            ButtonOnAccent = '#FFF8F3FF'; DisabledBackground = '#A0524964'
+        }
+        '05-light-flow' = [ordered]@{
+            TextMuted = '#FF6B7B87'; Primary = '#FF286FA7'
+            PrimaryHover = '#FF3283C1'; PrimaryPressed = '#FF205B89'
+            Positive = '#FF317653'; PositiveHover = '#FF3B8B62'
+            PositivePressed = '#FF285F43'; Info = '#FF2D7186'
+            InfoHover = '#FF38869C'; InfoPressed = '#FF255C6C'
+            Accent = '#FF5B5799'; AccentHover = '#FF6D68B1'
+            AccentPressed = '#FF4A477F'; Secondary = '#E8DFE9EF'
+            SecondaryHover = '#F5F2F7FA'; SecondaryPressed = '#E8C8D6DE'
+            Danger = '#FFAE3E49'; DangerHover = '#FFC14E59'
+            DangerPressed = '#FF90313C'; ControlBackground = '#F0FFFFFF'
+            ControlBorder = '#B07D95A6'; GridHover = '#807CAFD0'
+            FocusRing = '#FF286FA7'; ToolTipBackground = '#F02B3C49'
+            ToolTipBorder = '#D0638398'; ToolTipForeground = '#FFFFFFFF'
+            ButtonOnAccent = '#FFFFFFFF'; DisabledBackground = '#CCD0D8DD'
+        }
+    }
+
+    foreach ($theme in $themes) {
+        $palette = $semanticPalettes[[string]$theme.Id]
+        $derived = [ordered]@{
+            WindowOverlay = [string]$theme.OverlayColor
+            CardBackground = [string]$theme.CardTop
+            CardBorder = [string]$theme.BorderTint
+            CardShadow = if ([string]$theme.OverlayMode -ceq 'Dark') {
+                '#7807111E'
+            }
+            else { '#4A38556A' }
+            Warning = [string]$theme.UnknownWarningTint
+            GridHeader = [string]$theme.ColumnHeaderBackgroundTint
+            GridSelected = [string]$theme.SelectedRowTint
+            GridActive = [string]$theme.ActiveRowTint
+            GridActiveSelected = [string]$theme.ActiveSelectedRowTint
+        }
+        foreach ($entry in $palette.GetEnumerator()) {
+            $derived[[string]$entry.Key] = [string]$entry.Value
+        }
+        foreach ($entry in $derived.GetEnumerator()) {
+            Add-Member -InputObject $theme -NotePropertyName ([string]$entry.Key) `
+                -NotePropertyValue ([string]$entry.Value)
+        }
+    }
+    return $themes
 }
 
 function Get-QiehaoSwitchDialogPalette {

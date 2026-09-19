@@ -777,7 +777,9 @@ try {
             [Parameter(Mandatory = $true)][string]$Title,
             [Parameter(Mandatory = $true)][string]$Message,
             [Parameter(Mandatory = $true)][string]$ConfirmText,
-            [string]$CancelText = ''
+            [string]$CancelText = '',
+            [ValidateSet('Primary', 'Positive', 'Danger')]
+            [string]$ConfirmStyle = 'Primary'
         )
         if ([string]::IsNullOrWhiteSpace($CancelText)) {
             $CancelText = Get-QiehaoGuiText -Key 'Button.Cancel' `
@@ -823,13 +825,15 @@ try {
         $cancelButton.MinWidth = 90
         $cancelButton.MinHeight = 34
         $cancelButton.IsCancel = $true
+        $confirmButton.Style = $window.Resources[$ConfirmStyle + 'ButtonStyle']
+        $cancelButton.Style = $window.Resources['SecondaryButtonStyle']
         $confirmButton.Add_Click({ $dialog.Tag = $true; $dialog.DialogResult = $true })
         $cancelButton.Add_Click({ $dialog.Tag = $false; $dialog.DialogResult = $false })
         $buttons.Children.Add($confirmButton) | Out-Null
         $buttons.Children.Add($cancelButton) | Out-Null
         $root.Children.Add($buttons) | Out-Null
         $dialog.Tag = $false
-        $dialog.Content = $root
+        Set-QiehaoDialogContent -Dialog $dialog -Content $root
         $null = $dialog.ShowDialog()
         return [bool]$dialog.Tag
     }
@@ -875,6 +879,7 @@ try {
         $nameBox.MinHeight = 32
         $nameBox.Margin = '0,6,0,0'
         $nameBox.Padding = '7,4'
+        $nameBox.Style = $window.Resources[[System.Windows.Controls.TextBox]]
         [System.Windows.Controls.Grid]::SetRow($nameBox, 2)
         $root.Children.Add($nameBox) | Out-Null
         $buttons = New-Object System.Windows.Controls.StackPanel
@@ -895,6 +900,8 @@ try {
         $cancelButton.MinWidth = 90
         $cancelButton.MinHeight = 34
         $cancelButton.IsCancel = $true
+        $okButton.Style = $window.Resources['PrimaryButtonStyle']
+        $cancelButton.Style = $window.Resources['SecondaryButtonStyle']
         $okButton.Add_Click({
             $candidate = ([string]$nameBox.Text).Trim()
             if ([string]::IsNullOrWhiteSpace($candidate)) {
@@ -915,7 +922,7 @@ try {
         $buttons.Children.Add($okButton) | Out-Null
         $buttons.Children.Add($cancelButton) | Out-Null
         $root.Children.Add($buttons) | Out-Null
-        $dialog.Content = $root
+        Set-QiehaoDialogContent -Dialog $dialog -Content $root
         $result = $dialog.ShowDialog()
         if ($result -eq $true) { return [string]$dialog.Tag }
         return $null
@@ -947,32 +954,87 @@ try {
         return $brush
     }
 
+    function Copy-QiehaoDialogVisualResources {
+        param([Parameter(Mandatory = $true)][System.Windows.Window]$Dialog)
+        foreach ($resourceKey in @(
+            'DialogBackgroundBrush', 'DialogCardBrush', 'DialogBorderBrush',
+            'DialogForegroundBrush', 'DialogSecondaryBrush',
+            'DialogAccentBrush', 'DialogWarningBrush', 'DialogSuccessBrush',
+            'DialogButtonBackgroundBrush', 'DialogButtonForegroundBrush',
+            'DialogButtonBorderBrush', 'TextPrimaryBrush',
+            'TextSecondaryBrush', 'TextMutedBrush', 'ButtonDisabledBrush',
+            'PanelBorderBrush', 'ControlBackgroundBrush',
+            'ControlBorderBrush', 'FocusRingBrush', 'ButtonOnAccentBrush',
+            'PrimaryButtonBrush', 'PrimaryButtonHoverBrush',
+            'PrimaryButtonPressedBrush', 'PositiveButtonBrush',
+            'PositiveButtonHoverBrush', 'PositiveButtonPressedBrush',
+            'InfoButtonBrush', 'InfoButtonHoverBrush',
+            'InfoButtonPressedBrush', 'AccentButtonBrush',
+            'AccentButtonHoverBrush', 'AccentButtonPressedBrush',
+            'SecondaryButtonBrush', 'SecondaryButtonHoverBrush',
+            'SecondaryButtonPressedBrush', 'DangerButtonSolidBrush',
+            'DangerButtonHoverBrush', 'DangerButtonPressedBrush',
+            'ToolTipBackgroundBrush', 'ToolTipBorderBrush',
+            'ToolTipForegroundBrush'
+        )) {
+            $Dialog.Resources[$resourceKey] = $window.Resources[$resourceKey]
+        }
+        $Dialog.Background = $Dialog.Resources['DialogBackgroundBrush']
+        $Dialog.Foreground = $Dialog.Resources['DialogForegroundBrush']
+    }
+
+    function Set-QiehaoDialogContent {
+        param(
+            [Parameter(Mandatory = $true)][System.Windows.Window]$Dialog,
+            [Parameter(Mandatory = $true)][System.Windows.FrameworkElement]$Content
+        )
+        Copy-QiehaoDialogVisualResources -Dialog $Dialog
+        $Content.Margin = 0
+        $card = New-Object System.Windows.Controls.Border
+        $card.Background = $Dialog.Resources['DialogCardBrush']
+        $card.BorderBrush = $Dialog.Resources['DialogBorderBrush']
+        $card.BorderThickness = 1
+        $card.CornerRadius = 12
+        $card.Padding = 14
+        $card.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect
+        $card.Effect.BlurRadius = 16
+        $card.Effect.ShadowDepth = 3
+        $card.Effect.Opacity = 0.20
+        $card.Child = $Content
+        $shell = New-Object System.Windows.Controls.Grid
+        $shell.Margin = 12
+        $shell.Children.Add($card) | Out-Null
+        $Dialog.Content = $shell
+    }
+
     function Set-QiehaoThemeResources {
         param([Parameter(Mandatory = $true)][object]$Theme)
         $dialogPalette = Get-QiehaoSwitchDialogPalette -Theme $Theme
         $values = [ordered]@{
             PanelBrush = New-QiehaoGradientBrush -Top ([string]$Theme.CardTop) `
                 -Bottom ([string]$Theme.CardBottom)
-            PanelBorderBrush = New-QiehaoSolidBrush -Color ([string]$Theme.BorderTint)
+            PanelBorderBrush = New-QiehaoSolidBrush -Color ([string]$Theme.CardBorder)
             TextPrimaryBrush = New-QiehaoSolidBrush -Color ([string]$Theme.TextPrimary)
             TextSecondaryBrush = New-QiehaoSolidBrush -Color ([string]$Theme.TextSecondary)
+            TextMutedBrush = New-QiehaoSolidBrush -Color ([string]$Theme.TextMuted)
             ButtonFaceBrush = New-QiehaoGradientBrush -Top ([string]$Theme.ButtonTop) `
                 -Bottom ([string]$Theme.ButtonBottom)
             ButtonHoverBrush = New-QiehaoSolidBrush -Color ([string]$Theme.ButtonHover)
             ButtonPressedBrush = New-QiehaoSolidBrush -Color ([string]$Theme.ButtonPressed)
             DangerButtonBrush = New-QiehaoGradientBrush -Top ([string]$Theme.DangerTop) `
                 -Bottom ([string]$Theme.DangerBottom)
-            ActiveRowBrush = New-QiehaoSolidBrush -Color ([string]$Theme.ActiveRowTint)
+            ActiveRowBrush = New-QiehaoSolidBrush -Color ([string]$Theme.GridActive)
             ActiveSelectedRowBrush = New-QiehaoSolidBrush `
-                -Color ([string]$Theme.ActiveSelectedRowTint)
-            SelectedRowBrush = New-QiehaoSolidBrush -Color ([string]$Theme.SelectedRowTint)
+                -Color ([string]$Theme.GridActiveSelected)
+            SelectedRowBrush = New-QiehaoSolidBrush -Color ([string]$Theme.GridSelected)
+            GridHoverBrush = New-QiehaoSolidBrush -Color ([string]$Theme.GridHover)
             ActiveBorderBrush = New-QiehaoSolidBrush -Color ([string]$Theme.ActiveBorderTint)
             RunningWarningBrush = New-QiehaoSolidBrush `
                 -Color ([string]$Theme.RunningWarningTint)
             UnknownWarningBrush = New-QiehaoSolidBrush `
                 -Color ([string]$Theme.UnknownWarningTint)
             ColumnHeaderBackgroundBrush = New-QiehaoSolidBrush `
-                -Color ([string]$Theme.ColumnHeaderBackgroundTint)
+                -Color ([string]$Theme.GridHeader)
             ColumnHeaderForegroundBrush = New-QiehaoSolidBrush `
                 -Color ([string]$Theme.ColumnHeaderForegroundTint)
             ColumnHeaderBorderBrush = New-QiehaoSolidBrush `
@@ -982,6 +1044,55 @@ try {
             CurrentNoBrush = New-QiehaoSolidBrush `
                 -Color ([string]$Theme.CurrentNoTint)
             AccentBrush = New-QiehaoSolidBrush -Color ([string]$Theme.AccentTint)
+            SuccessBrush = New-QiehaoSolidBrush -Color ([string]$Theme.Positive)
+            InfoBrush = New-QiehaoSolidBrush -Color ([string]$Theme.Info)
+            WarningBrush = New-QiehaoSolidBrush -Color ([string]$Theme.Warning)
+            DangerBrush = New-QiehaoSolidBrush -Color ([string]$Theme.Danger)
+            ButtonOnAccentBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.ButtonOnAccent)
+            PrimaryButtonBrush = New-QiehaoSolidBrush -Color ([string]$Theme.Primary)
+            PrimaryButtonHoverBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.PrimaryHover)
+            PrimaryButtonPressedBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.PrimaryPressed)
+            PositiveButtonBrush = New-QiehaoSolidBrush -Color ([string]$Theme.Positive)
+            PositiveButtonHoverBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.PositiveHover)
+            PositiveButtonPressedBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.PositivePressed)
+            InfoButtonBrush = New-QiehaoSolidBrush -Color ([string]$Theme.Info)
+            InfoButtonHoverBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.InfoHover)
+            InfoButtonPressedBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.InfoPressed)
+            AccentButtonBrush = New-QiehaoSolidBrush -Color ([string]$Theme.Accent)
+            AccentButtonHoverBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.AccentHover)
+            AccentButtonPressedBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.AccentPressed)
+            SecondaryButtonBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.Secondary)
+            SecondaryButtonHoverBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.SecondaryHover)
+            SecondaryButtonPressedBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.SecondaryPressed)
+            DangerButtonSolidBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.Danger)
+            DangerButtonHoverBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.DangerHover)
+            DangerButtonPressedBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.DangerPressed)
+            ControlBackgroundBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.ControlBackground)
+            ControlBorderBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.ControlBorder)
+            FocusRingBrush = New-QiehaoSolidBrush -Color ([string]$Theme.FocusRing)
+            ToolTipBackgroundBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.ToolTipBackground)
+            ToolTipBorderBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.ToolTipBorder)
+            ToolTipForegroundBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.ToolTipForeground)
             DialogBackgroundBrush = New-QiehaoSolidBrush `
                 -Color ([string]$dialogPalette.Background)
             DialogCardBrush = New-QiehaoGradientBrush `
@@ -1005,10 +1116,8 @@ try {
                 -Color ([string]$dialogPalette.ButtonForeground)
             DialogButtonBorderBrush = New-QiehaoSolidBrush `
                 -Color ([string]$dialogPalette.ButtonBorder)
-            ButtonDisabledBrush = New-QiehaoSolidBrush -Color $(
-                if ([string]$Theme.OverlayMode -ceq 'Dark') { '#705B6472' }
-                else { '#70AAB5BE' }
-            )
+            ButtonDisabledBrush = New-QiehaoSolidBrush `
+                -Color ([string]$Theme.DisabledBackground)
             GridBackgroundBrush = New-QiehaoSolidBrush -Color $(
                 if ([string]$Theme.OverlayMode -ceq 'Dark') { '#3AFFFFFF' }
                 else { '#68FFFFFF' }
@@ -1039,7 +1148,7 @@ try {
         Set-QiehaoThemeResources -Theme $Theme
         if ($imageResult.Loaded) { $backgroundImage.Source = $imageResult.ImageSource }
         else { $backgroundImage.Source = $null }
-        $overlayBrush = New-QiehaoSolidBrush -Color ([string]$Theme.OverlayColor)
+        $overlayBrush = New-QiehaoSolidBrush -Color ([string]$Theme.WindowOverlay)
         $backgroundOverlay.Background = $overlayBrush.PSObject.BaseObject
         if ($Persist) {
             try {
@@ -1123,11 +1232,11 @@ try {
             -Fallback ([string]$Snapshot.IdentityStatus)
         $webChatGPTText.Text = Get-QiehaoGuiText -Key 'WebChatGPT.Unchanged' `
             -Fallback ([string]$Snapshot.WebChatGPT)
-        switch ([string]$Snapshot.IdentityStatus) {
-            '已确认' { $identityStatusText.Foreground = '#FF59D48B' }
-            '不匹配' { $identityStatusText.Foreground = '#FFFF7B72' }
-            '待退出后确认' { $identityStatusText.Foreground = '#FFFFC857' }
-            default { $identityStatusText.Foreground = $window.Resources['TextSecondaryBrush'] }
+        switch ($script:guiCurrentIdentityState) {
+            'Confirmed' { $identityStatusText.Foreground = $window.Resources['SuccessBrush'] }
+            'Mismatch' { $identityStatusText.Foreground = $window.Resources['DangerBrush'] }
+            'PendingExit' { $identityStatusText.Foreground = $window.Resources['WarningBrush'] }
+            default { $identityStatusText.Foreground = $window.Resources['TextMutedBrush'] }
         }
         Set-QiehaoQuotaUnavailableRows -Rows $rows
         $quotaEnrichment = $null
@@ -1902,10 +2011,10 @@ try {
         $codexStatusText.Text = Get-QiehaoGuiText `
             -Key ('Status.Codex.' + $script:guiCurrentCodexState) `
             -Fallback $Status
-        switch ($Status) {
-            '运行中' { $codexStatusText.Foreground = '#FFFF7B72' }
-            '已退出' { $codexStatusText.Foreground = '#FF59D48B' }
-            default { $codexStatusText.Foreground = $window.Resources['TextSecondaryBrush'] }
+        switch ($script:guiCurrentCodexState) {
+            'Running' { $codexStatusText.Foreground = $window.Resources['SuccessBrush'] }
+            'Stopped' { $codexStatusText.Foreground = $window.Resources['TextMutedBrush'] }
+            default { $codexStatusText.Foreground = $window.Resources['WarningBrush'] }
         }
         Update-QiehaoCodexSafetyHint
     }
@@ -2137,6 +2246,7 @@ try {
         $pathBox.MinHeight = 32
         $pathBox.Padding = '7,4'
         $pathBox.Text = [string]$script:guiLaunchSettings.CustomPath
+        $pathBox.Style = $window.Resources[[System.Windows.Controls.TextBox]]
         $browseButton = New-Object System.Windows.Controls.Button
         $browseButton.Content = Get-QiehaoGuiText -Key 'Launch.Settings.Browse' `
             -Fallback '浏览…'
@@ -2171,6 +2281,9 @@ try {
             -Fallback '取消'
         $cancelButton.IsCancel = $true
         $cancelButton.Margin = '0'
+        $detectButton.Style = $window.Resources['InfoButtonStyle']
+        $saveButton.Style = $window.Resources['PrimaryButtonStyle']
+        $cancelButton.Style = $window.Resources['SecondaryButtonStyle']
         $buttons.Children.Add($detectButton) | Out-Null
         $buttons.Children.Add($saveButton) | Out-Null
         $buttons.Children.Add($cancelButton) | Out-Null
@@ -2228,7 +2341,7 @@ try {
                 )
             }
         })
-        $dialog.Content = $root
+        Set-QiehaoDialogContent -Dialog $dialog -Content $root
         $null = $dialog.ShowDialog()
     }
 
@@ -2559,20 +2672,7 @@ try {
         $dialog.Owner = $window
         $dialog.FontFamily = $window.FontFamily
         $dialog.FontSize = $window.FontSize
-        foreach ($resourceKey in @(
-            'DialogBackgroundBrush', 'DialogCardBrush', 'DialogBorderBrush',
-            'DialogForegroundBrush', 'DialogSecondaryBrush',
-            'DialogAccentBrush', 'DialogWarningBrush', 'DialogSuccessBrush',
-            'DialogButtonBackgroundBrush', 'DialogButtonForegroundBrush',
-            'DialogButtonBorderBrush', 'TextPrimaryBrush',
-            'TextSecondaryBrush', 'ButtonFaceBrush', 'ButtonHoverBrush',
-            'ButtonPressedBrush', 'ButtonDisabledBrush', 'PanelBorderBrush',
-            'AccentBrush'
-        )) {
-            $dialog.Resources[$resourceKey] = $window.Resources[$resourceKey]
-        }
-        $dialog.Background = $dialog.Resources['DialogBackgroundBrush']
-        $dialog.Foreground = $dialog.Resources['DialogForegroundBrush']
+        Copy-QiehaoDialogVisualResources -Dialog $dialog
 
         $root = New-Object System.Windows.Controls.Grid
         $root.Margin = 0
@@ -2636,12 +2736,7 @@ try {
         $cancelButton.VerticalAlignment = 'Bottom'
         $cancelButton.IsCancel = $false
         $cancelButton.Margin = '0,0,0,0'
-        $cancelButton.Style = $window.Resources['PrimaryButtonStyle']
-        $cancelButton.Background =
-            $dialog.Resources['DialogButtonBackgroundBrush']
-        $cancelButton.Foreground =
-            $dialog.Resources['DialogButtonForegroundBrush']
-        $cancelButton.BorderBrush = $dialog.Resources['DialogButtonBorderBrush']
+        $cancelButton.Style = $window.Resources['SecondaryButtonStyle']
 
         $footer = New-Object System.Windows.Controls.Grid
         $footer.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
@@ -3069,7 +3164,8 @@ try {
                 -Fallback '删除本地账号') `
             -Message $message `
             -ConfirmText (Get-QiehaoGuiText -Key 'Dialog.Delete.Confirm' `
-                -Fallback '删除'))) { return }
+                -Fallback '删除') `
+            -ConfirmStyle Danger)) { return }
         Stop-QiehaoQuotaAsync
         Set-QiehaoWriteBusy -Value $true -StatusText (
             Get-QiehaoGuiText -Key 'Account.Deleting' `
@@ -3142,7 +3238,8 @@ try {
                     -Fallback '添加账号') `
                 -Message $instructions `
                 -ConfirmText (Get-QiehaoGuiText -Key 'Account.AddReady' `
-                    -Fallback '我已登录新账号并退出')
+                    -Fallback '我已登录新账号并退出') `
+                -ConfirmStyle Positive
             if (-not $ready) { return }
             $liveStatus = Get-QiehaoLiveCodexStatus
             if ($liveStatus -ceq '运行中') {
