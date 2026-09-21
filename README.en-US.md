@@ -241,12 +241,6 @@ Qiehao v1.0.0 is the first public release. It is still being validated across mo
 
 There is no Windows EXE or installer yet. For the first release, keeping the PowerShell source and launchers transparent and simple makes the code easier to inspect and feedback easier to act on. An EXE or installer can be evaluated later based on real user feedback.
 
-## Community
-
-This project recognizes and links to the [LINUX DO](https://linux.do/) community. Feedback, testing, suggestions, and discussion from community members are welcome.
-
-Qiehao is also shared in other technical communities, and I appreciate everyone who takes the time to try it and report real-world feedback.
-
 ## Risk and license
 
 Qiehao changes local Codex authentication state. Verify the source before use and keep your environment recoverable. Codex local file formats or behavior may change in the future; when Qiehao encounters an unknown structure, it should fail closed rather than guess.
