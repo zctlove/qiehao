@@ -1,9 +1,76 @@
 # Qiehao
 
+[简体中文](README.md) | [English](README.en-US.md)
+
 Qiehao 是一个面向 Windows Codex Desktop 的本地账号切换工具，提供中文/英文 WPF 图形界面，并以“用户手动触发、Codex 完全退出后再切换”为核心安全边界。
 
 > [!IMPORTANT]
 > Qiehao 是非官方社区工具，不是 OpenAI 官方产品。它只管理 Codex Desktop 的本地认证状态，不修改 ChatGPT Web、浏览器或 PWA（渐进式网页应用）的登录状态。
+
+## 先说最重要的：Qiehao 不反代
+
+Qiehao **不是反代工具，也不准备往反代方向做。**
+
+不反代，不轮询，不做额度池。
+
+它不代理 Codex 或 API 流量，不帮你转发请求，不做账号池，不做自动轮换，不根据额度自动换号，也不会碰到 HTTP 429 就自己切另一个账号。
+
+如果你找的是反代、自动养号、后台账号池、无人值守自动切号这一类东西，那这个项目不用继续往下看了。
+
+我做它就是想把“我自己正常登录、自己正常使用的几个账号，切起来别那么折腾”这件事情做好。
+
+## 我为什么会做 Qiehao
+
+我做 Qiehao 的原因其实特别简单：
+
+**我真的受够了切账号时那个 OAuth 登录页面一直转圈圈。**
+
+本来只是想换一个自己正常使用的账号，结果经常要退出、重新登录、等 OAuth 页面、再等 Codex 认账号。网络或者登录状态稍微不顺一点，就在那里一直转。有时候转半天都登不上，如果几个自己正常使用的账号来回切，真的挺头疼。
+
+所以我最开始想做的，并不是什么“绕过登录”的东西。恰恰相反，我做的是：
+
+**能不能第一次老老实实走官方登录，以后在本机把已经正常登录过的账号安全保存下来，需要的时候再规规矩矩切回来？**
+
+所以 Qiehao 的基本原则一直没变：
+
+- 新账号第一次仍然走 Codex 官方 OAuth；
+- 不模拟登录；
+- 不抓浏览器 Cookie；
+- 不接管 ChatGPT Web/PWA；
+- 不反代；
+- 不做自动账号池；
+- 不在后台轮询多个账号；
+- 每次切号都由人自己点；
+- Codex 没真正退出，就不动认证文件。
+
+说白了：
+
+**它不是帮我养一池账号，而是让我切自己正常用的账号时，减少输密码与等待。**
+
+## 我对使用方式的想法
+
+我个人的想法也很简单：
+
+**能规规矩矩用，就规规矩矩用，求的是长期稳定。**
+
+所以这个工具没有做多账号后台轮询，没有做额度触发自动切号，没有做 429 自动换号，也没有做无人值守账号池。
+
+能走官方登录就走官方登录，能走 Codex 自己提供的接口就用它自己的接口。能少做一次没必要的请求，就少做一次。能不自动化的地方，我宁愿让人自己点一下。
+
+我当然也希望这种比较老实的用法，能够少碰一点莫名其妙的风控，少一点大家平时说的“降智”，也尽量降低账号被限制甚至封号的概率。
+
+但这句话只是我自己的使用思路和期望，不是平台给出的承诺，Qiehao 也不可能保证：
+
+- 一定不会风控；
+- 一定不会降智；
+- 一定不会限制；
+- 一定不会封号。
+
+平台规则、风控和模型行为都不是 Qiehao 能控制的。
+
+Qiehao 能做的，只是尽量不要自己主动增加那些没必要的高频轮询、自动切号、异常请求和过度自动化行为。
+
+**不想着钻空子，规规矩矩用，这就是我做这个工具时给自己定的方向。**
 
 ## 项目定位
 
@@ -23,7 +90,7 @@ Qiehao 是一个面向 Windows Codex Desktop 的本地账号切换工具，提�
 ## 安全设计
 
 - **Manual-only switching（仅手动切换）**：切换只由用户点击发起。
-- **DPAPI CurrentUser（当前用户加密）**：认证快照和身份标记只能由同一 Windows 用户解密。
+- **DPAPI CurrentUser（当前用户加密）**：认证快照和身份标记由当前 Windows 用户作用域保护。
 - **Atomic replace（原子替换）**：关键文件使用同卷临时文件和原子替换，避免半写入状态。
 - **Reread verification（读回验证）**：替换后重新读取并逐字节核对目标内容。
 - **Rollback（回滚）**：替换后验证或状态提交失败时，尝试恢复原活动账号。
@@ -33,9 +100,11 @@ Qiehao 是一个面向 Windows Codex Desktop 的本地账号切换工具，提�
 - **No forced kill（不强杀）**：要求用户从 Codex 官方菜单或系统托盘正常退出。
 - **Browser/PWA untouched（浏览器/PWA 不受影响）**：不读取或修改浏览器会话数据。
 
+DPAPI CurrentUser 主要保护认证快照的静态存储，避免明文落盘。它不能防御已经能够以同一个 Windows 用户身份运行的恶意程序，也不意味着认证数据绝对安全、永远无法解密或永远不会被窃取。
+
 ## Quota Snapshot（额度快照）
 
-额度快照通过 Codex 官方 app-server 接口读取当前 Active Profile 的额度信息：
+额度快照通过 Codex app-server 接口读取当前 Active Profile 的额度信息：
 
 - 只主动查询当前 Active Profile；
 - inactive profile（非活动档案）只显示最后一次成功缓存；
@@ -44,24 +113,60 @@ Qiehao 是一个面向 Windows Codex Desktop 的本地账号切换工具，提�
 - 快照只代表最后一次成功查询结果，不保证实时性；
 - 额度失败不会自动触发账号切换。
 
+### 关于额度查询速度
+
+先说一下这个功能最容易让人觉得“不爽”的地方：
+
+**额度查询有时候确实会慢。**
+
+Qiehao 没有自己去抓网页，也没有自己搞一套私有额度接口。它用的是 Codex 自己的 app-server 接口，去读取当前活动账号的额度快照。
+
+所以额度查询属于 best effort（尽力而为）：
+
+**能查到就查，查不到就保留上一次结果，不保证每次一点刷新就马上秒回。**
+
+有些时候 Codex app-server 启动会慢一点，有些时候返回额度会慢一点，也可能直接超时。这部分体验确实没有“点一下立刻出结果”那么爽，我知道。
+
+但是我不想为了把界面做得看起来更快，就改成：
+
+- 抓网页登录页面；
+- 偷读浏览器 Cookie；
+- 后台不停轮询；
+- 同时去探测多个账号；
+- 接第三方私有额度接口；
+- 因为额度没回来就自动换号。
+
+所以这里我宁愿接受它偶尔慢一点。
+
+查询失败的时候，Qiehao 会尽量保留上一次成功的额度快照，让你之后自己再点一次刷新。
+
+这也是为什么这个功能叫 **Quota Snapshot（额度快照）**，而不是 **实时额度监控**。
+
+还有一个很重要的区别：
+
+**额度刷新慢或者失败，不代表账号切换失败。**
+
+账号切换和额度查询是两个不同的流程。我的取舍很简单：
+
+**切号优先保证安全和正确；额度查询允许慢一点，也允许偶尔失败。**
+
 ## 系统要求
 
-- Designed for Windows 10/11（为 Windows 10/11 设计）
-- Windows PowerShell 5.1
-- PowerShell 7（已纳入自动测试矩阵）
+- Windows 10/11
+- Windows PowerShell 5.1（普通用户运行所需，Windows 自带）
 - Codex Desktop
 
-当前版本仅支持 Windows，不支持 macOS。
+PowerShell 7 只用于兼容性测试和开发测试，普通用户不需要为了运行 Qiehao 额外安装它。当前版本仅支持 Windows，不支持 macOS。
 
 ## 启动
 
-推荐双击仓库根目录中的：
+普通用户推荐双击仓库或已解压 ZIP 根目录中的：
 
 ~~~text
-Start-Qiehao.cmd
+Start-Qiehao.bat
 ~~~
 
-也可以在仓库根目录手动运行：
+同时保留 `Start-Qiehao.cmd`。也可以在根目录手动运行：
 
 ~~~powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File ".\gui\QiehaoGui.ps1"
@@ -102,13 +207,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File ".\gui\QiehaoGui.ps
 - 本项目未加入 telemetry（遥测）或 analytics（分析统计）。
 - 本项目不运营中转服务器。
 - 不对非活动账号发起额度查询。
-- profiles/、state/、logs/、backup/、auth.json、DPAPI 容器和额度缓存均不得提交到 Git。
+- `profiles/`、`state/`、`logs/`、`backup/`、`auth.json`、DPAPI 容器和额度缓存均不得提交到 Git。
 
-用户应妥善保护自己的 Windows 账号、Codex 登录和本机环境。不要向公开 Issue（问题）粘贴认证文件、Token（令牌）、邮箱、账号 ID、Cookie 或含凭据的日志。
+用户应妥善保护自己的 Windows 账号、Codex 登录和本机环境。不要向公开 Issue（议题）粘贴认证文件、Token（令牌）、邮箱、账号 ID、Cookie 或含凭据的日志。
 
 ## 命令行入口
 
-qiehao.ps1 提供安全后端命令，例如：
+`qiehao.ps1` 提供安全后端命令，例如：
 
 ~~~powershell
 .\qiehao.ps1 status
@@ -121,20 +226,26 @@ qiehao.ps1 提供安全后端命令，例如：
 
 ## Development（开发）
 
-项目同时在 Windows PowerShell 5.1 与 PowerShell 7 下验证。核心自测试位于 tests/，包括：
+项目同时在 Windows PowerShell 5.1 与 PowerShell 7 下验证。核心自测试位于 `tests/`，包括：
 
-- SelfTest.ps1
-- GuiSelfTest.ps1
-- VisualPolishSelfTest.ps1
-- AccountGridLayoutSelfTest.ps1
-- LocalizationSelfTest.ps1
+- `SelfTest.ps1`
+- `GuiSelfTest.ps1`
+- `VisualPolishSelfTest.ps1`
+- `AccountGridLayoutSelfTest.ps1`
+- `LocalizationSelfTest.ps1`
 - Quota 与 Switch-before-Quota（切换前额度快照）系列测试
-- LauncherSelfTest.ps1
+- `LauncherSelfTest.ps1`
 
 所有自动测试使用 fake-only（仅假数据）或 hidden/offscreen WPF（隐藏/离屏 WPF）；开发和 CI（持续集成）不得读取真实认证档案或发送真实额度请求。贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题处理方式见 [SECURITY.md](SECURITY.md)。
+
+## v1.0.0 状态
+
+Qiehao v1.0.0 是首个公开版本，目前仍在更多真实 Windows 环境中持续验证。
+
+当前暂不提供 Windows EXE 或安装器。第一版先保持 PowerShell 源码和启动器透明、简单，也方便别人直接看源码和反馈问题。后续会根据真实用户反馈，再评估 EXE / Installer（安装器）。
 
 ## 风险与许可证
 
 Qiehao 操作本机 Codex 认证状态，使用前应确认源码来源并保留可恢复环境。官方 Codex 的本地文件格式或行为未来可能变化；遇到未知结构时，工具应安全拒绝而不是猜测。
 
-本项目采用 [MIT License（MIT 许可证）](LICENSE)，Copyright (c) 2026 ZCT。完整条款以仓库根目录 LICENSE 为准。
+本项目采用 [MIT License（MIT 许可证）](LICENSE)，Copyright (c) 2026 ZCT。完整条款以仓库根目录 `LICENSE` 为准。
