@@ -7,6 +7,12 @@ Qiehao 是一个面向 Windows Codex Desktop 的本地账号切换工具，提�
 > [!IMPORTANT]
 > Qiehao 是非官方社区工具，不是 OpenAI 官方产品。它只管理 Codex Desktop 的本地认证状态，不修改 ChatGPT Web、浏览器或 PWA（渐进式网页应用）的登录状态。
 
+## 产品预览 / Product Preview
+
+![Qiehao 浅海冰晶主题产品预览](docs/screenshots/qiehao-preview-arctic-sea-glass.jpg)
+
+这是 Qiehao 当前界面风格之一的实际运行效果，展示了本地账号管理、当前账号状态、额度快照，以及中英文、多主题界面能力。
+
 ## 先说最重要的：Qiehao 不反代
 
 Qiehao **不是反代工具，也不准备往反代方向做。**
