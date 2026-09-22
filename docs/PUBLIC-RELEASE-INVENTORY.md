@@ -1,24 +1,37 @@
 # Public Release Inventory（公开发布清单）
 
-本文定义未来 GitHub 源码仓库与 Release ZIP（发布压缩包）的候选内容。当前阶段不生成压缩包、不创建 GitHub 仓库，也不执行任何远端操作。
+本文定义 Qiehao RC（Release Candidate，候选发布）阶段的 GitHub 源码仓库与 Release ZIP（发布压缩包）内容边界。源码仓库保留开发、审计和测试材料；面向普通用户的 Release ZIP 只包含运行所需文件和必要说明。
 
-## 应包含
+## GitHub 源码仓库应包含
 
 - README.md
 - SECURITY.md
 - CONTRIBUTING.md
 - CHANGELOG.md
-- LICENSE（待维护者选择许可证后加入）
+- LICENSE（正式公开发布前由维护者选择并加入；当前缺失）
 - Start-Qiehao.cmd
 - qiehao.ps1
 - gui/
 - lib/
 - tools/（Quota Snapshot 的运行时依赖）
-- tests/（源码仓库保留）
+- tests/（自动测试与发布审计）
+- docs/（发布清单与维护文档）
 
-tests/ 是否进入面向普通用户的最终 Release ZIP，由后续 packaging（打包）阶段决定；无论是否打包，源码仓库都应保留测试。
+## Release ZIP 应包含
 
-## 绝对禁止包含
+- README.md
+- SECURITY.md
+- CHANGELOG.md
+- LICENSE（维护者选择并加入后）
+- Start-Qiehao.cmd
+- qiehao.ps1
+- gui/
+- lib/
+- tools/（Quota Snapshot 的运行时依赖）
+
+面向普通用户的 Release ZIP 不包含 `.git/`、`tests/`、开发工作区或本机生成的运行数据。用户应完整解压 ZIP，并通过 `Start-Qiehao.cmd` 启动；不要直接在 ZIP 压缩包内运行。
+
+## 源码提交与 Release ZIP 绝对禁止包含
 
 - profiles/
 - state/
@@ -42,5 +55,6 @@ tests/ 是否进入面向普通用户的最终 Release ZIP，由后续 packaging
 4. 当前树与完整可达 Git 历史完成敏感信息扫描。
 5. 从干净检出目录生成文件清单，拒绝任何未列入允许集合的运行时内容。
 6. 对最终 ZIP 再做一次离线敏感扫描，并记录 SHA-256（安全哈希）校验值。
+7. 在全仓文本与最终 ZIP 中确认正式入口统一为 `Start-Qiehao.cmd`，且不存在其他启动入口说明。
 
 不要直接压缩开发工作目录；开发目录可能包含被 .gitignore 忽略、但仍然敏感的本机运行状态。

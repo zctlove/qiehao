@@ -4,14 +4,18 @@ $script:ProjectRoot = Split-Path -Parent $PSScriptRoot
 $script:ProfilesDirectory = Join-Path -Path $script:ProjectRoot -ChildPath 'profiles'
 $script:LogsDirectory = Join-Path -Path $script:ProjectRoot -ChildPath 'logs'
 $script:StateDirectory = Join-Path -Path $script:ProjectRoot -ChildPath 'state'
+$script:BackupDirectory = Join-Path -Path $script:ProjectRoot -ChildPath 'backup'
 $script:EntropyText = 'CodexAccountSwitcher-v1'
 $script:IdentityEntropyText = 'CodexAccountSwitcher-Identity-v1'
 $script:MaximumAuthFileBytes = 16MB
-$script:ExpectedAuthKeys = @('auth_mode', 'OPENAI_API_KEY', 'tokens', 'last_refresh')
+$script:RequiredAuthKeys = @('auth_mode', 'tokens')
 $script:IdentityMarkerHeader = [byte[]](0x51, 0x48, 0x49, 0x44, 0x01, 0x01)
 $script:MaximumIdentityBytes = 2048
 $script:MaximumMetadataFileBytes = 64KB
 $script:WriteMutexName = 'Local\Qiehaoqu.CodexAccountSwitcher.WriteOperation.v1'
+$script:ProfileDeleteTrashDirectoryName = '.trash'
+$script:ProfileDeleteCommitMarkerSuffix = '.committed'
+$script:ProfileDeleteCommitMarkerContent = 'QIEHAO_PROFILE_DELETE_COMMITTED_V1'
 $windowsIdentity = $null
 try {
     $windowsIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -39,6 +43,73 @@ function New-SafeException {
 
     return New-Object System.InvalidOperationException($Code)
 }
+
+function Initialize-QiehaoRuntimeDirectories {
+    [CmdletBinding()]
+    param()
+
+    try {
+        $rootPath = [System.IO.Path]::GetFullPath($script:ProjectRoot).TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        )
+        if (-not [System.IO.Directory]::Exists($rootPath)) {
+            throw (New-SafeException -Code 'RUNTIME_DATA_ROOT_INVALID')
+        }
+        $rootInfo = Get-Item -LiteralPath $rootPath -Force -ErrorAction Stop
+        if (($rootInfo.Attributes -band
+                [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw (New-SafeException -Code 'RUNTIME_DATA_ROOT_UNSAFE')
+        }
+
+        foreach ($runtimeDirectory in @(
+            $script:ProfilesDirectory,
+            $script:StateDirectory,
+            $script:LogsDirectory,
+            $script:BackupDirectory
+        )) {
+            $fullPath = [System.IO.Path]::GetFullPath($runtimeDirectory)
+            $parentPath = [System.IO.Path]::GetDirectoryName($fullPath).TrimEnd(
+                [System.IO.Path]::DirectorySeparatorChar,
+                [System.IO.Path]::AltDirectorySeparatorChar
+            )
+            if (-not $parentPath.Equals(
+                    $rootPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw (New-SafeException -Code 'RUNTIME_DIRECTORY_UNSAFE')
+            }
+            if ([System.IO.File]::Exists($fullPath)) {
+                throw (New-SafeException -Code 'RUNTIME_DIRECTORY_UNSAFE')
+            }
+            [System.IO.Directory]::CreateDirectory($fullPath) | Out-Null
+            $directoryInfo = Get-Item -LiteralPath $fullPath -Force `
+                -ErrorAction Stop
+            if (($directoryInfo.Attributes -band
+                    [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw (New-SafeException -Code 'RUNTIME_DIRECTORY_UNSAFE')
+            }
+        }
+
+        return [pscustomobject]@{
+            Result = 'RUNTIME_BOOTSTRAP_SUCCESS'
+            DataRoot = $rootPath
+        }
+    }
+    catch [System.InvalidOperationException] {
+        if ($_.Exception.Message -match '^RUNTIME_[A-Z0-9_]+$') {
+            throw
+        }
+        throw (New-SafeException -Code 'RUNTIME_DIRECTORY_INITIALIZATION_FAILED')
+    }
+    catch {
+        throw (New-SafeException -Code 'RUNTIME_DIRECTORY_INITIALIZATION_FAILED')
+    }
+}
+
+# Git and ZIP archives do not preserve empty runtime directories. Bootstrap
+# them before any exported account operation can run.
+$null = Initialize-QiehaoRuntimeDirectories
 
 function Invoke-WithCodexWriteLock {
     param(
@@ -285,20 +356,28 @@ function Get-AuthTopLevelPropertyNames {
         }
     }
 
-    # Windows PowerShell 5.1 does not ship System.Text.Json. Its built-in JSON
-    # parser requires an in-memory UTF-8 string. The string is never emitted,
-    # logged, persisted, or included in exceptions.
-    $jsonText = $null
-    $jsonObject = $null
+    # Windows PowerShell 5.1 does not ship System.Text.Json. The framework JSON
+    # reader preserves duplicate properties, unlike ConvertFrom-Json, so the
+    # same fail-closed duplicate-key checks apply on both supported runtimes.
+    $reader = $null
+    $document = $null
     try {
-        $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
-        $jsonText = $strictUtf8.GetString($Bytes)
-        $jsonObject = ConvertFrom-Json -InputObject $jsonText -ErrorAction Stop
-        if ($null -eq $jsonObject -or -not ($jsonObject -is [pscustomobject])) {
+        $null = Add-Type -AssemblyName System.Runtime.Serialization `
+            -ErrorAction SilentlyContinue
+        $reader = [System.Runtime.Serialization.Json.JsonReaderWriterFactory]::CreateJsonReader(
+            $Bytes,
+            [System.Xml.XmlDictionaryReaderQuotas]::Max
+        )
+        $document = New-Object System.Xml.XmlDocument
+        $document.Load($reader)
+        $root = $document.DocumentElement
+        if ($null -eq $root -or $root.GetAttribute('type') -cne 'object') {
             throw (New-SafeException -Code 'AUTH_SCHEMA_UNEXPECTED')
         }
 
-        $names = @($jsonObject.PSObject.Properties | ForEach-Object { $_.Name })
+        $names = @($root.ChildNodes | Where-Object {
+            $_.NodeType -eq [System.Xml.XmlNodeType]::Element
+        } | ForEach-Object { $_.LocalName })
         return $names
     }
     catch [System.InvalidOperationException] {
@@ -308,15 +387,19 @@ function Get-AuthTopLevelPropertyNames {
         throw (New-SafeException -Code 'AUTH_JSON_INVALID')
     }
     finally {
-        $jsonObject = $null
-        $jsonText = $null
+        if ($null -ne $reader) {
+            $reader.Close()
+        }
+        $document = $null
     }
 }
 
 function Test-CodexAuthBytes {
     param(
         [Parameter(Mandatory = $true)]
-        [byte[]]$Bytes
+        [byte[]]$Bytes,
+
+        [switch]$TopLevelOnly
     )
 
     if ($null -eq $Bytes -or $Bytes.Length -eq 0) {
@@ -324,14 +407,12 @@ function Test-CodexAuthBytes {
     }
 
     $actualKeys = @(Get-AuthTopLevelPropertyNames -Bytes $Bytes)
-    $schemaMatches = $actualKeys.Count -eq $script:ExpectedAuthKeys.Count
+    $schemaMatches = $true
 
-    if ($schemaMatches) {
-        foreach ($expectedKey in $script:ExpectedAuthKeys) {
-            if (-not ($actualKeys -ccontains $expectedKey)) {
-                $schemaMatches = $false
-                break
-            }
+    foreach ($requiredKey in $script:RequiredAuthKeys) {
+        if (@($actualKeys | Where-Object { $_ -ceq $requiredKey }).Count -ne 1) {
+            $schemaMatches = $false
+            break
         }
     }
 
@@ -350,6 +431,19 @@ function Test-CodexAuthBytes {
         throw (New-SafeException -Code 'AUTH_SCHEMA_UNEXPECTED')
     }
 
+    if (-not $TopLevelOnly) {
+        $identityBytes = $null
+        try {
+            $identityBytes = Get-CodexAuthIdentityBytes -Bytes $Bytes `
+                -SkipTopLevelValidation
+        }
+        finally {
+            if ($null -ne $identityBytes -and $identityBytes.Length -gt 0) {
+                [Array]::Clear($identityBytes, 0, $identityBytes.Length)
+            }
+        }
+    }
+
     return [pscustomobject]@{
         IsValidJson = $true
         RootIsObject = $true
@@ -360,7 +454,9 @@ function Test-CodexAuthBytes {
 function Get-CodexAuthIdentityBytes {
     param(
         [Parameter(Mandatory = $true)]
-        [byte[]]$Bytes
+        [byte[]]$Bytes,
+
+        [switch]$SkipTopLevelValidation
     )
 
     # Identity schema v1 deliberately uses the explicit TokenData account_id
@@ -368,7 +464,9 @@ function Get-CodexAuthIdentityBytes {
     # token strings independently while account_id identifies the selected
     # ChatGPT account/workspace. Any missing, duplicate, non-string, empty, or
     # unexpectedly shaped field fails closed.
-    $null = Test-CodexAuthBytes -Bytes $Bytes
+    if (-not $SkipTopLevelValidation) {
+        $null = Test-CodexAuthBytes -Bytes $Bytes -TopLevelOnly
+    }
     $identityText = $null
     $identityBytes = $null
     $jsonDocumentType = [Type]::GetType(
@@ -433,49 +531,56 @@ function Get-CodexAuthIdentityBytes {
             }
         }
         else {
-            # Windows PowerShell 5.1 has no System.Text.Json. Its JSON parser
-            # necessarily materializes values as managed strings. They are
-            # never emitted, logged, persisted, or included in exceptions and
-            # references are discarded in finally; .NET cannot promise an
-            # absolute erasure of those immutable strings.
-            $jsonText = $null
-            $jsonObject = $null
+            # The framework JSON reader preserves duplicate keys on Windows
+            # PowerShell 5.1. Values are never emitted, logged, persisted, or
+            # included in exceptions; references are discarded in finally.
+            $reader = $null
+            $document = $null
             try {
-                $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
-                $jsonText = $strictUtf8.GetString($Bytes)
-                $jsonObject = ConvertFrom-Json -InputObject $jsonText -ErrorAction Stop
-                if ($null -eq $jsonObject -or -not ($jsonObject -is [pscustomobject])) {
+                $null = Add-Type -AssemblyName System.Runtime.Serialization `
+                    -ErrorAction SilentlyContinue
+                $reader = [System.Runtime.Serialization.Json.JsonReaderWriterFactory]::CreateJsonReader(
+                    $Bytes,
+                    [System.Xml.XmlDictionaryReaderQuotas]::Max
+                )
+                $document = New-Object System.Xml.XmlDocument
+                $document.Load($reader)
+                $root = $document.DocumentElement
+                if ($null -eq $root -or $root.GetAttribute('type') -cne 'object') {
                     throw (New-SafeException -Code 'AUTH_IDENTITY_SCHEMA_UNRECOGNIZED')
                 }
 
-                $authModeProperties = @($jsonObject.PSObject.Properties | Where-Object {
-                    $_.Name -ceq 'auth_mode'
+                $authModeProperties = @($root.ChildNodes | Where-Object {
+                    $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and
+                    $_.LocalName -ceq 'auth_mode'
                 })
-                $tokensProperties = @($jsonObject.PSObject.Properties | Where-Object {
-                    $_.Name -ceq 'tokens'
+                $tokensProperties = @($root.ChildNodes | Where-Object {
+                    $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and
+                    $_.LocalName -ceq 'tokens'
                 })
                 if ($authModeProperties.Count -ne 1 -or
-                    -not ($authModeProperties[0].Value -is [string]) -or
-                    $authModeProperties[0].Value -cne 'chatgpt' -or
+                    $authModeProperties[0].GetAttribute('type') -cne 'string' -or
+                    $authModeProperties[0].InnerText -cne 'chatgpt' -or
                     $tokensProperties.Count -ne 1 -or
-                    -not ($tokensProperties[0].Value -is [pscustomobject])) {
+                    $tokensProperties[0].GetAttribute('type') -cne 'object') {
                     throw (New-SafeException -Code 'AUTH_IDENTITY_SCHEMA_UNRECOGNIZED')
                 }
 
-                $accountIdProperties = @(
-                    $tokensProperties[0].Value.PSObject.Properties | Where-Object {
-                        $_.Name -ceq 'account_id'
-                    }
-                )
+                $accountIdProperties = @($tokensProperties[0].ChildNodes | Where-Object {
+                    $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and
+                    $_.LocalName -ceq 'account_id'
+                })
                 if ($accountIdProperties.Count -ne 1 -or
-                    -not ($accountIdProperties[0].Value -is [string])) {
+                    $accountIdProperties[0].GetAttribute('type') -cne 'string') {
                     throw (New-SafeException -Code 'AUTH_IDENTITY_SCHEMA_UNRECOGNIZED')
                 }
-                $identityText = $accountIdProperties[0].Value
+                $identityText = $accountIdProperties[0].InnerText
             }
             finally {
-                $jsonObject = $null
-                $jsonText = $null
+                if ($null -ne $reader) {
+                    $reader.Close()
+                }
+                $document = $null
             }
         }
 
@@ -2504,7 +2609,12 @@ function Write-CodexAuthFileBytes {
 function Write-SafeLog {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('SAVE_STARTED', 'SAVE_SUCCEEDED', 'SAVE_FAILED')]
+        [ValidateSet(
+            'SAVE_STARTED',
+            'SAVE_SUCCEEDED',
+            'SAVE_FAILED',
+            'PROFILE_REMOVE_QUARANTINE_CLEANUP_FAILED'
+        )]
         [string]$Event,
 
         [string]$ProfileName
@@ -2524,6 +2634,10 @@ function Write-SafeLog {
         }
         'SAVE_FAILED' {
             $line = '{0} ERROR profile save failed: SAFE_FAILURE' -f $timestamp
+        }
+        'PROFILE_REMOVE_QUARANTINE_CLEANUP_FAILED' {
+            $line = '{0} WARNING profile delete quarantine cleanup pending' -f `
+                $timestamp
         }
     }
 
@@ -2915,11 +3029,25 @@ function Invoke-CodexAccountSwitch {
 
         $activeState = Read-ActiveProfileState -StateDirectory $StateDirectory
         $activeName = $activeState.ActiveProfile
+        $authPath = Join-Path -Path $CodexHome -ChildPath 'auth.json'
         if ($activeName -ceq $targetName) {
+            $currentAuthBytes = Read-SensitiveFileBytes -Path $authPath
+            $null = Test-CodexAuthBytes -Bytes $currentAuthBytes
+            try {
+                $null = Assert-CodexAuthMatchesProfileIdentity `
+                    -Name $activeName -AuthBytes $currentAuthBytes `
+                    -ProfilesDirectory $ProfilesDirectory
+            }
+            catch [System.InvalidOperationException] {
+                if ($_.Exception.Message -ceq
+                        'ACTIVE_PROFILE_IDENTITY_MISMATCH') {
+                    throw (New-SafeException `
+                        -Code 'ACTIVE_PROFILE_OUT_OF_SYNC')
+                }
+                throw
+            }
             throw (New-SafeException -Code 'ALREADY_ACTIVE')
         }
-
-        $authPath = Join-Path -Path $CodexHome -ChildPath 'auth.json'
 
         # Preserve the freshest current credentials before attempting to use
         # the target slot; Codex may have refreshed OAuth data while running.
@@ -3005,6 +3133,128 @@ function Invoke-CodexAccountSwitch {
                 [Array]::Clear($buffer, 0, $buffer.Length)
             }
         }
+    }
+}
+
+function Invoke-SyncCodexActiveProfile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CodexHome,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProfilesDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StateDirectory,
+
+        [object[]]$ProcessData,
+
+        [switch]$UseProvidedProcessData
+    )
+
+    $currentAuthBytes = $null
+    $currentIdentityBytes = $null
+    $profileAuthBytes = $null
+    $metadataState = $null
+    try {
+        Assert-CodexNotRunning -ProcessData $ProcessData `
+            -UseProvidedProcessData:$UseProvidedProcessData
+        $activeState = Read-ActiveProfileState -StateDirectory $StateDirectory
+        $authPath = Join-Path -Path $CodexHome -ChildPath 'auth.json'
+        $currentAuthBytes = Read-SensitiveFileBytes -Path $authPath
+        $null = Test-CodexAuthBytes -Bytes $currentAuthBytes
+        $currentIdentityBytes = Get-CodexAuthIdentityBytes `
+            -Bytes $currentAuthBytes
+        $identityMatch = Test-ProfileIdentityExists `
+            -IdentityBytes $currentIdentityBytes `
+            -ProfilesDirectory $ProfilesDirectory
+        if (-not $identityMatch.Exists) {
+            throw (New-SafeException `
+                -Code 'ACTIVE_PROFILE_IDENTITY_MISMATCH')
+        }
+
+        $matchedProfile = ConvertTo-SafeProfileName `
+            -Name ([string]$identityMatch.Profile)
+        $paths = Get-StrictProfileArtifactPaths -Name $matchedProfile `
+            -ProfilesDirectory $ProfilesDirectory
+        if (-not [System.IO.File]::Exists($paths.EncryptedPath) -or
+            -not [System.IO.File]::Exists($paths.IdentityMarkerPath) -or
+            -not [System.IO.File]::Exists($paths.MetadataPath)) {
+            throw (New-SafeException -Code 'PROFILE_INCOMPLETE')
+        }
+        $metadataState = Get-ProfileMetadataState -Name $matchedProfile `
+            -ProfilesDirectory $ProfilesDirectory
+        if (-not $metadataState.IsValid) {
+            throw (New-SafeException -Code 'PROFILE_METADATA_INVALID')
+        }
+        $profileAuthBytes = Read-CodexAccountSlotBytes -Name $matchedProfile `
+            -ProfilesDirectory $ProfilesDirectory
+        $null = Assert-CodexAuthMatchesProfileIdentity -Name $matchedProfile `
+            -AuthBytes $profileAuthBytes `
+            -ProfilesDirectory $ProfilesDirectory `
+            -MismatchCode 'PROFILE_IDENTITY_MISMATCH'
+        $null = Assert-CodexAuthMatchesProfileIdentity -Name $matchedProfile `
+            -AuthBytes $currentAuthBytes `
+            -ProfilesDirectory $ProfilesDirectory `
+            -MismatchCode 'ACTIVE_PROFILE_IDENTITY_MISMATCH'
+
+        if ($activeState.ActiveProfile.Equals(
+                $matchedProfile,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            return [pscustomobject]@{
+                Result = 'ALREADY_ACTIVE'
+                ActiveProfile = $matchedProfile
+            }
+        }
+
+        # Recovery commits only the non-secret Active state. It never rewrites
+        # auth.json or any saved Profile artifact.
+        Write-ActiveProfileState -Name $matchedProfile `
+            -StateDirectory $StateDirectory
+        $readBackState = Read-ActiveProfileState `
+            -StateDirectory $StateDirectory
+        if (-not $readBackState.ActiveProfile.Equals(
+                $matchedProfile,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw (New-SafeException -Code 'ACTIVE_PROFILE_SYNC_FAILED')
+        }
+        return [pscustomobject]@{
+            Result = 'ACTIVE_PROFILE_SYNCED'
+            From = [string]$activeState.ActiveProfile
+            ActiveProfile = $matchedProfile
+        }
+    }
+    catch [System.InvalidOperationException] {
+        throw
+    }
+    catch {
+        throw (New-SafeException -Code 'ACTIVE_PROFILE_SYNC_FAILED')
+    }
+    finally {
+        foreach ($buffer in @(
+            $currentAuthBytes,
+            $currentIdentityBytes,
+            $profileAuthBytes
+        )) {
+            if ($null -ne $buffer -and $buffer.Length -gt 0) {
+                [Array]::Clear($buffer, 0, $buffer.Length)
+            }
+        }
+        $metadataState = $null
+    }
+}
+
+function Sync-CodexActiveProfile {
+    [CmdletBinding()]
+    param()
+
+    return Invoke-WithCodexWriteLock -Operation {
+        $codexHome = Get-CodexHome
+        Invoke-SyncCodexActiveProfile -CodexHome $codexHome `
+            -ProfilesDirectory $script:ProfilesDirectory `
+            -StateDirectory $script:StateDirectory
     }
 }
 
@@ -3154,7 +3404,510 @@ function Add-CodexProfile {
     } -ArgumentList @($Name)
 }
 
-function Invoke-RemoveCodexProfile {
+function Get-ProfileDeleteTrashRoot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProfilesDirectory,
+
+        [switch]$Create
+    )
+
+    if (-not [System.IO.Directory]::Exists($ProfilesDirectory)) {
+        throw (New-SafeException -Code 'PROFILES_DIRECTORY_NOT_FOUND')
+    }
+    $profilesRoot = [System.IO.Path]::GetFullPath($ProfilesDirectory).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $trashRoot = [System.IO.Path]::GetFullPath(
+        (Join-Path -Path $profilesRoot -ChildPath $script:ProfileDeleteTrashDirectoryName)
+    )
+    if (-not [System.IO.Path]::GetDirectoryName($trashRoot).Equals(
+            $profilesRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw (New-SafeException -Code 'PROFILE_DELETE_QUARANTINE_UNSAFE')
+    }
+    if ([System.IO.File]::Exists($trashRoot)) {
+        throw (New-SafeException -Code 'PROFILE_DELETE_QUARANTINE_UNSAFE')
+    }
+    if (-not [System.IO.Directory]::Exists($trashRoot)) {
+        if (-not $Create) {
+            return $trashRoot
+        }
+        [System.IO.Directory]::CreateDirectory($trashRoot) | Out-Null
+    }
+    $trashInfo = Get-Item -LiteralPath $trashRoot -Force -ErrorAction Stop
+    if (($trashInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw (New-SafeException -Code 'PROFILE_DELETE_QUARANTINE_UNSAFE')
+    }
+    return $trashRoot
+}
+
+function New-ProfileDeleteTransactionContext {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProfilesDirectory,
+
+        [string]$TransactionId
+    )
+
+    $safeName = ConvertTo-SafeProfileName -Name $Name
+    if ([string]::IsNullOrWhiteSpace($TransactionId)) {
+        $TransactionId = [Guid]::NewGuid().ToString('N')
+    }
+    if ($TransactionId -notmatch '^[0-9a-fA-F]{32}$') {
+        throw (New-SafeException -Code 'PROFILE_DELETE_TRANSACTION_INVALID')
+    }
+    $trashRoot = Get-ProfileDeleteTrashRoot -ProfilesDirectory $ProfilesDirectory -Create
+    $transactionName = $safeName + '-delete-' + $TransactionId.ToLowerInvariant()
+    $transactionPath = [System.IO.Path]::GetFullPath(
+        (Join-Path -Path $trashRoot -ChildPath $transactionName)
+    )
+    if (-not [System.IO.Path]::GetDirectoryName($transactionPath).Equals(
+            $trashRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw (New-SafeException -Code 'PROFILE_DELETE_QUARANTINE_UNSAFE')
+    }
+    if ([System.IO.File]::Exists($transactionPath) -or
+        [System.IO.Directory]::Exists($transactionPath)) {
+        throw (New-SafeException -Code 'PROFILE_DELETE_TRANSACTION_EXISTS')
+    }
+    [System.IO.Directory]::CreateDirectory($transactionPath) | Out-Null
+    $transactionInfo = Get-Item -LiteralPath $transactionPath -Force -ErrorAction Stop
+    if (($transactionInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw (New-SafeException -Code 'PROFILE_DELETE_QUARANTINE_UNSAFE')
+    }
+
+    return Get-ProfileDeleteTransactionContext -Name $safeName `
+        -ProfilesDirectory $ProfilesDirectory -TransactionPath $transactionPath
+}
+
+function Get-ProfileDeleteTransactionContext {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProfilesDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TransactionPath
+    )
+
+    $safeName = ConvertTo-SafeProfileName -Name $Name
+    $paths = Get-StrictProfileArtifactPaths -Name $safeName `
+        -ProfilesDirectory $ProfilesDirectory
+    $transactionFullPath = [System.IO.Path]::GetFullPath($TransactionPath)
+    $transactionInfo = Get-Item -LiteralPath $transactionFullPath -Force -ErrorAction Stop
+    if (-not $transactionInfo.PSIsContainer -or
+        ($transactionInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw (New-SafeException -Code 'PROFILE_DELETE_QUARANTINE_UNSAFE')
+    }
+
+    $artifacts = @(
+        [pscustomobject]@{
+            Type = 'AuthFile'
+            SourcePath = $paths.EncryptedPath
+            QuarantinePath = Join-Path $transactionFullPath 'auth.dpapi'
+        },
+        [pscustomobject]@{
+            Type = 'IdentityMarker'
+            SourcePath = $paths.IdentityMarkerPath
+            QuarantinePath = Join-Path $transactionFullPath 'identity.dpapi'
+        },
+        [pscustomobject]@{
+            Type = 'Metadata'
+            SourcePath = $paths.MetadataPath
+            QuarantinePath = Join-Path $transactionFullPath 'meta.json'
+        }
+    )
+    foreach ($artifact in $artifacts) {
+        if ([System.IO.File]::Exists($artifact.QuarantinePath)) {
+            $quarantineInfo = Get-Item -LiteralPath $artifact.QuarantinePath `
+                -Force -ErrorAction Stop
+            if (($quarantineInfo.Attributes -band `
+                    [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw (New-SafeException -Code 'PROFILE_DELETE_QUARANTINE_UNSAFE')
+            }
+        }
+    }
+    $trashRoot = [System.IO.Path]::GetDirectoryName($transactionFullPath)
+    $transactionName = [System.IO.Path]::GetFileName($transactionFullPath)
+    $commitMarkerPath = Join-Path $trashRoot (
+        $transactionName + $script:ProfileDeleteCommitMarkerSuffix
+    )
+    if ([System.IO.File]::Exists($commitMarkerPath)) {
+        $commitMarkerInfo = Get-Item -LiteralPath $commitMarkerPath `
+            -Force -ErrorAction Stop
+        if (($commitMarkerInfo.Attributes -band `
+                [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw (New-SafeException -Code 'PROFILE_DELETE_QUARANTINE_UNSAFE')
+        }
+    }
+    return [pscustomobject]@{
+        Profile = $safeName
+        TransactionPath = $transactionFullPath
+        CommitMarkerPath = $commitMarkerPath
+        Artifacts = $artifacts
+    }
+}
+
+function Get-ExistingProfileDeleteTransactionContext {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.DirectoryInfo]$Directory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProfilesDirectory
+    )
+
+    if (($Directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw (New-SafeException -Code 'PROFILE_DELETE_QUARANTINE_UNSAFE')
+    }
+    $match = [regex]::Match(
+        $Directory.Name,
+        '^(?<profile>.+)-delete-(?<transaction>[0-9a-fA-F]{32})$'
+    )
+    if (-not $match.Success -or
+        -not (Test-SafeProfileFileStem -Name $match.Groups['profile'].Value)) {
+        throw (New-SafeException -Code 'PROFILE_DELETE_TRANSACTION_INVALID')
+    }
+    return Get-ProfileDeleteTransactionContext `
+        -Name $match.Groups['profile'].Value `
+        -ProfilesDirectory $ProfilesDirectory `
+        -TransactionPath $Directory.FullName
+}
+
+function Test-ProfileDeleteCommitMarker {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not [System.IO.File]::Exists($Path)) {
+        return $false
+    }
+    try {
+        return [System.IO.File]::ReadAllText($Path) -ceq `
+            $script:ProfileDeleteCommitMarkerContent
+    }
+    catch {
+        return $false
+    }
+}
+
+function Invoke-ProfileDeleteRollback {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Context,
+
+        [ValidateSet('', 'AuthFile', 'IdentityMarker', 'Metadata')]
+        [string]$SimulateRollbackFailureType = ''
+    )
+
+    $failedTypes = New-Object System.Collections.ArrayList
+    $artifacts = @($Context.Artifacts)
+    [array]::Reverse($artifacts)
+    foreach ($artifact in $artifacts) {
+        $sourceExists = [System.IO.File]::Exists($artifact.SourcePath)
+        $quarantineExists = [System.IO.File]::Exists($artifact.QuarantinePath)
+        if ($sourceExists -and $quarantineExists) {
+            [void]$failedTypes.Add($artifact.Type)
+            continue
+        }
+        if (-not $sourceExists -and -not $quarantineExists) {
+            [void]$failedTypes.Add($artifact.Type)
+            continue
+        }
+        if ($sourceExists) {
+            continue
+        }
+        try {
+            if ($artifact.Type -ceq $SimulateRollbackFailureType) {
+                throw (New-Object System.IO.IOException('SIMULATED_ROLLBACK_FAILURE'))
+            }
+            [System.IO.File]::Move($artifact.QuarantinePath, $artifact.SourcePath)
+            if (-not [System.IO.File]::Exists($artifact.SourcePath) -or
+                [System.IO.File]::Exists($artifact.QuarantinePath)) {
+                throw (New-Object System.IO.IOException('ROLLBACK_DID_NOT_COMPLETE'))
+            }
+        }
+        catch {
+            [void]$failedTypes.Add($artifact.Type)
+        }
+    }
+
+    if ($failedTypes.Count -eq 0) {
+        try {
+            $expectedNames = @($Context.Artifacts | ForEach-Object {
+                    [System.IO.Path]::GetFileName($_.QuarantinePath)
+                })
+            $unexpectedEntries = @(
+                Get-ChildItem -LiteralPath $Context.TransactionPath -Force `
+                    -ErrorAction Stop |
+                    Where-Object { $expectedNames -cnotcontains $_.Name }
+            )
+            if ($unexpectedEntries.Count -gt 0) {
+                throw (New-Object System.IO.IOException(
+                    'UNEXPECTED_QUARANTINE_ENTRY'
+                ))
+            }
+            if ([System.IO.File]::Exists($Context.CommitMarkerPath)) {
+                [System.IO.File]::Delete($Context.CommitMarkerPath)
+            }
+            if (@([System.IO.Directory]::GetFileSystemEntries(
+                        $Context.TransactionPath
+                    )).Count -eq 0) {
+                [System.IO.Directory]::Delete($Context.TransactionPath, $false)
+            }
+        }
+        catch {
+            [void]$failedTypes.Add('TransactionCleanup')
+        }
+    }
+
+    return [pscustomobject]@{
+        Succeeded = $failedTypes.Count -eq 0
+        FailedFileTypes = @($failedTypes)
+    }
+}
+
+function Invoke-ProfileDeleteQuarantineCleanup {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Context,
+
+        [ValidateSet('', 'AuthFile', 'IdentityMarker', 'Metadata')]
+        [string]$SimulateCleanupFailureType = ''
+    )
+
+    $failedTypes = New-Object System.Collections.ArrayList
+    foreach ($artifact in @($Context.Artifacts)) {
+        if (-not [System.IO.File]::Exists($artifact.QuarantinePath)) {
+            continue
+        }
+        try {
+            if ($artifact.Type -ceq $SimulateCleanupFailureType) {
+                throw (New-Object System.IO.IOException('SIMULATED_CLEANUP_FAILURE'))
+            }
+            [System.IO.File]::Delete($artifact.QuarantinePath)
+            if ([System.IO.File]::Exists($artifact.QuarantinePath)) {
+                throw (New-Object System.IO.IOException('CLEANUP_DID_NOT_COMPLETE'))
+            }
+        }
+        catch {
+            [void]$failedTypes.Add($artifact.Type)
+        }
+    }
+
+    if ($failedTypes.Count -eq 0) {
+        try {
+            $unexpectedEntries = @(
+                Get-ChildItem -LiteralPath $Context.TransactionPath -Force `
+                    -ErrorAction Stop
+            )
+            if ($unexpectedEntries.Count -gt 0) {
+                throw (New-Object System.IO.IOException('UNEXPECTED_QUARANTINE_ENTRY'))
+            }
+            [System.IO.Directory]::Delete($Context.TransactionPath, $false)
+            if ([System.IO.File]::Exists($Context.CommitMarkerPath)) {
+                [System.IO.File]::Delete($Context.CommitMarkerPath)
+                if ([System.IO.File]::Exists($Context.CommitMarkerPath)) {
+                    throw (New-Object System.IO.IOException(
+                        'COMMIT_MARKER_CLEANUP_DID_NOT_COMPLETE'
+                    ))
+                }
+            }
+        }
+        catch {
+            [void]$failedTypes.Add('TransactionCleanup')
+        }
+    }
+
+    return [pscustomobject]@{
+        Succeeded = $failedTypes.Count -eq 0
+        FailedFileTypes = @($failedTypes)
+    }
+}
+
+function Invoke-RecoverCodexProfileDeleteTransactionsUnlocked {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProfilesDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StateDirectory
+    )
+
+    $trashRoot = Get-ProfileDeleteTrashRoot -ProfilesDirectory $ProfilesDirectory
+    if (-not [System.IO.Directory]::Exists($trashRoot)) {
+        return [pscustomobject]@{
+            RestoredTransactions = 0
+            CompletedTransactions = 0
+            CleanupPending = 0
+            WarningCodes = @()
+        }
+    }
+
+    $commitMarkerFiles = @(
+        Get-ChildItem -LiteralPath $trashRoot -File -Force -ErrorAction Stop
+    )
+    foreach ($markerFile in $commitMarkerFiles) {
+        if (($markerFile.Attributes -band `
+                [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw (New-SafeException -Code 'PROFILE_DELETE_QUARANTINE_UNSAFE')
+        }
+        $markerMatch = [regex]::Match(
+            $markerFile.Name,
+            '^(?<profile>.+)-delete-(?<transaction>[0-9a-fA-F]{32})\.committed$'
+        )
+        if (-not $markerMatch.Success -or
+            -not (Test-SafeProfileFileStem `
+                -Name $markerMatch.Groups['profile'].Value)) {
+            throw (New-SafeException -Code 'PROFILE_DELETE_RECOVERY_UNSAFE')
+        }
+    }
+
+    $transactionDirectories = @(
+        Get-ChildItem -LiteralPath $trashRoot -Directory -Force -ErrorAction Stop
+    )
+    $initialTransactionNames = @(
+        $transactionDirectories | ForEach-Object { $_.Name }
+    )
+    if ($transactionDirectories.Count -eq 0 -and
+        $commitMarkerFiles.Count -eq 0) {
+        return [pscustomobject]@{
+            RestoredTransactions = 0
+            CompletedTransactions = 0
+            CleanupPending = 0
+            WarningCodes = @()
+        }
+    }
+
+    # An absent Active state is valid before the first account is initialized.
+    # Any malformed existing state still fails closed before recovery.
+    $activeState = $null
+    try {
+        $activeState = Read-ActiveProfileState -StateDirectory $StateDirectory
+    }
+    catch [System.InvalidOperationException] {
+        if ($_.Exception.Message -cne 'ACTIVE_PROFILE_NOT_INITIALIZED') {
+            throw
+        }
+    }
+
+    $restored = 0
+    $completed = 0
+    $pending = 0
+    $warnings = New-Object System.Collections.ArrayList
+    foreach ($directory in $transactionDirectories) {
+        $context = Get-ExistingProfileDeleteTransactionContext `
+            -Directory $directory -ProfilesDirectory $ProfilesDirectory
+        if (Test-ProfileDeleteCommitMarker -Path $context.CommitMarkerPath) {
+            if ($null -ne $activeState -and
+                $activeState.ActiveProfile.Equals(
+                    $context.Profile,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw (New-SafeException `
+                    -Code 'PROFILE_DELETE_RECOVERY_ACTIVE_CONFLICT')
+            }
+            $cleanup = Invoke-ProfileDeleteQuarantineCleanup -Context $context
+            if ($cleanup.Succeeded) {
+                $completed++
+            }
+            else {
+                $pending++
+                [void]$warnings.Add('PROFILE_REMOVE_QUARANTINE_CLEANUP_FAILED')
+            }
+            continue
+        }
+
+        $rollback = Invoke-ProfileDeleteRollback -Context $context
+        if (-not $rollback.Succeeded) {
+            throw (New-SafeException -Code 'PROFILE_DELETE_RECOVERY_ROLLBACK_FAILED')
+        }
+        $restored++
+    }
+
+    # A committed marker can outlive its transaction directory only if all
+    # quarantined files and the directory were already cleaned. Removing this
+    # final sibling marker completes the transaction without any ambiguity.
+    foreach ($markerFile in $commitMarkerFiles) {
+        if (-not [System.IO.File]::Exists($markerFile.FullName)) {
+            continue
+        }
+        $transactionName = $markerFile.Name.Substring(
+            0,
+            $markerFile.Name.Length - $script:ProfileDeleteCommitMarkerSuffix.Length
+        )
+        $transactionPath = Join-Path $trashRoot $transactionName
+        if ($initialTransactionNames -ccontains $transactionName -or
+            [System.IO.Directory]::Exists($transactionPath)) {
+            continue
+        }
+        if (-not (Test-ProfileDeleteCommitMarker -Path $markerFile.FullName)) {
+            throw (New-SafeException -Code 'PROFILE_DELETE_RECOVERY_UNSAFE')
+        }
+        $profileName = [regex]::Match(
+            $transactionName,
+            '^(?<profile>.+)-delete-[0-9a-fA-F]{32}$'
+        ).Groups['profile'].Value
+        if ($null -ne $activeState -and
+            $activeState.ActiveProfile.Equals(
+                $profileName,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw (New-SafeException `
+                -Code 'PROFILE_DELETE_RECOVERY_ACTIVE_CONFLICT')
+        }
+        try {
+            [System.IO.File]::Delete($markerFile.FullName)
+            if ([System.IO.File]::Exists($markerFile.FullName)) {
+                throw (New-Object System.IO.IOException(
+                    'COMMIT_MARKER_CLEANUP_DID_NOT_COMPLETE'
+                ))
+            }
+            $completed++
+        }
+        catch {
+            $pending++
+            [void]$warnings.Add('PROFILE_REMOVE_QUARANTINE_CLEANUP_FAILED')
+        }
+    }
+
+    return [pscustomobject]@{
+        RestoredTransactions = $restored
+        CompletedTransactions = $completed
+        CleanupPending = $pending
+        WarningCodes = @($warnings)
+    }
+}
+
+function Invoke-RecoverCodexProfileDeleteTransactions {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProfilesDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StateDirectory,
+
+        [string]$MutexName = $script:WriteMutexName
+    )
+
+    return Invoke-WithCodexWriteLock -MutexName $MutexName -Operation {
+        param($LockedProfiles, $LockedState)
+        Invoke-RecoverCodexProfileDeleteTransactionsUnlocked `
+            -ProfilesDirectory $LockedProfiles -StateDirectory $LockedState
+    } -ArgumentList @($ProfilesDirectory, $StateDirectory)
+}
+
+function Invoke-RemoveCodexProfileUnlocked {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Name,
@@ -3167,8 +3920,18 @@ function Invoke-RemoveCodexProfile {
 
         [switch]$ConfirmDelete,
 
+        [Alias('SimulateDeleteFailureType')]
         [ValidateSet('', 'AuthFile', 'IdentityMarker', 'Metadata')]
-        [string]$SimulateDeleteFailureType = ''
+        [string]$SimulateMoveFailureType = '',
+
+        [ValidateSet('', 'AuthFile', 'IdentityMarker', 'Metadata')]
+        [string]$SimulateRollbackFailureType = '',
+
+        [ValidateSet('', 'AuthFile', 'IdentityMarker', 'Metadata')]
+        [string]$SimulateCleanupFailureType = '',
+
+        [ValidateRange(0, 3)]
+        [int]$SimulateInterruptionAfterMoveCount = 0
     )
 
     if (-not $ConfirmDelete) {
@@ -3186,45 +3949,172 @@ function Invoke-RemoveCodexProfile {
         throw (New-SafeException -Code 'CANNOT_REMOVE_ACTIVE_PROFILE')
     }
 
-    $removedTypes = @()
-    $failedTypes = @()
-    foreach ($artifact in @(
-        [pscustomobject]@{ Type = 'AuthFile'; Path = $paths.EncryptedPath },
-        [pscustomobject]@{ Type = 'IdentityMarker'; Path = $paths.IdentityMarkerPath },
-        [pscustomobject]@{ Type = 'Metadata'; Path = $paths.MetadataPath }
-    )) {
-        if (-not [System.IO.File]::Exists($artifact.Path)) {
-            continue
-        }
+    if (-not [System.IO.File]::Exists($paths.EncryptedPath) -or
+        -not [System.IO.File]::Exists($paths.IdentityMarkerPath) -or
+        -not [System.IO.File]::Exists($paths.MetadataPath)) {
+        throw (New-SafeException -Code 'PROFILE_INCOMPLETE')
+    }
+
+    $context = New-ProfileDeleteTransactionContext -Name $safeName `
+        -ProfilesDirectory $ProfilesDirectory
+    $movedTypes = New-Object System.Collections.ArrayList
+    $moveFailureType = $null
+    foreach ($artifact in @($context.Artifacts)) {
         try {
-            if ($artifact.Type -ceq $SimulateDeleteFailureType) {
-                throw (New-Object System.IO.IOException('SIMULATED_DELETE_FAILURE'))
+            if ($artifact.Type -ceq $SimulateMoveFailureType) {
+                throw (New-Object System.IO.IOException('SIMULATED_MOVE_FAILURE'))
             }
-            [System.IO.File]::Delete($artifact.Path)
-            if ([System.IO.File]::Exists($artifact.Path)) {
-                throw (New-Object System.IO.IOException('DELETE_DID_NOT_COMPLETE'))
+            [System.IO.File]::Move($artifact.SourcePath, $artifact.QuarantinePath)
+            if ([System.IO.File]::Exists($artifact.SourcePath) -or
+                -not [System.IO.File]::Exists($artifact.QuarantinePath)) {
+                throw (New-Object System.IO.IOException('MOVE_DID_NOT_COMPLETE'))
             }
-            $removedTypes += $artifact.Type
+            [void]$movedTypes.Add($artifact.Type)
+            if ($SimulateInterruptionAfterMoveCount -gt 0 -and
+                $movedTypes.Count -eq $SimulateInterruptionAfterMoveCount) {
+                throw (New-SafeException -Code 'SIMULATED_PROFILE_DELETE_INTERRUPTION')
+            }
+        }
+        catch [System.InvalidOperationException] {
+            if ($_.Exception.Message -ceq 'SIMULATED_PROFILE_DELETE_INTERRUPTION') {
+                throw
+            }
+            $moveFailureType = $artifact.Type
+            break
         }
         catch {
-            $failedTypes += $artifact.Type
+            $moveFailureType = $artifact.Type
+            break
         }
     }
 
-    if ($failedTypes.Count -gt 0) {
-        return [pscustomobject]@{
-            Result = 'PROFILE_REMOVE_PARTIAL_FAILURE'
-            Profile = $safeName
-            RemovedFileTypes = @($removedTypes)
-            FailedFileTypes = @($failedTypes)
+    if ($null -ne $moveFailureType) {
+        $rollback = Invoke-ProfileDeleteRollback -Context $context `
+            -SimulateRollbackFailureType $SimulateRollbackFailureType
+        if (-not $rollback.Succeeded) {
+            return [pscustomobject]@{
+                Result = 'PROFILE_REMOVE_ROLLBACK_FAILED'
+                Profile = $safeName
+                FailedFileTypes = @($moveFailureType)
+                RollbackFailedFileTypes = @($rollback.FailedFileTypes)
+                QuarantineCleanupPending = $true
+            }
         }
+        return [pscustomobject]@{
+            Result = 'PROFILE_REMOVE_FAILED_ROLLED_BACK'
+            Profile = $safeName
+            FailedFileTypes = @($moveFailureType)
+            RollbackFailedFileTypes = @()
+            QuarantineCleanupPending = $false
+        }
+    }
+
+    try {
+        [System.IO.File]::WriteAllText(
+            $context.CommitMarkerPath,
+            $script:ProfileDeleteCommitMarkerContent,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+        if (-not (Test-ProfileDeleteCommitMarker -Path $context.CommitMarkerPath)) {
+            throw (New-Object System.IO.IOException('COMMIT_MARKER_VERIFICATION_FAILED'))
+        }
+    }
+    catch {
+        $rollback = Invoke-ProfileDeleteRollback -Context $context `
+            -SimulateRollbackFailureType $SimulateRollbackFailureType
+        if (-not $rollback.Succeeded) {
+            return [pscustomobject]@{
+                Result = 'PROFILE_REMOVE_ROLLBACK_FAILED'
+                Profile = $safeName
+                FailedFileTypes = @('CommitMarker')
+                RollbackFailedFileTypes = @($rollback.FailedFileTypes)
+                QuarantineCleanupPending = $true
+            }
+        }
+        return [pscustomobject]@{
+            Result = 'PROFILE_REMOVE_FAILED_ROLLED_BACK'
+            Profile = $safeName
+            FailedFileTypes = @('CommitMarker')
+            RollbackFailedFileTypes = @()
+            QuarantineCleanupPending = $false
+        }
+    }
+
+    $cleanup = Invoke-ProfileDeleteQuarantineCleanup -Context $context `
+        -SimulateCleanupFailureType $SimulateCleanupFailureType
+    $warningCode = $null
+    if (-not $cleanup.Succeeded) {
+        $warningCode = 'PROFILE_REMOVE_QUARANTINE_CLEANUP_FAILED'
     }
     return [pscustomobject]@{
         Result = 'PROFILE_REMOVE_SUCCESS'
         Profile = $safeName
-        RemovedFileTypes = @($removedTypes)
+        RemovedFileTypes = @($movedTypes)
         FailedFileTypes = @()
+        WarningCode = $warningCode
+        QuarantineCleanupPending = -not $cleanup.Succeeded
     }
+}
+
+function Invoke-RemoveCodexProfile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProfilesDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StateDirectory,
+
+        [switch]$ConfirmDelete,
+
+        [Alias('SimulateDeleteFailureType')]
+        [ValidateSet('', 'AuthFile', 'IdentityMarker', 'Metadata')]
+        [string]$SimulateMoveFailureType = '',
+
+        [ValidateSet('', 'AuthFile', 'IdentityMarker', 'Metadata')]
+        [string]$SimulateRollbackFailureType = '',
+
+        [ValidateSet('', 'AuthFile', 'IdentityMarker', 'Metadata')]
+        [string]$SimulateCleanupFailureType = '',
+
+        [ValidateRange(0, 3)]
+        [int]$SimulateInterruptionAfterMoveCount = 0,
+
+        [string]$MutexName = $script:WriteMutexName
+    )
+
+    return Invoke-WithCodexWriteLock -MutexName $MutexName -Operation {
+        param(
+            $LockedName,
+            $LockedProfiles,
+            $LockedState,
+            $LockedConfirmation,
+            $LockedMoveFailure,
+            $LockedRollbackFailure,
+            $LockedCleanupFailure,
+            $LockedInterruptionCount
+        )
+        $null = Invoke-RecoverCodexProfileDeleteTransactionsUnlocked `
+            -ProfilesDirectory $LockedProfiles -StateDirectory $LockedState
+        Invoke-RemoveCodexProfileUnlocked -Name $LockedName `
+            -ProfilesDirectory $LockedProfiles -StateDirectory $LockedState `
+            -ConfirmDelete:$LockedConfirmation `
+            -SimulateMoveFailureType $LockedMoveFailure `
+            -SimulateRollbackFailureType $LockedRollbackFailure `
+            -SimulateCleanupFailureType $LockedCleanupFailure `
+            -SimulateInterruptionAfterMoveCount $LockedInterruptionCount
+    } -ArgumentList @(
+        $Name,
+        $ProfilesDirectory,
+        $StateDirectory,
+        [bool]$ConfirmDelete,
+        $SimulateMoveFailureType,
+        $SimulateRollbackFailureType,
+        $SimulateCleanupFailureType,
+        $SimulateInterruptionAfterMoveCount
+    )
 }
 
 function Remove-CodexProfile {
@@ -3236,13 +4126,10 @@ function Remove-CodexProfile {
         [switch]$ConfirmDelete
     )
 
-    return Invoke-WithCodexWriteLock -Operation {
-        param($LockedName, $LockedConfirmation)
-        Invoke-RemoveCodexProfile -Name $LockedName `
-            -ProfilesDirectory $script:ProfilesDirectory `
-            -StateDirectory $script:StateDirectory `
-            -ConfirmDelete:$LockedConfirmation
-    } -ArgumentList @($Name, [bool]$ConfirmDelete)
+    return Invoke-RemoveCodexProfile -Name $Name `
+        -ProfilesDirectory $script:ProfilesDirectory `
+        -StateDirectory $script:StateDirectory `
+        -ConfirmDelete:$ConfirmDelete
 }
 
 function Invoke-RenameCodexProfile {
@@ -3598,11 +4485,20 @@ function Get-CodexAccountSlot {
     [CmdletBinding()]
     param()
 
-    return Get-CodexAccountSlotState -ProfilesDirectory $script:ProfilesDirectory `
-        -StateDirectory $script:StateDirectory
+    return Invoke-WithCodexWriteLock -Operation {
+        $recovery = Invoke-RecoverCodexProfileDeleteTransactionsUnlocked `
+            -ProfilesDirectory $script:ProfilesDirectory `
+            -StateDirectory $script:StateDirectory
+        foreach ($warningCode in @($recovery.WarningCodes)) {
+            Write-SafeLog -Event $warningCode
+        }
+        Get-CodexAccountSlotState -ProfilesDirectory $script:ProfilesDirectory `
+            -StateDirectory $script:StateDirectory
+    }
 }
 
 Export-ModuleMember -Function @(
+    'Initialize-QiehaoRuntimeDirectories',
     'Get-CodexHome',
     'Test-CodexAuthFile',
     'Protect-CodexAuthBytes',
@@ -3621,5 +4517,6 @@ Export-ModuleMember -Function @(
     'Initialize-CodexActiveProfile',
     'Get-CodexActiveProfile',
     'Test-CodexActiveIdentity',
+    'Sync-CodexActiveProfile',
     'Switch-CodexAccountProfile'
 )

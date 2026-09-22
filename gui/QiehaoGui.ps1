@@ -52,7 +52,22 @@ function Test-QiehaoModuleExportContract {
     return $true
 }
 
-Import-Module -Name $coreModulePath -Force -ErrorAction Stop
+try {
+    Import-Module -Name $coreModulePath -Force -ErrorAction Stop
+}
+catch {
+    $bootstrapCode = [string]$_.Exception.Message
+    if ($bootstrapCode -notmatch '^RUNTIME_[A-Z0-9_]+$') {
+        $bootstrapCode = 'RUNTIME_DIRECTORY_INITIALIZATION_FAILED'
+    }
+    [void][System.Windows.MessageBox]::Show(
+        "Qiehao 无法初始化本地运行目录，已安全停止启动。`n`n错误代码：$bootstrapCode",
+        'Qiehao 启动失败',
+        [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]::Error
+    )
+    return
+}
 Import-Module -Name $helperModulePath -Force -ErrorAction Stop
 $script:guiLocalizationAvailable = $false
 try {
@@ -2941,6 +2956,32 @@ try {
             [Parameter(Mandatory = $true)][object]$Result,
             [Parameter(Mandatory = $true)][string]$TargetProfile
         )
+        if ([string]$Result.ResultCode -ceq
+                'ACTIVE_PROFILE_OUT_OF_SYNC') {
+            $confirmed = Show-QiehaoChoiceDialog `
+                -Title (Get-QiehaoGuiText `
+                    -Key 'Dialog.SyncActive.Title' `
+                    -Fallback '同步当前账号状态') `
+                -Message (Get-QiehaoGuiText `
+                    -Key 'Dialog.SyncActive.Message' `
+                    -Fallback 'Qiehao 记录的当前账号与 Codex 实际登录账号不同。如果当前 Codex 登录账号已保存在本地，可仅同步当前状态；不会修改或复制任何账号凭据。') `
+                -ConfirmText (Get-QiehaoGuiText `
+                    -Key 'Dialog.SyncActive.Confirm' `
+                    -Fallback '同步当前 Codex 登录账号') `
+                -ConfirmStyle Primary
+            if (-not $confirmed) {
+                Show-QiehaoOperationResult -Result $Result
+                return
+            }
+            $syncResult = Invoke-QiehaoOperationProvider `
+                -Operation 'SYNC_ACTIVE' `
+                -Provider { Sync-CodexActiveProfile }
+            Show-QiehaoOperationResult -Result $syncResult
+            if ($syncResult.RefreshRequired) {
+                Invoke-QiehaoReadOnlyRefresh
+            }
+            return
+        }
         $presentation = Complete-QiehaoSwitchUiAfterBackend `
             -Result $Result -TargetProfile $TargetProfile
         Show-QiehaoSwitchCompletionMessage -Result $Result `
@@ -2989,13 +3030,10 @@ try {
             )
             return
         }
-        if ($targetProfile.Equals($script:guiCurrentActiveProfile,
-            [StringComparison]::OrdinalIgnoreCase)) {
-            Show-QiehaoOperationResult -Result (
-                ConvertTo-QiehaoOperationResult -ResultCode 'ALREADY_ACTIVE'
-            )
-            return
-        }
+        $targetIsRecordedActive = $targetProfile.Equals(
+            $script:guiCurrentActiveProfile,
+            [StringComparison]::OrdinalIgnoreCase
+        )
         # A user-requested Switch takes priority over an in-flight quota read.
         Stop-QiehaoQuotaAsync
         $liveStatus = Get-QiehaoLiveCodexStatus
@@ -3032,6 +3070,15 @@ try {
                         -Fallback '无法启动安全等待窗口，本次未执行账号切换。') `
                     -Severity Warning
             }
+            return
+        }
+        if ($targetIsRecordedActive) {
+            Set-QiehaoWriteBusy -Value $true `
+                -StatusText (Get-QiehaoGuiText `
+                    -Key 'Account.SyncChecking' `
+                    -Fallback '正在核对 Qiehao 当前账号与 Codex 实际登录账号…')
+            $null = Invoke-QiehaoSwitchCore `
+                -TargetProfile $targetProfile -SkipQuotaBefore
             return
         }
         Set-QiehaoWriteBusy -Value $true `
@@ -3206,41 +3253,15 @@ try {
 
     function Start-QiehaoAddWizard {
         try {
-            $activeName = $null
-            try {
-                $activeState = Get-CodexActiveProfile
-                $activeName = [string]$activeState.ActiveProfile
-            }
-            catch {
-                if ([string]$_.Exception.Message -ceq 'ACTIVE_PROFILE_NOT_INITIALIZED') {
-                    $activeName = $null
-                }
-                else {
-                    Show-QiehaoSafeMessage `
-                        -Message (Get-QiehaoGuiText `
-                            -Key 'Account.AddReadActiveFailed' `
-                            -Fallback '无法安全读取当前账号状态，已停止添加流程。') `
-                        -Severity Warning
-                    return
-                }
-            }
-            if (-not [string]::IsNullOrWhiteSpace($activeName)) {
-                $saveResult = Invoke-QiehaoOperationProvider `
-                    -Operation 'SAVE_ACTIVE' -Provider { Save-CodexActiveProfile }
-                if (-not $saveResult.IsSuccess) {
-                    Show-QiehaoOperationResult -Result $saveResult
-                    return
-                }
-            }
             $instructions = Get-QiehaoGuiText `
                 -Key 'Account.AddInstructions' `
-                -Fallback '请使用 Codex Desktop 官方登录流程登录新账号，完成后正常退出 Codex。'
+                -Fallback '请先在 Codex 中登录或切换到要添加的账号。确认登录成功后，请完全退出 Codex 客户端（不是注销当前账号），再返回 Qiehao 继续。'
             $ready = Show-QiehaoChoiceDialog `
                 -Title (Get-QiehaoGuiText -Key 'Dialog.Add.Title' `
                     -Fallback '添加账号') `
                 -Message $instructions `
                 -ConfirmText (Get-QiehaoGuiText -Key 'Account.AddReady' `
-                    -Fallback '我已登录新账号并退出') `
+                    -Fallback '我已登录账号并退出') `
                 -ConfirmStyle Positive
             if (-not $ready) { return }
             $liveStatus = Get-QiehaoLiveCodexStatus
@@ -3257,6 +3278,18 @@ try {
                         -Key 'Account.AddExitUnknown' `
                         -Fallback '无法确认 Codex 是否完全退出，本次未添加账号。') `
                     -Severity Warning
+                return
+            }
+            # ADD is intentionally different from Save/Switch: the current
+            # file credential is the candidate account. Never save it into the
+            # previously active profile before its identity is classified.
+            $candidateIdentity = Test-CodexActiveIdentity
+            if ([string]$candidateIdentity.Result -ceq 'ACTIVE_IDENTITY_CONFIRMED') {
+                Show-QiehaoSafeMessage `
+                    -Message (Get-QiehaoGuiText `
+                        -Key 'Account.AddCurrentAlreadySaved' `
+                        -Fallback '当前 Codex 登录的仍是已保存账号。要添加另一个账号，请先在 Codex 中登录或切换到目标账号，登录成功后完全退出 Codex 客户端，再返回 Qiehao 点击“添加账号”。') `
+                    -Severity Information
                 return
             }
             $profileName = Show-QiehaoNameDialog `
@@ -3294,7 +3327,7 @@ try {
             Show-QiehaoSafeMessage `
                 -Message (Get-QiehaoGuiText `
                     -Key 'Account.AddQuitBeforeStart' `
-                    -Fallback '请先从 Codex 菜单“文件 → 退出”或系统托盘选择“退出”，确认状态变为“已退出”后再添加账号。') `
+                    -Fallback '要添加新账号，请先在 Codex 中登录或切换到目标账号。确认登录成功后，请完全退出 Codex 客户端，然后返回 Qiehao 再次点击“添加账号”。注意：这里是退出 Codex 客户端，不是注销当前登录账号。') `
                 -Severity Warning
             return
         }

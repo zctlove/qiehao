@@ -16,7 +16,7 @@ Qiehao 是一个面向 Windows Codex Desktop 的本地账号切换工具，提�
 
 ## 工作方式
 
-首次添加新账号时，用户仍通过 Codex 官方 OAuth（开放授权）流程手动登录。Codex 完全退出后，Qiehao 将该账号的本地认证状态保存为由 Windows DPAPI CurrentUser（数据保护 API，当前用户作用域）保护的加密快照。
+添加账号时，用户先在 Codex 中通过官方 OAuth（开放授权）流程登录或切换到要保存的账号。确认目标账号登录成功后，应完全退出 Codex 客户端，但不要注销当前登录账号。Qiehao 随后识别当前文件型登录凭据，并将其原始认证状态保存为由 Windows DPAPI CurrentUser（数据保护 API，当前用户作用域）保护的加密快照。
 
 后续切换时，Qiehao 要求 Codex Desktop 完全退出，然后安全回存当前账号、验证目标账号、原子替换 Codex 本地认证文件、读回校验，最后更新本地 Active Profile（当前活动档案）状态。Qiehao 不自动操作 OAuth、不强制终止 Codex，也不接触浏览器登录态。
 
@@ -53,15 +53,22 @@ Qiehao 是一个面向 Windows Codex Desktop 的本地账号切换工具，提�
 
 当前版本仅支持 Windows，不支持 macOS。
 
-## 启动
+## 下载、安装与启动
 
-推荐双击仓库根目录中的：
+普通用户请从 GitHub Releases 下载最新的 Qiehao Release ZIP（发布压缩包）：
+
+1. 下载最新 Release ZIP。
+2. 将 ZIP 完整解压到本地普通用户具有读写权限的目录。
+3. 不要直接在 ZIP 压缩包内运行程序。
+4. 双击解压目录中的正式启动入口：
 
 ~~~text
 Start-Qiehao.cmd
 ~~~
 
-也可以在仓库根目录手动运行：
+Qiehao 不需要管理员权限，也不需要安装 Node.js、Python、Visual Studio 或第三方 PowerShell 模块。
+
+高级用户排障时，也可以在仓库或完整解压目录中手动运行：
 
 ~~~powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File ".\gui\QiehaoGui.ps1"
@@ -71,15 +78,48 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File ".\gui\QiehaoGui.ps
 
 ## 使用方法
 
-1. 启动 Qiehao。
-2. 使用 Codex 官方登录流程登录账号。
-3. 按界面引导添加本地 Profile（档案）。
-4. 需要切换时选择目标档案并点击“切换账号”。
-5. 按提示从 Codex 官方菜单或系统托盘正常退出 Codex。
-6. Qiehao 检测到 Codex 完全退出后执行安全切换。
-7. 切换完成后，由用户手动重新启动 Codex。
+首次添加账号：
+
+1. 在 Codex 中通过官方流程登录要保存的账号。
+2. 确认登录成功后完全退出 Codex 客户端。
+3. 打开 Qiehao，点击“添加账号”。
+4. Qiehao 自动识别当前文件型登录凭据，完成安全验证后保存。
+
+添加第二个或后续账号：
+
+1. 在 Codex 中登录或切换到新的目标账号。
+2. 确认登录成功后完全退出 Codex 客户端。
+3. 返回 Qiehao，点击“添加账号”。
+4. Qiehao 自动识别并保存这个新账号；不会把新账号凭据回存到先前的 Active Profile（当前活动档案）。
+
+这里的“退出 Codex”是关闭 Codex 客户端，包括可能仍在运行的系统托盘进程，不是注销当前登录账号。每个账号只需要成功添加一次；以后在已保存账号之间切换时，直接在 Qiehao 选择目标档案并点击“切换账号”，不需要重复 OAuth 登录。切换前仍应按界面提示完全退出 Codex，切换完成后再由用户手动重新启动 Codex。
 
 不要把关闭主窗口等同于完全退出；Codex 仍可能驻留在系统托盘。Qiehao 不会把任务管理器强杀当作正常流程。
+
+## 更新
+
+普通用户推荐使用 GitHub Releases 提供的新版 Release ZIP 更新：
+
+1. 完全退出 Qiehao。
+2. 下载新版 Release ZIP。
+3. 将新版 ZIP 的内容完整解压到现有 Qiehao 目录；如系统询问，只覆盖同名程序文件，不要删除整个原目录。
+4. 使用更新后的 `Start-Qiehao.cmd` 启动。
+
+不要直接在 ZIP 压缩包内运行，也不要为了更新而删除包含本机运行数据的旧目录。`profiles/`、`state/`、`logs/` 和 `backup/` 可能包含当前 Windows 用户在本机产生的私有运行数据；确认新版正常工作并妥善处理这些数据前，不要删除旧目录。
+
+通过 Git 管理源码的高级用户应先检查：
+
+~~~powershell
+git status --short
+~~~
+
+确认没有本地源码修改后，再执行：
+
+~~~powershell
+git pull --ff-only
+~~~
+
+`--ff-only` 只允许 Fast-forward（快进）更新；如果本地历史已经分叉，Git 会安全停止，而不是自动产生 merge commit（合并提交）。如果 `git status --short` 显示源码文件有本地修改，应先自行审查并妥善处理，不要强制覆盖。
 
 ## 主题与语言
 
@@ -98,13 +138,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File ".\gui\QiehaoGui.ps
 ## Privacy（隐私）
 
 - Local-first（本地优先）：档案、状态和额度缓存保存在本机运行目录中。
+- Qiehao 账号配置使用 Windows DPAPI CurrentUser（数据保护 API，当前用户作用域）保护，并绑定当前 Windows 用户和本机保护环境。
+- 不要直接把 `profiles/` 目录复制到另一台电脑使用；即使另一台电脑使用相同的 Windows 用户名，也不能假定这些文件能够解密。
 - Browser/PWA untouched（浏览器/PWA 不受影响）。
 - 本项目未加入 telemetry（遥测）或 analytics（分析统计）。
 - 本项目不运营中转服务器。
 - 不对非活动账号发起额度查询。
 - profiles/、state/、logs/、backup/、auth.json、DPAPI 容器和额度缓存均不得提交到 Git。
 
-用户应妥善保护自己的 Windows 账号、Codex 登录和本机环境。不要向公开 Issue（问题）粘贴认证文件、Token（令牌）、邮箱、账号 ID、Cookie 或含凭据的日志。
+用户应妥善保护自己的 Windows 账号、Codex 登录和本机环境。不要把 `profiles/`、`state/`、`logs/`、`backup/` 或 `auth.json` 上传到 GitHub、网盘、聊天工具或公开 Issue（问题），也不要粘贴 Token（令牌）、邮箱、账号 ID、Cookie 或含凭据的日志。
 
 ## 命令行入口
 
@@ -124,6 +166,7 @@ qiehao.ps1 提供安全后端命令，例如：
 项目同时在 Windows PowerShell 5.1 与 PowerShell 7 下验证。核心自测试位于 tests/，包括：
 
 - SelfTest.ps1
+- MultiAccountStressSelfTest.ps1（10+1 个纯假账号的添加、切换、重复、回滚与损坏隔离）
 - GuiSelfTest.ps1
 - VisualPolishSelfTest.ps1
 - AccountGridLayoutSelfTest.ps1
