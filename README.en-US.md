@@ -7,6 +7,12 @@ Qiehao is a local account switcher for Codex Desktop on Windows. It provides a b
 > [!IMPORTANT]
 > Qiehao is an unofficial community tool. It is not an official OpenAI product. It manages only local Codex Desktop authentication state and does not modify ChatGPT Web, browser, or PWA sessions.
 
+## Product Preview
+
+![Qiehao Arctic Sea Glass theme preview](docs/screenshots/qiehao-preview-arctic-sea-glass.jpg)
+
+This is a real running view of one of Qiehao's current interface themes, showing local account management, active-account status, quota snapshots, and the bilingual multi-theme UI.
+
 ## First things first: Qiehao is not a reverse proxy
 
 Qiehao is **not a reverse-proxy tool, and it is not intended to become one.**
