@@ -60,7 +60,7 @@ Qiehao 是一个面向 Windows Codex Desktop 的本地账号切换工具，提�
 1. 下载最新 Release ZIP。
 2. 将 ZIP 完整解压到本地普通用户具有读写权限的目录。
 3. 不要直接在 ZIP 压缩包内运行程序。
-4. 普通用户请双击仓库或已完整解压 ZIP 根目录中的：
+4. 普通用户推荐双击仓库或已完整解压 ZIP 根目录中的：
 
 ~~~text
 Start-Qiehao.cmd
@@ -68,7 +68,7 @@ Start-Qiehao.cmd
 
 Qiehao 不需要管理员权限，也不需要安装 Node.js、Python、Visual Studio 或第三方 PowerShell 模块。
 
-普通用户无需执行下面的 PowerShell 命令；该命令仅用于高级用户排障：
+普通用户无需执行 PowerShell 命令，该命令仅用于高级用户排障：
 
 ~~~powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File ".\gui\QiehaoGui.ps1"
