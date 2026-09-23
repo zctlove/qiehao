@@ -110,6 +110,16 @@ Assert-LocalizationTest (
     $enAddInstructions -match 'do not sign out' -and
     $enAddInstructions -match 'only needs to be added once'
 ) 'LOCALIZATION_ADD_WORKFLOW_GUIDANCE_INVALID'
+$zhWorkspaceHint = Get-QiehaoLocalizedString -Language 'zh-CN' `
+    -Key 'Account.TeamFirstAddHint'
+$enWorkspaceHint = Get-QiehaoLocalizedString -Language 'en-US' `
+    -Key 'Account.TeamFirstAddHint'
+Assert-LocalizationTest (
+    $zhWorkspaceHint -ceq
+        '⚠ 空间账号首次添加：请在 Qiehao 开启状态下，完成一次该账号登录流程，否则可能被识别为个人账户。' -and
+    $enWorkspaceHint -ceq
+        '⚠ Team workspace account first add: Please complete one login flow for this account while Qiehao is running, otherwise it may be identified as a Personal account.'
+) 'LOCALIZATION_WORKSPACE_FIRST_ADD_HINT_INVALID'
 Assert-LocalizationTest (
     (Get-QiehaoLocalizedThemeName -Language 'zh-CN' `
         -ThemeId '04-purple-tech') -ceq '紫蓝星河' -and

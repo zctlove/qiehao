@@ -2243,6 +2243,70 @@ function Request-CodexDesktopNativeQuit {
     return New-CodexNativeQuitResult -Result 'CODEX_NATIVE_QUIT_UI_NOT_FOUND' -BlockingProcessCount $blockingCount
 }
 
+function Get-QiehaoProcessDiagnosticRecords {
+    param(
+        [AllowEmptyCollection()][object[]]$Snapshot = @(),
+        [AllowNull()][object]$ProcessState,
+        [AllowEmptyCollection()][object[]]$OwnedProcessDescriptors = @()
+    )
+
+    $blockingIds = @{}
+    if ($null -ne $ProcessState -and
+        $null -ne $ProcessState.PSObject.Properties['BlockingProcesses']) {
+        foreach ($blockingProcess in @($ProcessState.BlockingProcesses)) {
+            if ($null -eq $blockingProcess) { continue }
+            $blockingPid = $blockingProcess.PSObject.Properties['PID']
+            if ($null -ne $blockingPid) {
+                $blockingIds[[string][int]$blockingPid.Value] = $true
+            }
+        }
+    }
+
+    $records = @()
+    foreach ($process in @($Snapshot)) {
+        if ($null -eq $process) { continue }
+        $nameProperty = $process.PSObject.Properties['ProcessName']
+        $idProperty = $process.PSObject.Properties['Id']
+        $pathProperty = $process.PSObject.Properties['ExecutablePath']
+        $startProperty = $process.PSObject.Properties['ProcessStartTimeUtc']
+        if ($null -eq $nameProperty -or $null -eq $idProperty) { continue }
+        $processName = [string]$nameProperty.Value
+        $processPath = if ($null -eq $pathProperty) { '' }
+            else { [string]$pathProperty.Value }
+        $normalizedName = Get-NormalizedProcessName -Name $processName
+        $isCodexCandidate = (
+            $normalizedName -match '^(?i:codex(?:[-_].*)?)$' -or
+            $normalizedName -ieq 'ChatGPT' -or
+            $normalizedName -ieq 'extension-host' -or
+            (Test-CodexOwnedExecutablePath -Path $processPath)
+        )
+        if (-not $isCodexCandidate) { continue }
+        $startTime = if ($null -eq $startProperty -or
+            $null -eq $startProperty.Value) { '' }
+            else {
+                try {
+                    ([DateTime]$startProperty.Value).
+                        ToUniversalTime().ToString('o')
+                }
+                catch { '' }
+            }
+        $processId = [int]$idProperty.Value
+        $records += [pscustomobject]@{
+            PID = $processId
+            ProcessName = $processName
+            ProcessPath = $processPath
+            ProcessStartTime = $startTime
+            IsQiehaoQuotaChild = [bool](Test-QiehaoOwnedQuotaProcess `
+                -Process $process `
+                -OwnedProcessDescriptors $OwnedProcessDescriptors)
+            IsBlockingProcess = [bool]$blockingIds.ContainsKey(
+                [string]$processId
+            )
+        }
+    }
+    return @($records)
+}
+
 function Assert-CodexNotRunning {
     param(
         [object[]]$ProcessData,
@@ -2295,41 +2359,9 @@ function Assert-CodexNotRunning {
     $processState = Test-CodexProcessesStopped -ProcessData $snapshot `
         -OwnedProcessDescriptors $OwnedProcessDescriptors
     if (-not [string]::IsNullOrWhiteSpace($DiagnosticOperation)) {
-        $diagnosticProcesses = @()
-        foreach ($process in @($snapshot)) {
-            if ($null -eq $process) { continue }
-            $nameProperty = $process.PSObject.Properties['ProcessName']
-            $idProperty = $process.PSObject.Properties['Id']
-            $pathProperty = $process.PSObject.Properties['ExecutablePath']
-            $startProperty = $process.PSObject.Properties['ProcessStartTimeUtc']
-            if ($null -eq $nameProperty -or $null -eq $idProperty) { continue }
-            $processName = [string]$nameProperty.Value
-            $processPath = if ($null -eq $pathProperty) { '' }
-                else { [string]$pathProperty.Value }
-            $normalizedName = Get-NormalizedProcessName -Name $processName
-            $isCodexCandidate = (
-                $normalizedName -match '^(?i:codex(?:[-_].*)?)$' -or
-                $normalizedName -ieq 'ChatGPT' -or
-                $normalizedName -ieq 'extension-host' -or
-                (Test-CodexOwnedExecutablePath -Path $processPath)
-            )
-            if (-not $isCodexCandidate) { continue }
-            $startTime = if ($null -eq $startProperty -or
-                $null -eq $startProperty.Value) { '' }
-                else {
-                    try { ([DateTime]$startProperty.Value).ToUniversalTime().ToString('o') }
-                    catch { '' }
-                }
-            $diagnosticProcesses += [pscustomobject]@{
-                PID = [int]$idProperty.Value
-                ProcessName = $processName
-                ProcessPath = $processPath
-                ProcessStartTime = $startTime
-                IsQiehaoQuotaChild = [bool](Test-QiehaoOwnedQuotaProcess `
-                    -Process $process `
-                    -OwnedProcessDescriptors $OwnedProcessDescriptors)
-            }
-        }
+        $diagnosticProcesses = @(Get-QiehaoProcessDiagnosticRecords `
+            -Snapshot $snapshot -ProcessState $processState `
+            -OwnedProcessDescriptors $OwnedProcessDescriptors)
         Write-QiehaoDiagnosticEvent -Event 'PROCESS_CHECK_RESULT' `
             -Level $(if ($processState.SafeToSave) { 'INFO' } else { 'WARNING' }) `
             -Result ([string]$processState.ReasonCode) -Data @{
@@ -2356,6 +2388,9 @@ function Assert-CodexNotRunning {
         $waitStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $recheckCount = 0
         if (-not [string]::IsNullOrWhiteSpace($DiagnosticOperation)) {
+            $diagnosticProcesses = @(Get-QiehaoProcessDiagnosticRecords `
+                -Snapshot $snapshot -ProcessState $processState `
+                -OwnedProcessDescriptors $OwnedProcessDescriptors)
             Write-QiehaoDiagnosticEvent -Event 'PROCESS_WAIT_START' `
                 -Result 'CODEX_PROCESS_RUNNING' -Data @{
                     Role = $DiagnosticOperation
@@ -2363,6 +2398,8 @@ function Assert-CodexNotRunning {
                     RecheckIntervalMilliseconds =
                         $ProcessRecheckIntervalMilliseconds
                     BlockingCount = @($processState.BlockingProcesses).Count
+                    ProcessCount = @($diagnosticProcesses).Count
+                    Processes = @($diagnosticProcesses)
                 }
         }
         try {
@@ -2404,6 +2441,11 @@ function Assert-CodexNotRunning {
                 if (-not [string]::IsNullOrWhiteSpace(
                     $DiagnosticOperation
                 )) {
+                    $diagnosticProcesses = @(
+                        Get-QiehaoProcessDiagnosticRecords `
+                            -Snapshot $snapshot -ProcessState $processState `
+                            -OwnedProcessDescriptors $OwnedProcessDescriptors
+                    )
                     Write-QiehaoDiagnosticEvent -Event 'PROCESS_RECHECK' `
                         -Level $(if ($processState.SafeToSave) {
                             'INFO'
@@ -2419,6 +2461,8 @@ function Assert-CodexNotRunning {
                                 @($processState.BlockingProcesses).Count
                             UncertainCount =
                                 @($processState.UncertainProcesses).Count
+                            ProcessCount = @($diagnosticProcesses).Count
+                            Processes = @($diagnosticProcesses)
                         }
                 }
                 if ($processState.SafeToSave) {
@@ -2449,6 +2493,9 @@ function Assert-CodexNotRunning {
         if ([string]$processState.ReasonCode -ceq
             'CODEX_PROCESS_RUNNING' -and
             -not [string]::IsNullOrWhiteSpace($DiagnosticOperation)) {
+            $diagnosticProcesses = @(Get-QiehaoProcessDiagnosticRecords `
+                -Snapshot $snapshot -ProcessState $processState `
+                -OwnedProcessDescriptors $OwnedProcessDescriptors)
             Write-QiehaoDiagnosticEvent -Event 'PROCESS_STILL_RUNNING' `
                 -Level 'WARNING' -Result 'CODEX_PROCESS_RUNNING' -Data @{
                     Role = $DiagnosticOperation
@@ -2456,6 +2503,8 @@ function Assert-CodexNotRunning {
                     ElapsedMilliseconds =
                         [int]$waitStopwatch.ElapsedMilliseconds
                     BlockingCount = @($processState.BlockingProcesses).Count
+                    ProcessCount = @($diagnosticProcesses).Count
+                    Processes = @($diagnosticProcesses)
                 }
         }
     }
@@ -3292,7 +3341,8 @@ function ConvertTo-QiehaoDiagnosticSafeValue {
         'ActiveProfile', 'TargetProfile', 'Profile', 'Role',
         'CredentialSource', 'WorkspaceType', 'IdentityHash', 'ParseResult',
         'ProcessCount', 'Processes', 'PID', 'ProcessName', 'ProcessPath',
-        'ProcessStartTime', 'IsQiehaoQuotaChild', 'SafeToSave',
+        'ProcessStartTime', 'IsQiehaoQuotaChild', 'IsBlockingProcess',
+        'SafeToSave',
         'ReasonCode', 'BlockingCount', 'UncertainCount', 'ResultCode',
         'ProfileIntegrity', 'CurrentWorkspaceType', 'SavedWorkspaceType',
         'Decision', 'Version', 'PowerShellVersion', 'WindowsVersion',

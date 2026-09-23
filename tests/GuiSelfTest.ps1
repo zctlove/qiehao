@@ -726,19 +726,13 @@ Assert-GuiTest -Condition (
 ) -Code 'GUI_CHILD_CLEANUP_CONTRACT_PS7_FAILED'
 
 $requiredSwitchBeforeQuotaOutput = @(
-    'SwitchBeforeQuotaRunsDuringManualExitWait=True',
-    'SwitchBeforeQuotaSuccessBeforeStopped=True',
-    'SwitchBeforeQuotaSuccessAfterStoppedWithinBudget=True',
-    'SwitchBeforeQuotaTimeoutDoesNotBlockSwitch=True',
-    'SwitchBeforeQuotaUsesOldCacheOnFailure=True',
-    'SwitchBeforeQuotaFailureWithoutOldCacheStillSwitches=True',
-    'SwitchBeforeQuotaNoRetry=True',
-    'SwitchBeforeQuotaBudgetDoesNotRestartAfterStopped=True',
-    'SwitchBeforeQuotaSlowStatusMessage=True',
-    'SwitchBeforeQuotaSuccessStatusMessage=True',
-    'SwitchBeforeQuotaTimeoutStatusMessage=True',
+    'QuotaNeverStartsDuringManualExitWait=True',
+    'SwitchRunsImmediatelyWhenCodexStopped=True',
+    'SwitchCoreHasNoQuotaPrerequisite=True',
+    'LifecycleCancelsInFlightQuotaFirst=True',
+    'SwitchAfterQuotaRemainsBackground=True',
+    'PendingQuotaNeverBlocksStoppedSwitch=True',
     'QuotaFailureNeverChangesSwitchSuccess=True',
-    'SwitchBeforeQuotaWaitTimerRemainsActiveUntilQuotaDone=True',
     'SWITCH_BEFORE_QUOTA_SELFTEST_PASS'
 )
 $switchBeforeQuota51 = Invoke-PowerShellFileTest `

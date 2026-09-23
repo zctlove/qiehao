@@ -431,6 +431,11 @@
                         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="260" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                         <TextBlock x:Name="SearchAccountsLabelText" Grid.Column="0" Margin="0,0,8,0" VerticalAlignment="Center" Text="搜索账号：" />
                         <TextBox x:Name="ProfileSearchTextBox" Grid.Column="1" MinHeight="30" Padding="7,4" ToolTip="仅按本地 Profile 名称搜索，不访问凭证或身份内容" />
+                        <TextBlock x:Name="WorkspaceFirstAddHintText" Grid.Column="2"
+                                   Margin="18,0,0,0" VerticalAlignment="Center"
+                                   FontSize="11" Foreground="{DynamicResource WarningBrush}"
+                                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                   Text="⚠ 空间账号首次添加：请在 Qiehao 开启状态下，完成一次该账号登录流程，否则可能被识别为个人账户。" />
                     </Grid>
                     <DataGrid
                         x:Name="ProfilesGrid" Grid.Row="4" AutoGenerateColumns="False"

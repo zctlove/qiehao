@@ -153,6 +153,10 @@ Quota refresh and account switching are separate operations. My tradeoff is simp
 
 **account switching prioritizes safety and correctness; quota refresh is allowed to be slower and occasionally fail.**
 
+Quota retrieval is an auxiliary feature and does not block account add, switch, or delete operations.
+
+If quota retrieval fails, select Refresh Quota to try again.
+
 ## Requirements
 
 - Windows 10/11
@@ -160,6 +164,16 @@ Quota refresh and account switching are separate operations. My tradeoff is simp
 - Codex Desktop
 
 PowerShell 7 is used only for compatibility and development testing. Regular users do not need to install it to run Qiehao. The current version supports Windows only, not macOS.
+
+## Download
+
+Current recommended version:
+
+**Qiehao v1.0.3**
+
+New users should download the latest version.
+
+Previous releases are kept for version history and troubleshooting purposes. New users should use the latest release.
 
 ## Download, install, and start
 
@@ -186,6 +200,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File ".\gui\QiehaoGui.ps
 
 ## Usage
 
+> ⚠ **Team workspace account first add:**
+>
+> Please complete one login flow for this account while Qiehao is running, otherwise it may be identified as a Personal account.
+>
+> Codex current identity information must be collected through a complete sign-in flow.
+>
+> If a workspace account is signed in before Qiehao is running and Qiehao only reads it afterward, some environments may not provide enough context to distinguish the Team workspace identity from Personal.
+
 To add the first account:
 
 1. Sign in to the account you want to save through the official Codex flow.
@@ -203,6 +225,20 @@ To add a second or later account:
 “Exit Codex” means closing the Codex client, including any process still running in the system tray. It does not mean signing out of the account. Each account only needs to be added once; later switching between saved accounts does not require repeating OAuth sign-in.
 
 Closing the main Codex window is not necessarily the same as exiting it; Codex may still be running in the system tray. Qiehao does not treat force-killing Codex in Task Manager as the normal workflow.
+
+## FAQ
+
+### What should I do if Qiehao says Codex is still running?
+
+If the Codex client was just closed, Windows may need a short time to release its background processes.
+
+During that interval, Qiehao may report that Codex is still running.
+
+Wait briefly, then try the switch or delete operation again.
+
+To avoid Windows process-state refresh delays affecting the result, do not rapidly switch between several accounts in a short period.
+
+Wait until the current switch is complete and the client state is stable before starting another switch.
 
 ## Updating
 
@@ -273,9 +309,16 @@ The project is tested under both Windows PowerShell 5.1 and PowerShell 7. Core s
 
 All automated tests use fake-only data or hidden/offscreen WPF. Development and CI must not read real authentication profiles or send real quota requests. Read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing and [SECURITY.md](SECURITY.md) before reporting a security issue.
 
-## v1.0.0 status
+## Release status and version history
 
-Qiehao v1.0.0 is the first public release. It is still being validated across more real Windows environments.
+The current recommended download is **Qiehao v1.0.3 (Latest)**.
+
+- v1.0.3 — Latest
+- v1.0.2
+- v1.0.1
+- v1.0.0
+
+v1.0.0, v1.0.1, and v1.0.2 remain available for version history and troubleshooting. New users should use the latest release.
 
 There is no Windows EXE or installer yet. For the first release, keeping the PowerShell source and launchers transparent and simple makes the code easier to inspect and feedback easier to act on. An EXE or installer can be evaluated later based on real user feedback.
 

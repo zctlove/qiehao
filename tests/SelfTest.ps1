@@ -1055,6 +1055,8 @@ try {
             ExecutablePath =
                 'C:\Users\Fake\AppData\Local\OpenAI\Codex\bin\codex.exe'
             PathReadStatus = 'Readable'
+            ProcessStartTimeUtc = [DateTime]'2026-09-23T01:02:03Z'
+            StartTimeReadStatus = 'Readable'
         }
         $snapshotProvider = {
             return @($runningProcess)
@@ -1075,8 +1077,29 @@ try {
         ) | ForEach-Object { $_ | ConvertFrom-Json } |
         Where-Object { $_.event -ceq 'PROCESS_STILL_RUNNING' }
     )
+    [object[]]$persistentProcessDetails = @()
+    if ($persistentWaitEvents.Count -ge 1) {
+        $persistentProcessDetails = @(
+            $persistentWaitEvents[-1].data.Processes
+        )
+    }
+    $persistentStartTimeUtc = if ($persistentProcessDetails.Count -eq 1) {
+        ([DateTime]$persistentProcessDetails[0].ProcessStartTime).
+            ToUniversalTime()
+    }
+    else { [DateTime]::MinValue }
     if ($persistentRunningCode -cne 'CODEX_PROCESS_RUNNING' -or
-        $persistentWaitEvents.Count -lt 1) {
+        $persistentWaitEvents.Count -lt 1 -or
+        $persistentProcessDetails.Count -ne 1 -or
+        [int]$persistentProcessDetails[0].PID -ne 9102 -or
+        [string]$persistentProcessDetails[0].ProcessName -cne
+            'codex.exe' -or
+        [string]$persistentProcessDetails[0].ProcessPath -cne
+            'C:\Users\Fake\AppData\Local\OpenAI\Codex\bin\codex.exe' -or
+        $persistentStartTimeUtc -ne
+            ([DateTime]'2026-09-23T01:02:03Z').ToUniversalTime() -or
+        [bool]$persistentProcessDetails[0].IsQiehaoQuotaChild -or
+        -not [bool]$persistentProcessDetails[0].IsBlockingProcess) {
         throw 'SELFTEST_CODEX_PROCESS_WAIT_TIMEOUT_NOT_FAIL_CLOSED'
     }
 
@@ -2064,6 +2087,7 @@ try {
         CodexProcessBlocksSwitch = 'PASS'
         CodexDelayedExitContinues = 'PASS'
         CodexWaitTimeoutFailsClosed = 'PASS'
+        ProcessBlockerDetailsLogged = 'PASS'
         SameUserDifferentWorkspacePreserved = 'PASS'
         TeamPersonalDriftDetected = 'PASS'
         PersonalTeamDriftDetected = 'PASS'

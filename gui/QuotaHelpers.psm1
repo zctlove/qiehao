@@ -10,7 +10,7 @@ $script:QuotaUiStrings = [ordered]@{
     RefreshCurrentOnly = '仅刷新当前账号额度。'
     Updating = '正在更新当前账号额度……'
     Updated = '当前账号额度已更新。'
-    UpdateFailedRetry = '额度更新失败，可稍后点击“刷新额度”重试。'
+    UpdateFailedRetry = '额度获取失败，可点击刷新额度重新获取。'
     UpdateFailedCached = '额度更新失败，保留原缓存。'
     UpdateFailedNoCache = '额度更新失败；当前账号尚无额度快照。'
     CacheUnavailable = '额度缓存不可用；不影响账号管理。'
@@ -28,7 +28,7 @@ $script:QuotaUiStrings = [ordered]@{
     RenameCacheFailed = '账号已重命名；额度缓存迁移失败，不影响账号状态。'
     DeleteCacheFailed = '账号已删除；额度缓存清理失败，不影响账号状态。'
     SwitchOldFailed = '旧账号额度更新失败，已保留原缓存；继续切换。'
-    SwitchNewFailed = '切换成功；额度更新失败，保留原缓存。'
+    SwitchNewFailed = '额度获取失败，可点击刷新额度重新获取。'
 }
 
 $script:QuotaLocalizationKeys = [ordered]@{

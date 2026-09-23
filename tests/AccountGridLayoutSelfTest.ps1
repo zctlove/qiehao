@@ -133,6 +133,7 @@ function Apply-TestLanguage {
         CodexSafetyHintText = 'Safety.Running'
         SavedAccountsHeadingText = 'Section.SavedAccounts'
         SearchAccountsLabelText = 'Search.Label'
+        WorkspaceFirstAddHintText = 'Account.TeamFirstAddHint'
         SwitchButton = 'Button.Switch'
         VerifyButton = 'Button.Verify'
         RefreshButton = 'Button.Refresh'
@@ -323,7 +324,8 @@ function Test-CoreControlsVisible {
     param([Parameter(Mandatory = $true)][object]$Window)
     foreach ($name in @(
         'HeaderTitleText','ThemeComboBox','LanguageComboBox',
-        'SavedAccountsHeadingText','ProfileSearchTextBox','ProfilesGrid',
+        'SavedAccountsHeadingText','ProfileSearchTextBox',
+        'WorkspaceFirstAddHintText','ProfilesGrid',
         'SwitchButton','LaunchSettingsButton','RefreshStatusText'
     )) {
         $control = Get-Named -Window $Window -Name $name

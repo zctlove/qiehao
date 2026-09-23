@@ -210,7 +210,7 @@ $script:guiQuotaFallbackStrings = [ordered]@{
     RefreshButton = '刷新额度'
     ColumnHeader = '额度快照'
     CacheUnavailable = '额度功能不可用，账号管理功能不受影响。'
-    UpdateFailedRetry = '额度更新失败，可稍后点击“刷新额度”重试。'
+    UpdateFailedRetry = '额度获取失败，可点击刷新额度重新获取。'
     NoSnapshot = '额度不可用'
     InactiveTooltip = '额度功能当前不可用；账号管理功能不受影响。'
 }
@@ -340,6 +340,7 @@ try {
     $webChatGPTHintText = Get-RequiredControl -Window $window -Name 'WebChatGPTHintText'
     $savedAccountsHeadingText = Get-RequiredControl -Window $window -Name 'SavedAccountsHeadingText'
     $searchAccountsLabelText = Get-RequiredControl -Window $window -Name 'SearchAccountsLabelText'
+    $workspaceFirstAddHintText = Get-RequiredControl -Window $window -Name 'WorkspaceFirstAddHintText'
     $browserSafetyFooterText = Get-RequiredControl -Window $window -Name 'BrowserSafetyFooterText'
     $profileColumn = Get-RequiredControl -Window $window -Name 'ProfileColumn'
     $currentColumn = Get-RequiredControl -Window $window -Name 'CurrentColumn'
@@ -627,6 +628,9 @@ try {
         $savedAccountsHeadingText.Text = Get-QiehaoGuiText -Key 'Section.SavedAccounts'
         $searchAccountsLabelText.Text = Get-QiehaoGuiText -Key 'Search.Label'
         $profileSearchTextBox.ToolTip = Get-QiehaoGuiText -Key 'Search.ToolTip'
+        $workspaceFirstAddHintText.Text = Get-QiehaoGuiText `
+            -Key 'Account.TeamFirstAddHint'
+        $workspaceFirstAddHintText.ToolTip = $workspaceFirstAddHintText.Text
         $browserSafetyFooterText.Text = Get-QiehaoGuiText -Key 'Footer.BrowserSafe'
         $profileColumn.Header = Get-QiehaoGuiText -Key 'Column.Profile'
         $currentColumn.Header = Get-QiehaoGuiText -Key 'Column.Current'
@@ -1602,13 +1606,13 @@ try {
                 Set-QiehaoLocalizedStatus `
                     -Key 'Quota.SwitchNewFailedWithCode' `
                     -Arguments @($script:guiQuotaLastFailureCode) `
-                    -Fallback '切换成功；额度更新失败，保留原缓存。 错误代码：{0}'
+                    -Fallback '额度获取失败，可点击刷新额度重新获取。'
             }
             else {
                 Set-QiehaoLocalizedStatus `
                     -Key 'Quota.UpdateFailedRetryWithCode' `
                     -Arguments @($script:guiQuotaLastFailureCode) `
-                    -Fallback '额度更新失败，可稍后点击“刷新额度”重试。 错误代码：{0}'
+                    -Fallback '额度获取失败，可点击刷新额度重新获取。'
             }
         }
         try {
@@ -1886,7 +1890,7 @@ try {
                     Set-QiehaoLocalizedStatus `
                         -Key 'Quota.UpdateFailedRetryWithCode' `
                         -Arguments @($script:guiQuotaLastFailureCode) `
-                        -Fallback '额度更新失败，可稍后点击“刷新额度”重试。 错误代码：{0}'
+                        -Fallback '额度获取失败，可点击刷新额度重新获取。'
                     try { Update-QiehaoQuotaRows }
                     finally { Update-QiehaoActionButtons }
                 }
@@ -1905,7 +1909,7 @@ try {
             Set-QiehaoLocalizedStatus `
                 -Key 'Quota.UpdateFailedRetryWithCode' `
                 -Arguments @($script:guiQuotaLastFailureCode) `
-                -Fallback '额度更新失败，可稍后点击“刷新额度”重试。 错误代码：{0}'
+                -Fallback '额度获取失败，可点击刷新额度重新获取。'
             return $false
         }
     }
@@ -2556,8 +2560,7 @@ try {
         }
         Set-QiehaoSwitchUiState -State 'Switching' `
             -TargetProfile $targetProfile
-        Invoke-QiehaoSwitchCore -TargetProfile $targetProfile `
-            -SkipQuotaBefore
+        Invoke-QiehaoSwitchCore -TargetProfile $targetProfile
     }
 
     function Complete-QiehaoManualSwitchWait {
@@ -2594,8 +2597,7 @@ try {
             $switchAction = [System.Action]({
                 try {
                     $script:guiManualSwitchResult = Invoke-QiehaoSwitchCore `
-                        -TargetProfile $capturedTarget -DeferPresentation `
-                        -SkipQuotaBefore
+                        -TargetProfile $capturedTarget -DeferPresentation
                 }
                 catch {
                     $script:guiManualSwitchResult =
@@ -2665,22 +2667,7 @@ try {
                                     Get-QiehaoOwnedQuotaProcessDescriptors
                                 )
                         )
-                    if ($status -ceq '已退出') {
-                        if ([string]$script:guiQuotaAsyncReason -ceq
-                            'SwitchBefore' -and
-                            [bool]$script:guiQuotaCoordinator.
-                                QueryInProgress) {
-                            $script:guiManualSwitchCodexStopped = $true
-                            Set-QiehaoCodexStatusVisual -Status '已退出'
-                            Set-QiehaoSwitchQuotaStatus -Text (
-                                'Codex 已安全退出。' +
-                                "正在完成 '$script:guiQuotaRequestedProfile' " +
-                                '的额度快照，随后自动切换……'
-                            )
-                            return 'Pending'
-                        }
-                        return 'Succeeded'
-                    }
+                    if ($status -ceq '已退出') { return 'Succeeded' }
                     if ($status -ceq '未知') { return 'Unknown' }
                     return 'Pending'
                 } `
@@ -3042,17 +3029,9 @@ try {
     function Invoke-QiehaoSwitchCore {
         param(
             [Parameter(Mandatory = $true)][string]$TargetProfile,
-            [switch]$DeferPresentation,
-            [switch]$SkipQuotaBefore
+            [switch]$DeferPresentation
         )
         try {
-            if (-not $SkipQuotaBefore) {
-                try { Invoke-QiehaoQuotaBeforeSwitch }
-                catch {
-                    $refreshStatusText.Text =
-                        Get-QiehaoQuotaUiTextSafe -Key 'SwitchOldFailed'
-                }
-            }
             $result = Invoke-QiehaoOperationProvider -Operation 'SWITCH' `
                 -Provider { param($Name) Switch-CodexAccountProfile -Name $Name } `
                 -ArgumentList @($TargetProfile)
@@ -3095,7 +3074,6 @@ try {
             return
         }
         if ($liveStatus -ceq '运行中') {
-            $null = Start-QiehaoQuotaAsync -Reason SwitchBefore
             try {
                 Show-QiehaoManualSwitchWaitDialog -TargetProfile $targetProfile
             }
@@ -3128,25 +3106,15 @@ try {
                 -StatusText (Get-QiehaoGuiText `
                     -Key 'Account.SyncChecking' `
                     -Fallback '正在核对 Qiehao 当前账号与 Codex 实际登录账号…')
-            $null = Invoke-QiehaoSwitchCore `
-                -TargetProfile $targetProfile -SkipQuotaBefore
+            $null = Invoke-QiehaoSwitchCore -TargetProfile $targetProfile
             return
         }
         Set-QiehaoWriteBusy -Value $true `
             -StatusText (Format-QiehaoGuiText `
-                -Key 'Quota.SwitchBeforeSaving' `
-                -Arguments @($script:guiCurrentActiveProfile) `
-                -Fallback "正在保存 '{0}' 的最新额度快照……")
-        $script:guiPendingAction = 'SwitchAfterQuota'
-        $script:guiPendingTargetProfile = $targetProfile
-        if (Start-QiehaoQuotaAsync -Reason SwitchBefore) {
-            Set-QiehaoSwitchQuotaStatus -Text (Format-QiehaoGuiText `
-                -Key 'Quota.SwitchBeforeSaving' `
-                -Arguments @($script:guiCurrentActiveProfile) `
-                -Fallback "正在保存 '{0}' 的最新额度快照……")
-            return
-        }
-        Continue-QiehaoStoppedSwitchAfterQuota
+                -Key 'Switch.Status.SwitchingTarget' `
+                -Arguments @($targetProfile) `
+                -Fallback "正在切换到 '{0}'……")
+        $null = Invoke-QiehaoSwitchCore -TargetProfile $targetProfile
     }
 
     function Invoke-QiehaoVerifySelectedProfile {
@@ -3603,7 +3571,9 @@ try {
                 $window.Title -ceq 'Codex 账号管理器' -and
                 [string]$switchButton.Content -ceq '切换账号' -and
                 [string]$profileColumn.Header -ceq '名称' -and
-                $codexStatusText.Text -ceq '已退出'
+                $codexStatusText.Text -ceq '已退出' -and
+                $workspaceFirstAddHintText.Text -ceq
+                    '⚠ 空间账号首次添加：请在 Qiehao 开启状态下，完成一次该账号登录流程，否则可能被识别为个人账户。'
             )
 
             $script:guiLanguage = 'en-US'
@@ -3624,6 +3594,12 @@ try {
                 $codexStatusText.Text -ceq 'Stopped' -and
                 $identityStatusText.Text -ceq 'Confirmed' -and
                 $refreshStatusText.Text -ceq 'Status refreshed.'
+            )
+            $switchToEnUsUpdatesWorkspaceHint = (
+                $workspaceFirstAddHintText.Text -ceq
+                    '⚠ Team workspace account first add: Please complete one login flow for this account while Qiehao is running, otherwise it may be identified as a Personal account.' -and
+                [string]$workspaceFirstAddHintText.ToolTip -ceq
+                    [string]$workspaceFirstAddHintText.Text
             )
             $switchToEnUsUpdatesQuotaTooltip = (
                 [string]$profilesGrid.ItemsSource[0].QuotaSummary -ceq
@@ -3658,7 +3634,7 @@ try {
                 $switchSuccessEn -match 'Current account: Team' -and
                 $switchCancelledEn -match 'Waiting was cancelled' -and
                 $quotaFailureEn -match
-                    'Error code: QUOTA_RATE_LIMITS_TIMEOUT'
+                    '^Quota retrieval failed\. Select Refresh Quota to try again\.'
             )
             Set-QiehaoLocalizedStatus `
                 -Key 'Quota.UpdateFailedRetryWithCode' `
@@ -3729,11 +3705,10 @@ try {
                 $codexStatusText.Text -ceq '已退出'
             )
             $dynamicQuotaStatusRedrawsAcrossLanguages = (
-                $quotaFailureStatusEn -match
-                    'Error code: QUOTA_RATE_LIMITS_TIMEOUT' -and
-                $refreshStatusText.Text -match '额度更新失败' -and
-                $refreshStatusText.Text -match
-                    'QUOTA_RATE_LIMITS_TIMEOUT'
+                $quotaFailureStatusEn -ceq
+                    'Quota retrieval failed. Select Refresh Quota to try again.' -and
+                $refreshStatusText.Text -ceq
+                    '额度获取失败，可点击刷新额度重新获取。'
             )
             $finalQuotaJson = if ($null -eq $script:guiQuotaCache) {
                 'NULL'
@@ -3761,6 +3736,8 @@ try {
                 SwitchToEnUsUpdatesDataGridHeaders =
                     $switchToEnUsUpdatesDataGridHeaders
                 SwitchToEnUsUpdatesStatus = $switchToEnUsUpdatesStatus
+                SwitchToEnUsUpdatesWorkspaceHint =
+                    $switchToEnUsUpdatesWorkspaceHint
                 SwitchToEnUsUpdatesQuotaTooltip =
                     $switchToEnUsUpdatesQuotaTooltip
                 DynamicCodexStatesEnUs = $dynamicCodexStatesEnUs
@@ -3975,8 +3952,7 @@ try {
                 $workerFailureCodeSurvivesEndInvoke = (
                     $script:guiQuotaLastFailureCode -ceq
                         'QUOTA_RATE_LIMITS_TIMEOUT' -and
-                    $refreshStatusText.Text -match
-                        '错误代码：QUOTA_RATE_LIMITS_TIMEOUT'
+                    $refreshStatusText.Text -ceq $failureBaseText
                 )
                 $queryFailureDoesNotDisableRuntime = (
                     $script:guiQuotaModulesAvailable -and

@@ -522,11 +522,10 @@ try {
     ).Value
     Assert-QuotaTest (
         $processTimerSection -notmatch 'Quota' -and
-        $waitTimerSection -match 'guiQuotaAsyncReason' -and
+        $waitTimerSection -notmatch
+            'guiQuota|QuotaAsync|QuotaCoordinator|SwitchBefore' -and
         $waitTimerSection -match
-            'guiQuotaCoordinator\.\s*QueryInProgress' -and
-        $waitTimerSection -match
-            '(?s)QueryInProgress.*?return ''Pending''.*?return ''Succeeded''' -and
+            'if \(\$status -ceq ''已退出''\) \{ return ''Succeeded'' \}' -and
         $waitTimerSection -notmatch
             'Get-QiehaoCurrentQuotaSnapshot|Invoke-QiehaoQuotaBackgroundWorker|Save-QiehaoQuotaSnapshot|account/rateLimits/read'
     ) 'QUOTA_LEAKED_INTO_PROCESS_TIMERS'
@@ -534,7 +533,7 @@ try {
         $guiSource -notmatch 'account/rateLimits/read' -and
         $guiSource -match 'Get-QiehaoCurrentQuotaSnapshot' -and
         $guiSource -match 'Start-QiehaoQuotaAsync -Reason Open' -and
-        $guiSource -match 'Start-QiehaoQuotaAsync -Reason SwitchBefore' -and
+        $guiSource -notmatch 'Start-QiehaoQuotaAsync -Reason SwitchBefore' -and
         $guiSource -match 'Start-QiehaoQuotaAsync -Reason SwitchAfter'
     ) 'QUOTA_GUI_RPC_ENCAPSULATION_FAILED'
     $clientSource = [System.IO.File]::ReadAllText($clientPath)
@@ -595,6 +594,7 @@ try {
         QuotaCellSingleLine = 'PASS'
         SwitchBeforeCommit = 'PASS'
         SwitchBeforeFailureNonBlocking = 'PASS'
+        LifecycleOperationsNeverStartSwitchBeforeQuota = 'PASS'
         SwitchAfterNewActive = 'PASS'
         PostSwitchFailureNonBlocking = 'PASS'
         ManualCurrentOnly = 'PASS'
