@@ -214,7 +214,7 @@ Add-QiehaoCatalogPair 'Switch.Status.Closing' '切换等待已停止' 'Switch wa
 Add-QiehaoCatalogPair 'Verify.Working' '正在验证账号…' 'Verifying account…'
 Add-QiehaoCatalogPair 'Verify.Success' "账号：{0}`n状态：已验证" "Account: {0}`nStatus: Verified"
 Add-QiehaoCatalogPair 'Verify.SuccessDetailed' "账号：{0}`nProfile：完整`n保存身份：{1}`n当前 Codex：{2}`n凭据来源：{3}`n结果：身份一致" "Account: {0}`nProfile: complete`nSaved identity: {1}`nCurrent Codex: {2}`nCredential source: {3}`nResult: identity matches"
-Add-QiehaoCatalogPair 'Verify.IdentityMismatchDetailed' "账号：{0}`nProfile：完整`n保存身份：{1}`n当前 Codex：{2}`n凭据来源：{3}`n结果：身份不一致" "Account: {0}`nProfile: complete`nSaved identity: {1}`nCurrent Codex: {2}`nCredential source: {3}`nResult: identity mismatch"
+Add-QiehaoCatalogPair 'Verify.IdentityMismatchDetailed' "账号：{0}`nProfile：完整`n保存的账号空间类型：{1}`n当前 Codex 登录空间类型：{2}`n凭据来源：{3}`n结果：当前 Codex 登录身份与保存账号不一致；未修改任何 Profile。" "Account: {0}`nProfile: complete`nSaved account workspace type: {1}`nCurrent Codex signed-in workspace type: {2}`nCredential source: {3}`nResult: the current Codex identity differs from the saved account; no profile was modified."
 Add-QiehaoCatalogPair 'Verify.WorkspaceUnknownDetailed' "账号：{0}`nProfile：完整`n工作区身份：旧版资料未知`n凭据来源：{1}`n结果：未完整验证" "Account: {0}`nProfile: complete`nWorkspace identity: unknown for legacy profile`nCredential source: {1}`nResult: not fully verified"
 Add-QiehaoCatalogPair 'Account.Renaming' '正在重命名账号…' 'Renaming account…'
 Add-QiehaoCatalogPair 'Account.Deleting' '正在删除本地账号…' 'Deleting local account…'

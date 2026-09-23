@@ -987,6 +987,99 @@ try {
         [Array]::Clear($after9, 0, $after9.Length)
     }
 
+    # A real Codex Desktop process may outlive its last window briefly. The
+    # bounded gate must recheck and allow the caller to continue when the fake
+    # process disappears, without weakening the static fail-closed tests above.
+    $delayedExitRechecks = [pscustomobject]@{ Count = 0 }
+    $delayedExitDelayCalls = [pscustomobject]@{ Count = 0 }
+    $delayedExitContinued = & $module {
+        param($Rechecks, $DelayCalls)
+        $runningProcess = [pscustomobject]@{
+            ProcessName = 'codex.exe'
+            Id = 9101
+            ExecutablePath =
+                'C:\Users\Fake\AppData\Local\OpenAI\Codex\bin\codex.exe'
+            PathReadStatus = 'Readable'
+        }
+        $snapshotProvider = {
+            $Rechecks.Count++
+            return @()
+        }.GetNewClosure()
+        $delayProvider = {
+            param($Milliseconds)
+            $DelayCalls.Count++
+        }.GetNewClosure()
+        Assert-CodexNotRunning -ProcessData @($runningProcess) `
+            -UseProvidedProcessData -DiagnosticOperation 'SWITCH' `
+            -ProcessExitWaitMilliseconds 100 `
+            -ProcessRecheckIntervalMilliseconds 1 `
+            -ProcessSnapshotProvider $snapshotProvider `
+            -DelayProvider $delayProvider
+        return $true
+    } $delayedExitRechecks $delayedExitDelayCalls
+    if (-not $delayedExitContinued -or
+        $delayedExitRechecks.Count -ne 1 -or
+        $delayedExitDelayCalls.Count -ne 1) {
+        throw 'SELFTEST_CODEX_DELAYED_EXIT_DID_NOT_CONTINUE'
+    }
+
+    $processWaitEvents = @(
+        Get-Content -LiteralPath (
+            Join-Path $diagnosticLogDirectory 'qiehao.log'
+        ) | ForEach-Object { $_ | ConvertFrom-Json } |
+        Where-Object {
+            $_.event -in @(
+                'PROCESS_WAIT_START',
+                'PROCESS_RECHECK',
+                'PROCESS_EXITED_DURING_WAIT'
+            )
+        }
+    )
+    foreach ($requiredWaitEvent in @(
+        'PROCESS_WAIT_START',
+        'PROCESS_RECHECK',
+        'PROCESS_EXITED_DURING_WAIT'
+    )) {
+        if (@($processWaitEvents | Where-Object {
+                $_.event -ceq $requiredWaitEvent
+            }).Count -lt 1) {
+            throw ('SELFTEST_PROCESS_WAIT_EVENT_MISSING_' +
+                $requiredWaitEvent)
+        }
+    }
+
+    $persistentRunningCode = & $module {
+        $runningProcess = [pscustomobject]@{
+            ProcessName = 'codex.exe'
+            Id = 9102
+            ExecutablePath =
+                'C:\Users\Fake\AppData\Local\OpenAI\Codex\bin\codex.exe'
+            PathReadStatus = 'Readable'
+        }
+        $snapshotProvider = {
+            return @($runningProcess)
+        }.GetNewClosure()
+        try {
+            Assert-CodexNotRunning -ProcessData @($runningProcess) `
+                -UseProvidedProcessData -DiagnosticOperation 'DELETE' `
+                -ProcessExitWaitMilliseconds 5 `
+                -ProcessRecheckIntervalMilliseconds 1 `
+                -ProcessSnapshotProvider $snapshotProvider
+            return 'UNEXPECTED_SUCCESS'
+        }
+        catch { return [string]$_.Exception.Message }
+    }
+    $persistentWaitEvents = @(
+        Get-Content -LiteralPath (
+            Join-Path $diagnosticLogDirectory 'qiehao.log'
+        ) | ForEach-Object { $_ | ConvertFrom-Json } |
+        Where-Object { $_.event -ceq 'PROCESS_STILL_RUNNING' }
+    )
+    if ($persistentRunningCode -cne 'CODEX_PROCESS_RUNNING' -or
+        $persistentWaitEvents.Count -lt 1) {
+        throw 'SELFTEST_CODEX_PROCESS_WAIT_TIMEOUT_NOT_FAIL_CLOSED'
+    }
+
     # Workspace 1: the same user may have distinct Personal and Team
     # contexts. ADD must preserve both complete raw-byte profiles rather than
     # collapsing them solely by the legacy account marker.
@@ -1053,6 +1146,13 @@ try {
             -ProfilesDirectory $Fixture.Profiles `
             -ProcessData @() -UseProvidedProcessData
     } $workspaceFixture
+    $workspaceMismatchEvents = @(
+        Get-Content -LiteralPath (
+            Join-Path $diagnosticLogDirectory 'qiehao.log'
+        ) | ForEach-Object { $_ | ConvertFrom-Json } |
+        Where-Object { $_.event -ceq 'WORKSPACE_TYPE_MISMATCH' }
+    )
+    $workspaceMismatchEvent = @($workspaceMismatchEvents | Select-Object -Last 1)
     $workspaceDeleteTeam = & $module {
         param($Fixture)
         Invoke-GetCodexProfileDeleteSafety -Name 'A' `
@@ -1066,6 +1166,11 @@ try {
             'PROFILE_VERIFY_IDENTITY_MISMATCH' -or
         $workspaceVerifyTeam.SavedWorkspaceClass -cne 'Team' -or
         $workspaceVerifyTeam.CurrentWorkspaceClass -cne 'Personal' -or
+        $workspaceMismatchEvent.Count -ne 1 -or
+        [string]$workspaceMismatchEvent[0].data.saved_workspace_type -cne
+            'Team' -or
+        [string]$workspaceMismatchEvent[0].data.current_workspace_type -cne
+            'Personal' -or
         $workspaceDeleteTeam.Result -cne
             'PROFILE_DELETE_ACTIVE_OUT_OF_SYNC' -or
         $workspaceDeleteTeam.CurrentProfile -cne 'B' -or
@@ -1897,7 +2002,10 @@ try {
     })
     foreach ($requiredEvent in @(
         'APP_START', 'ADD_START', 'ADD_AUTH_FOUND', 'ADD_IDENTITY_PARSE',
-        'SWITCH_START', 'PROCESS_CHECK_RESULT', 'WORKSPACE_DETECT',
+        'SWITCH_START', 'PROCESS_CHECK_RESULT', 'PROCESS_WAIT_START',
+        'PROCESS_RECHECK', 'PROCESS_EXITED_DURING_WAIT',
+        'PROCESS_STILL_RUNNING', 'WORKSPACE_DETECT',
+        'WORKSPACE_TYPE_MISMATCH',
         'AUTH_REPLACE', 'READBACK_VERIFY', 'SWITCH_SUCCESS',
         'SWITCH_FAILED', 'VERIFY_START', 'PROFILE_INTEGRITY_RESULT',
         'CURRENT_IDENTITY_RESULT', 'VERIFY_FAILED',
@@ -1954,11 +2062,14 @@ try {
         UnknownIdentitySyncRejected = 'PASS'
         BrowserExtensionAllowsSwitch = 'PASS'
         CodexProcessBlocksSwitch = 'PASS'
+        CodexDelayedExitContinues = 'PASS'
+        CodexWaitTimeoutFailsClosed = 'PASS'
         SameUserDifferentWorkspacePreserved = 'PASS'
         TeamPersonalDriftDetected = 'PASS'
         PersonalTeamDriftDetected = 'PASS'
         WorkspaceClaimMismatchRejected = 'PASS'
         VerifyCurrentWorkspaceMismatch = 'PASS'
+        WorkspaceMismatchDiagnostic = 'PASS'
         DeleteDriftRecoverySafe = 'PASS'
         InitActiveMismatchRejected = 'PASS'
         RefreshedTokenIdentityMatch = 'PASS'

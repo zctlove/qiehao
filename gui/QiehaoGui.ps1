@@ -3283,17 +3283,6 @@ try {
         $profileName = Get-QiehaoSelectedProfileName
         if ([string]::IsNullOrWhiteSpace($profileName)) { return }
         Stop-QiehaoQuotaAsync
-        $liveStatus = Get-QiehaoLiveCodexStatus
-        if ($liveStatus -cne '已退出') {
-            $code = if ($liveStatus -ceq '运行中') {
-                'CODEX_PROCESS_RUNNING'
-            }
-            else { 'CODEX_PROCESS_STATE_UNKNOWN' }
-            Show-QiehaoOperationResult -Result (
-                ConvertTo-QiehaoOperationResult -ResultCode $code
-            )
-            return
-        }
         Set-QiehaoWriteBusy -Value $true -StatusText (
             Get-QiehaoGuiText -Key 'Account.Deleting' `
                 -Fallback '正在删除本地账号…'

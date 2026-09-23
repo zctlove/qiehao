@@ -12,6 +12,8 @@ $script:RequiredAuthKeys = @('auth_mode', 'tokens')
 $script:IdentityMarkerHeader = [byte[]](0x51, 0x48, 0x49, 0x44, 0x01, 0x01)
 $script:MaximumIdentityBytes = 2048
 $script:MaximumMetadataFileBytes = 64KB
+$script:CodexProcessExitWaitMilliseconds = 8000
+$script:CodexProcessRecheckIntervalMilliseconds = 500
 $script:WriteMutexName = 'Local\Qiehaoqu.CodexAccountSwitcher.WriteOperation.v1'
 $script:ProfileDeleteTrashDirectoryName = '.trash'
 $script:ProfileDeleteCommitMarkerSuffix = '.committed'
@@ -2249,7 +2251,19 @@ function Assert-CodexNotRunning {
 
         [string]$DiagnosticOperation = '',
 
-        [AllowEmptyCollection()][object[]]$OwnedProcessDescriptors = @()
+        [AllowEmptyCollection()][object[]]$OwnedProcessDescriptors = @(),
+
+        [ValidateRange(0, 30000)]
+        [int]$ProcessExitWaitMilliseconds =
+            $script:CodexProcessExitWaitMilliseconds,
+
+        [ValidateRange(1, 5000)]
+        [int]$ProcessRecheckIntervalMilliseconds =
+            $script:CodexProcessRecheckIntervalMilliseconds,
+
+        [AllowNull()][scriptblock]$ProcessSnapshotProvider,
+
+        [AllowNull()][scriptblock]$DelayProvider
     )
 
     if (-not [string]::IsNullOrWhiteSpace($DiagnosticOperation)) {
@@ -2327,6 +2341,123 @@ function Assert-CodexNotRunning {
                 BlockingCount = @($processState.BlockingProcesses).Count
                 UncertainCount = @($processState.UncertainProcesses).Count
             }
+    }
+
+    # Codex Desktop may need a few seconds to finish shutting down after its
+    # last window disappears. Recheck only a positively identified running
+    # state, before any credential or profile write begins. Unknown process
+    # state still fails closed immediately.
+    $canRecheck = $ProcessExitWaitMilliseconds -gt 0 -and (
+        -not $UseProvidedProcessData -or $null -ne $ProcessSnapshotProvider
+    )
+    if (-not $processState.SafeToSave -and
+        [string]$processState.ReasonCode -ceq 'CODEX_PROCESS_RUNNING' -and
+        $canRecheck) {
+        $waitStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $recheckCount = 0
+        if (-not [string]::IsNullOrWhiteSpace($DiagnosticOperation)) {
+            Write-QiehaoDiagnosticEvent -Event 'PROCESS_WAIT_START' `
+                -Result 'CODEX_PROCESS_RUNNING' -Data @{
+                    Role = $DiagnosticOperation
+                    WaitMilliseconds = $ProcessExitWaitMilliseconds
+                    RecheckIntervalMilliseconds =
+                        $ProcessRecheckIntervalMilliseconds
+                    BlockingCount = @($processState.BlockingProcesses).Count
+                }
+        }
+        try {
+            while ($waitStopwatch.ElapsedMilliseconds -lt
+                $ProcessExitWaitMilliseconds) {
+                $remainingMilliseconds = $ProcessExitWaitMilliseconds -
+                    [int]$waitStopwatch.ElapsedMilliseconds
+                $delayMilliseconds = [Math]::Min(
+                    $ProcessRecheckIntervalMilliseconds,
+                    $remainingMilliseconds
+                )
+                if ($delayMilliseconds -gt 0) {
+                    if ($null -ne $DelayProvider) {
+                        & $DelayProvider $delayMilliseconds
+                    }
+                    else {
+                        Start-Sleep -Milliseconds $delayMilliseconds
+                    }
+                }
+
+                try {
+                    $snapshot = if ($null -ne $ProcessSnapshotProvider) {
+                        @(& $ProcessSnapshotProvider)
+                    }
+                    else { @(Get-ProcessInspectionSnapshot) }
+                    $processState = Test-CodexProcessesStopped `
+                        -ProcessData $snapshot `
+                        -OwnedProcessDescriptors $OwnedProcessDescriptors
+                }
+                catch {
+                    $processState = [pscustomobject]@{
+                        SafeToSave = $false
+                        BlockingProcesses = @()
+                        UncertainProcesses = @()
+                        ReasonCode = 'CODEX_PROCESS_STATE_UNKNOWN'
+                    }
+                }
+                $recheckCount++
+                if (-not [string]::IsNullOrWhiteSpace(
+                    $DiagnosticOperation
+                )) {
+                    Write-QiehaoDiagnosticEvent -Event 'PROCESS_RECHECK' `
+                        -Level $(if ($processState.SafeToSave) {
+                            'INFO'
+                        } else { 'WARNING' }) `
+                        -Result ([string]$processState.ReasonCode) -Data @{
+                            Role = $DiagnosticOperation
+                            RecheckCount = $recheckCount
+                            ElapsedMilliseconds =
+                                [int]$waitStopwatch.ElapsedMilliseconds
+                            SafeToSave = [bool]$processState.SafeToSave
+                            ReasonCode = [string]$processState.ReasonCode
+                            BlockingCount =
+                                @($processState.BlockingProcesses).Count
+                            UncertainCount =
+                                @($processState.UncertainProcesses).Count
+                        }
+                }
+                if ($processState.SafeToSave) {
+                    if (-not [string]::IsNullOrWhiteSpace(
+                        $DiagnosticOperation
+                    )) {
+                        Write-QiehaoDiagnosticEvent `
+                            -Event 'PROCESS_EXITED_DURING_WAIT' `
+                            -Result 'CODEX_PROCESSES_STOPPED' -Data @{
+                                Role = $DiagnosticOperation
+                                RecheckCount = $recheckCount
+                                ElapsedMilliseconds =
+                                    [int]$waitStopwatch.ElapsedMilliseconds
+                                SafeToSave = $true
+                            }
+                    }
+                    return
+                }
+                if ([string]$processState.ReasonCode -cne
+                    'CODEX_PROCESS_RUNNING') {
+                    break
+                }
+            }
+        }
+        finally {
+            $waitStopwatch.Stop()
+        }
+        if ([string]$processState.ReasonCode -ceq
+            'CODEX_PROCESS_RUNNING' -and
+            -not [string]::IsNullOrWhiteSpace($DiagnosticOperation)) {
+            Write-QiehaoDiagnosticEvent -Event 'PROCESS_STILL_RUNNING' `
+                -Level 'WARNING' -Result 'CODEX_PROCESS_RUNNING' -Data @{
+                    Role = $DiagnosticOperation
+                    RecheckCount = $recheckCount
+                    ElapsedMilliseconds =
+                        [int]$waitStopwatch.ElapsedMilliseconds
+                    BlockingCount = @($processState.BlockingProcesses).Count
+                }
+        }
     }
     if (-not $processState.SafeToSave) {
         throw (New-SafeException -Code $processState.ReasonCode)
@@ -3165,7 +3296,10 @@ function ConvertTo-QiehaoDiagnosticSafeValue {
         'ReasonCode', 'BlockingCount', 'UncertainCount', 'ResultCode',
         'ProfileIntegrity', 'CurrentWorkspaceType', 'SavedWorkspaceType',
         'Decision', 'Version', 'PowerShellVersion', 'WindowsVersion',
-        'CodexHomeExists', 'ProfileCount'
+        'CodexHomeExists', 'ProfileCount', 'WaitMilliseconds',
+        'RecheckIntervalMilliseconds', 'RecheckCount',
+        'ElapsedMilliseconds', 'saved_workspace_type',
+        'current_workspace_type'
     )
     if (-not [string]::IsNullOrWhiteSpace($FieldName) -and
         $allowedFields -cnotcontains $FieldName) {
@@ -3291,7 +3425,10 @@ function Write-QiehaoDiagnosticEvent {
             'ADD_START', 'ADD_AUTH_FOUND', 'ADD_IDENTITY_PARSE',
             'ADD_SUCCESS', 'ADD_FAILED',
             'SWITCH_START', 'PROCESS_CHECK_START', 'PROCESS_CHECK_RESULT',
+            'PROCESS_WAIT_START', 'PROCESS_RECHECK',
+            'PROCESS_EXITED_DURING_WAIT', 'PROCESS_STILL_RUNNING',
             'AUTH_REPLACE', 'READBACK_VERIFY', 'WORKSPACE_DETECT',
+            'WORKSPACE_TYPE_MISMATCH',
             'SWITCH_SUCCESS', 'SWITCH_FAILED',
             'VERIFY_START', 'PROFILE_INTEGRITY_RESULT',
             'CURRENT_IDENTITY_RESULT', 'WORKSPACE_RESULT',
@@ -5455,6 +5592,24 @@ function Invoke-VerifyCodexProfile {
         $comparison = Compare-CodexAuthToProfileIdentity -Name $safeName `
             -AuthBytes $currentAuthBytes -ProfilesDirectory $ProfilesDirectory
         if (-not $comparison.Matches) {
+            if ([string]$profileContext.WorkspaceClass -cne 'Unknown' -and
+                [string]$comparison.CurrentWorkspaceClass -cne 'Unknown' -and
+                [string]$profileContext.WorkspaceClass -cne
+                    [string]$comparison.CurrentWorkspaceClass) {
+                Write-QiehaoDiagnosticEvent `
+                    -Event 'WORKSPACE_TYPE_MISMATCH' `
+                    -Level 'WARNING' `
+                    -Result 'PROFILE_VERIFY_IDENTITY_MISMATCH' `
+                    -Data @{
+                        Profile = $safeName
+                        saved_workspace_type =
+                            [string]$profileContext.WorkspaceClass
+                        current_workspace_type =
+                            [string]$comparison.CurrentWorkspaceClass
+                        IdentityHash = $currentIdentityHash
+                        ResultCode = 'PROFILE_VERIFY_IDENTITY_MISMATCH'
+                    }
+            }
             Write-QiehaoDiagnosticEvent -Event 'VERIFY_MISMATCH' `
                 -Level 'WARNING' -Result 'PROFILE_VERIFY_IDENTITY_MISMATCH' `
                 -Data @{

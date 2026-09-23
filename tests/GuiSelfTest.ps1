@@ -1625,8 +1625,8 @@ Assert-GuiTest -Condition (
     $activeStoppedActions.LaunchCodex -and
     $otherRunningActions.Switch -and
     -not $otherRunningActions.Verify -and
-    -not $otherRunningActions.Delete -and
-    -not $otherRunningActions.ContextDelete -and
+    $otherRunningActions.Delete -and
+    $otherRunningActions.ContextDelete -and
     -not $otherRunningActions.LaunchCodex -and
     $busyActions.Refresh -and
     -not $busyActions.Switch -and -not $busyActions.Add -and
@@ -2797,8 +2797,23 @@ Assert-GuiTest -Condition (
     $deleteSection -match '\bGet-CodexProfileDeleteSafety\b' -and
     $deleteSection -match 'PROFILE_DELETE_ACTIVE_OUT_OF_SYNC' -and
     $deleteSection -match '\bSync-CodexActiveProfile\b' -and
-    $deleteSection -match '\bRemove-CodexProfile\b'
+    $deleteSection -match '\bRemove-CodexProfile\b' -and
+    $deleteSection -notmatch '\bGet-QiehaoLiveCodexStatus\b' -and
+    $deleteSection -notmatch
+        '\b(?:Start-QiehaoAddWizard|Invoke-QiehaoAddAccount|Add-CodexProfile)\b' -and
+    $guiSource -match [regex]::Escape(
+        '$deleteButton.Add_Click({ Invoke-QiehaoDeleteSelectedProfile })'
+    ) -and
+    $guiSource -match [regex]::Escape(
+        '$contextDeleteMenuItem.Add_Click({ Invoke-QiehaoDeleteSelectedProfile })'
+    )
 ) -Code 'GUI_DELETE_RECOVERY_OR_ADD_QUOTA_ORDER_MISSING'
+Assert-GuiTest -Condition (
+    $localizationSource -match '保存的账号空间类型' -and
+    $localizationSource -match '当前 Codex 登录空间类型' -and
+    $localizationSource -match 'Saved account workspace type' -and
+    $localizationSource -match 'Current Codex signed-in workspace type'
+) -Code 'GUI_WORKSPACE_MISMATCH_DETAIL_MISSING'
 Assert-GuiTest -Condition (
     $localizationSource -match '先在 Codex 中登录或切换到目标账号' -and
     $localizationSource -match '退出 Codex 客户端，不是注销当前登录账号' -and

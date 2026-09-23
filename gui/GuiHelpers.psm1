@@ -798,14 +798,15 @@ function Get-QiehaoActionState {
         Verify = $available -and $hasSelection -and $CodexStatus -ceq '已退出'
         Add = $available
         Rename = $available -and $hasSelection
-        Delete = $available -and $hasSelection -and
-            $CodexStatus -ceq '已退出'
+        # A stale GUI process snapshot must not permanently disable recovery.
+        # The delete safety provider performs the authoritative, fail-closed
+        # process and identity checks immediately before any transaction.
+        Delete = $available -and $hasSelection
         ContextSwitch = $available -and $hasSelection
         ContextVerify = $available -and $hasSelection -and
             $CodexStatus -ceq '已退出'
         ContextRename = $available -and $hasSelection
-        ContextDelete = $available -and $hasSelection -and
-            $CodexStatus -ceq '已退出'
+        ContextDelete = $available -and $hasSelection
         LaunchCodex = $available -and $LaunchTargetAvailable -and
             $CodexStatus -ceq '已退出'
         IsSelectedProfileActive = $isActive
