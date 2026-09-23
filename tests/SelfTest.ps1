@@ -73,20 +73,74 @@ function Get-FakeTreeStamp {
     }) -join "`n")
 }
 
+function ConvertTo-FakeBase64Url {
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+    return [Convert]::ToBase64String($Bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function New-FakeIdToken {
+    param(
+        [Parameter(Mandatory = $true)][string]$UserIdentity,
+        [Parameter(Mandatory = $true)][string]$PlanType,
+        [Parameter(Mandatory = $true)][string]$WorkspaceAccountId
+    )
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $headerBytes = $null
+    $payloadBytes = $null
+    try {
+        $headerBytes = $utf8.GetBytes('{"alg":"none","typ":"JWT"}')
+        $payloadJson = [ordered]@{
+            'https://api.openai.com/auth' = [ordered]@{
+                chatgpt_account_id = $WorkspaceAccountId
+                chatgpt_user_id = $UserIdentity
+                chatgpt_plan_type = $PlanType
+            }
+        } | ConvertTo-Json -Compress
+        $payloadBytes = $utf8.GetBytes($payloadJson)
+        return (ConvertTo-FakeBase64Url -Bytes $headerBytes) + '.' +
+            (ConvertTo-FakeBase64Url -Bytes $payloadBytes) + '.fake'
+    }
+    finally {
+        foreach ($buffer in @($headerBytes, $payloadBytes)) {
+            if ($null -ne $buffer -and $buffer.Length -gt 0) {
+                [Array]::Clear($buffer, 0, $buffer.Length)
+            }
+        }
+        $payloadJson = $null
+    }
+}
+
 function New-FakeAuthBytes {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Identity,
 
         [Parameter(Mandatory = $true)]
-        [string]$CredentialRevision
+        [string]$CredentialRevision,
+
+        [string]$UserIdentity,
+
+        [string]$PlanType,
+
+        [string]$WorkspaceClaimIdentity
     )
+
+    $fakeIdToken = if (
+        -not [string]::IsNullOrWhiteSpace($UserIdentity) -and
+        -not [string]::IsNullOrWhiteSpace($PlanType)
+    ) {
+        New-FakeIdToken -UserIdentity $UserIdentity -PlanType $PlanType `
+            -WorkspaceAccountId $(if ([string]::IsNullOrWhiteSpace(
+                    $WorkspaceClaimIdentity
+                )) { $Identity } else { $WorkspaceClaimIdentity })
+    }
+    else { 'SELFTEST-ID-' + $CredentialRevision }
 
     $authObject = [ordered]@{
         auth_mode = 'chatgpt'
         OPENAI_API_KEY = $null
         tokens = [ordered]@{
-            id_token = 'SELFTEST-ID-' + $CredentialRevision
+            id_token = $fakeIdToken
             access_token = 'SELFTEST-ACCESS-' + $CredentialRevision
             refresh_token = 'SELFTEST-REFRESH-' + $CredentialRevision
             account_id = $Identity
@@ -100,6 +154,7 @@ function New-FakeAuthBytes {
     finally {
         $authObject = $null
         $json = $null
+        $fakeIdToken = $null
     }
 }
 
@@ -246,11 +301,21 @@ $fakeAInitial = $null
 $fakeARefreshed = $null
 $fakeB = $null
 $fakeC = $null
+$fakeX = $null
+$fakeWorkspaceTeam = $null
+$fakeWorkspacePersonal = $null
+$fakeWorkspaceClaimMismatch = $null
 $fakeInvalidB = $null
 $fakeIdentitySchemaUnknown = $null
 
 try {
     [System.IO.Directory]::CreateDirectory($workDirectoryFull) | Out-Null
+    $diagnosticLogDirectory = Join-Path $workDirectoryFull 'diagnostic-logs'
+    [System.IO.Directory]::CreateDirectory($diagnosticLogDirectory) | Out-Null
+    & $module {
+        param($Directory)
+        $script:LogsDirectory = $Directory
+    } $diagnosticLogDirectory
     $plainBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($fakeJson)
     [System.IO.File]::WriteAllBytes($fakeAuthPath, $plainBytes)
 
@@ -458,6 +523,83 @@ try {
         throw 'SELFTEST_UNKNOWN_CHATGPT_STATE_GUESSED'
     }
 
+    # Only the exact quota child descriptor created by Qiehao may be excluded.
+    # PID, path, start time, arguments, and parent must all match.
+    $ownedQuotaStart = [DateTime]'2026-09-23T00:00:00Z'
+    $quotaProcess = [pscustomobject]@{
+        ProcessName = 'codex.exe'; Id = 1701; ParentProcessId = 1700
+        ParentReadStatus = 'Readable'
+        ExecutablePath = 'C:\Fake\Codex\codex.exe'; PathReadStatus = 'Readable'
+        ProcessStartTimeUtc = $ownedQuotaStart; StartTimeReadStatus = 'Readable'
+    }
+    $quotaDescriptor = [pscustomobject]@{
+        ProcessId = 1701; ParentProcessId = 1700
+        ExecutablePath = 'C:\Fake\Codex\codex.exe'
+        ProcessStartTimeUtc = $ownedQuotaStart
+        Arguments = 'app-server --stdio'; IsActive = $true
+    }
+    $ownedQuotaOnly = Test-CodexProcessesStopped `
+        -ProcessData @($quotaProcess) `
+        -OwnedProcessDescriptors @($quotaDescriptor)
+    if (-not $ownedQuotaOnly.SafeToSave -or
+        @($ownedQuotaOnly.OwnedQuotaProcesses).Count -ne 1 -or
+        $ownedQuotaOnly.ReasonCode -cne 'CODEX_PROCESSES_STOPPED') {
+        throw 'SELFTEST_OWNED_QUOTA_CHILD_BLOCKED'
+    }
+    $desktopAndQuota = Test-CodexProcessesStopped `
+        -ProcessData @($quotaProcess, [pscustomobject]@{
+            ProcessName = 'codex.exe'; Id = 1702
+            ExecutablePath = 'C:\Program Files\WindowsApps\OpenAI.Codex\codex.exe'
+            PathReadStatus = 'Readable'; ParentProcessId = 500
+            ParentReadStatus = 'Readable'; ProcessStartTimeUtc = $ownedQuotaStart
+            StartTimeReadStatus = 'Readable'
+        }) -OwnedProcessDescriptors @($quotaDescriptor)
+    if ($desktopAndQuota.SafeToSave -or
+        @($desktopAndQuota.OwnedQuotaProcesses).Count -ne 1 -or
+        @($desktopAndQuota.BlockingProcesses).Count -ne 1) {
+        throw 'SELFTEST_DESKTOP_NOT_BLOCKED_WITH_QUOTA_CHILD'
+    }
+    $wrongParentDescriptor = [pscustomobject]@{
+        ProcessId = 1701; ParentProcessId = 9999
+        ExecutablePath = 'C:\Fake\Codex\codex.exe'
+        ProcessStartTimeUtc = $ownedQuotaStart
+        Arguments = 'app-server --stdio'; IsActive = $true
+    }
+    $untrustedQuota = Test-CodexProcessesStopped `
+        -ProcessData @($quotaProcess) `
+        -OwnedProcessDescriptors @($wrongParentDescriptor)
+    if ($untrustedQuota.SafeToSave -or
+        $untrustedQuota.ReasonCode -cne 'CODEX_PROCESS_RUNNING') {
+        throw 'SELFTEST_UNVERIFIED_QUOTA_CHILD_WAS_IGNORED'
+    }
+
+    $credentialSourceFile = Get-CodexCredentialSourceInfo `
+        -CodexHome $workDirectoryFull `
+        -ConfigText 'cli_auth_credentials_store = "file"' `
+        -UseProvidedConfigText
+    $credentialSourceKeyring = Get-CodexCredentialSourceInfo `
+        -CodexHome $workDirectoryFull `
+        -ConfigText 'cli_auth_credentials_store = "keyring"' `
+        -UseProvidedConfigText
+    $credentialSourceAuto = Get-CodexCredentialSourceInfo `
+        -CodexHome $workDirectoryFull `
+        -ConfigText 'cli_auth_credentials_store = "auto"' `
+        -UseProvidedConfigText
+    $credentialSourceEphemeral = Get-CodexCredentialSourceInfo `
+        -CodexHome $workDirectoryFull `
+        -ConfigText 'cli_auth_credentials_store = "ephemeral"' `
+        -UseProvidedConfigText
+    if (-not $credentialSourceFile.FileCredentialUsable -or
+        $credentialSourceFile.Source -cne 'File' -or
+        $credentialSourceKeyring.ResultCode -cne
+            'AUTH_CREDENTIAL_SOURCE_UNSUPPORTED' -or
+        $credentialSourceAuto.ResultCode -cne
+            'AUTH_CREDENTIAL_SOURCE_AMBIGUOUS' -or
+        $credentialSourceEphemeral.ResultCode -cne
+            'AUTH_CREDENTIAL_SOURCE_UNSUPPORTED') {
+        throw 'SELFTEST_CREDENTIAL_SOURCE_DETECTION_FAILED'
+    }
+
     $extensionHostPath = 'C:\Users\FakeUser\.codex\plugins\cache\extension-host.exe'
     $browserExtensionTest1 = Test-CodexProcessesStopped -ProcessData @(
         [pscustomobject]@{ ProcessName = 'extension-host.exe'; Id = 2001; ParentProcessId = 2002; ParentReadStatus = 'Readable'; ExecutablePath = $extensionHostPath; PathReadStatus = 'Readable' },
@@ -514,6 +656,19 @@ try {
         -CredentialRevision 'C'
     $fakeX = New-FakeAuthBytes -Identity 'SELFTEST-ACCOUNT-X' `
         -CredentialRevision 'X-UNKNOWN'
+    $fakeWorkspaceTeam = New-FakeAuthBytes `
+        -Identity 'SELFTEST-TEAM-WORKSPACE' `
+        -CredentialRevision 'WORKSPACE-TEAM' `
+        -UserIdentity 'SELFTEST-SHARED-USER' -PlanType 'team'
+    $fakeWorkspacePersonal = New-FakeAuthBytes `
+        -Identity 'SELFTEST-PERSONAL-WORKSPACE' `
+        -CredentialRevision 'WORKSPACE-PERSONAL' `
+        -UserIdentity 'SELFTEST-SHARED-USER' -PlanType 'plus'
+    $fakeWorkspaceClaimMismatch = New-FakeAuthBytes `
+        -Identity 'SELFTEST-TEAM-WORKSPACE' `
+        -CredentialRevision 'WORKSPACE-CLAIM-MISMATCH' `
+        -UserIdentity 'SELFTEST-SHARED-USER' -PlanType 'team' `
+        -WorkspaceClaimIdentity 'SELFTEST-DIFFERENT-WORKSPACE-CLAIM'
     $invalidJson = '{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"last_refresh":"2000-01-01T00:00:00Z"}'
     $fakeInvalidB = (New-Object System.Text.UTF8Encoding($false)).GetBytes($invalidJson)
     $invalidJson = $null
@@ -830,6 +985,166 @@ try {
     finally {
         [Array]::Clear($before9, 0, $before9.Length)
         [Array]::Clear($after9, 0, $after9.Length)
+    }
+
+    # Workspace 1: the same user may have distinct Personal and Team
+    # contexts. ADD must preserve both complete raw-byte profiles rather than
+    # collapsing them solely by the legacy account marker.
+    $workspaceAddRoot = Join-Path $workDirectoryFull 'workspace-add'
+    $workspaceAddHome = Join-Path $workspaceAddRoot 'codex-home'
+    $workspaceAddProfiles = Join-Path $workspaceAddRoot 'profiles'
+    $workspaceAddState = Join-Path $workspaceAddRoot 'state'
+    foreach ($directory in @(
+        $workspaceAddHome,
+        $workspaceAddProfiles,
+        $workspaceAddState
+    )) {
+        [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+    }
+    [System.IO.File]::WriteAllBytes(
+        (Join-Path $workspaceAddHome 'auth.json'),
+        $fakeWorkspaceTeam
+    )
+    $workspaceTeamAdd = & $module {
+        param($Home, $Profiles, $State)
+        Invoke-AddCodexProfile -Name 'WorkspaceTeam' -CodexHome $Home `
+            -ProfilesDirectory $Profiles -StateDirectory $State `
+            -ProcessData @() -UseProvidedProcessData
+    } $workspaceAddHome $workspaceAddProfiles $workspaceAddState
+    [System.IO.File]::WriteAllBytes(
+        (Join-Path $workspaceAddHome 'auth.json'),
+        $fakeWorkspacePersonal
+    )
+    $workspacePersonalAdd = & $module {
+        param($Home, $Profiles, $State)
+        Invoke-AddCodexProfile -Name 'WorkspacePersonal' -CodexHome $Home `
+            -ProfilesDirectory $Profiles -StateDirectory $State `
+            -ProcessData @() -UseProvidedProcessData
+    } $workspaceAddHome $workspaceAddProfiles $workspaceAddState
+    if ($workspaceTeamAdd.Result -cne 'PROFILE_ADD_SUCCESS' -or
+        $workspacePersonalAdd.Result -cne 'PROFILE_ADD_SUCCESS' -or
+        @(Get-ChildItem -LiteralPath $workspaceAddProfiles `
+            -Filter '*.auth.dpapi').Count -ne 2) {
+        throw 'SELFTEST_SAME_ACCOUNT_DIFFERENT_WORKSPACE_COLLAPSED'
+    }
+
+    # Workspace 2: Active=Team while current Codex=Personal must be explicit
+    # out-of-sync. Verify must distinguish local integrity from current login.
+    $workspaceFixture = New-SwitchFixture `
+        -Root (Join-Path $workDirectoryFull 'workspace-drift') `
+        -Module $module -ActiveBytes $fakeWorkspaceTeam `
+        -TargetBytes $fakeWorkspacePersonal
+    [System.IO.File]::WriteAllBytes(
+        $workspaceFixture.AuthPath,
+        $fakeWorkspacePersonal
+    )
+    $workspaceProfilesBefore = Get-FakeTreeStamp `
+        -Root $workspaceFixture.Profiles
+    $workspaceOutOfSyncCode = $null
+    try {
+        $null = Invoke-FakeSwitch -Module $module `
+            -Fixture $workspaceFixture -Target 'A'
+    }
+    catch { $workspaceOutOfSyncCode = [string]$_.Exception.Message }
+    $workspaceVerifyTeam = & $module {
+        param($Fixture)
+        Invoke-VerifyCodexProfile -Name 'A' `
+            -CodexHome $Fixture.CodexHome `
+            -ProfilesDirectory $Fixture.Profiles `
+            -ProcessData @() -UseProvidedProcessData
+    } $workspaceFixture
+    $workspaceDeleteTeam = & $module {
+        param($Fixture)
+        Invoke-GetCodexProfileDeleteSafety -Name 'A' `
+            -CodexHome $Fixture.CodexHome `
+            -ProfilesDirectory $Fixture.Profiles `
+            -StateDirectory $Fixture.State `
+            -ProcessData @() -UseProvidedProcessData
+    } $workspaceFixture
+    if ($workspaceOutOfSyncCode -cne 'ACTIVE_PROFILE_OUT_OF_SYNC' -or
+        $workspaceVerifyTeam.Result -cne
+            'PROFILE_VERIFY_IDENTITY_MISMATCH' -or
+        $workspaceVerifyTeam.SavedWorkspaceClass -cne 'Team' -or
+        $workspaceVerifyTeam.CurrentWorkspaceClass -cne 'Personal' -or
+        $workspaceDeleteTeam.Result -cne
+            'PROFILE_DELETE_ACTIVE_OUT_OF_SYNC' -or
+        $workspaceDeleteTeam.CurrentProfile -cne 'B' -or
+        (Get-FakeTreeStamp -Root $workspaceFixture.Profiles) -cne
+            $workspaceProfilesBefore) {
+        throw 'SELFTEST_TEAM_PERSONAL_DRIFT_NOT_DETECTED'
+    }
+
+    # Workspace 3: recovery commits only active-profile.json. Afterwards the
+    # stale Team profile is deletable, while the actually signed-in Personal
+    # profile remains protected.
+    $workspaceSync = & $module {
+        param($Fixture)
+        Invoke-SyncCodexActiveProfile -CodexHome $Fixture.CodexHome `
+            -ProfilesDirectory $Fixture.Profiles `
+            -StateDirectory $Fixture.State `
+            -ProcessData @() -UseProvidedProcessData
+    } $workspaceFixture
+    $workspaceDeleteOld = & $module {
+        param($Fixture)
+        Invoke-GetCodexProfileDeleteSafety -Name 'A' `
+            -CodexHome $Fixture.CodexHome `
+            -ProfilesDirectory $Fixture.Profiles `
+            -StateDirectory $Fixture.State `
+            -ProcessData @() -UseProvidedProcessData
+    } $workspaceFixture
+    $workspaceDeleteCurrent = & $module {
+        param($Fixture)
+        Invoke-GetCodexProfileDeleteSafety -Name 'B' `
+            -CodexHome $Fixture.CodexHome `
+            -ProfilesDirectory $Fixture.Profiles `
+            -StateDirectory $Fixture.State `
+            -ProcessData @() -UseProvidedProcessData
+    } $workspaceFixture
+    if ($workspaceSync.Result -cne 'ACTIVE_PROFILE_SYNCED' -or
+        $workspaceSync.ActiveProfile -cne 'B' -or
+        $workspaceDeleteOld.Result -cne 'PROFILE_DELETE_SAFE' -or
+        $workspaceDeleteCurrent.Result -cne
+            'CANNOT_REMOVE_CURRENT_CODEX_PROFILE' -or
+        (Get-FakeTreeStamp -Root $workspaceFixture.Profiles) -cne
+            $workspaceProfilesBefore) {
+        throw 'SELFTEST_WORKSPACE_RECOVERY_CHANGED_CREDENTIALS'
+    }
+
+    # Workspace 4: the inverse drift (Active=Personal, Codex=Team) is also
+    # rejected and cannot be misreported as already active.
+    [System.IO.File]::WriteAllBytes(
+        $workspaceFixture.AuthPath,
+        $fakeWorkspaceTeam
+    )
+    $personalOutOfSyncCode = $null
+    try {
+        $null = Invoke-FakeSwitch -Module $module `
+            -Fixture $workspaceFixture -Target 'B'
+    }
+    catch { $personalOutOfSyncCode = [string]$_.Exception.Message }
+    if ($personalOutOfSyncCode -cne 'ACTIVE_PROFILE_OUT_OF_SYNC' -or
+        (Get-FakeTreeStamp -Root $workspaceFixture.Profiles) -cne
+            $workspaceProfilesBefore) {
+        throw 'SELFTEST_PERSONAL_TEAM_DRIFT_NOT_DETECTED'
+    }
+
+    # Workspace 5: a token whose nested official workspace claim disagrees
+    # with tokens.account_id must never be accepted as the active profile.
+    [System.IO.File]::WriteAllBytes(
+        $workspaceFixture.AuthPath,
+        $fakeWorkspaceClaimMismatch
+    )
+    $workspaceClaimMismatchCode = $null
+    try {
+        $null = Invoke-FakeSwitch -Module $module `
+            -Fixture $workspaceFixture -Target 'A'
+    }
+    catch { $workspaceClaimMismatchCode = [string]$_.Exception.Message }
+    if ($workspaceClaimMismatchCode -cne
+            'ACTIVE_PROFILE_IDENTITY_MISMATCH' -or
+        (Get-FakeTreeStamp -Root $workspaceFixture.Profiles) -cne
+            $workspaceProfilesBefore) {
+        throw 'SELFTEST_WORKSPACE_CLAIM_MISMATCH_NOT_REJECTED'
     }
 
     # Identity 1: refreshed token bytes retain the same account identity. The
@@ -1431,16 +1746,22 @@ try {
         throw 'SELFTEST_INCOMPLETE_PROFILE_HEALTH_FAILED'
     }
 
-    # CRUD 12: deep verification decrypts only the fake profile and marker.
+    # CRUD 12: deep verification confirms local integrity and compares the
+    # current fake Codex file identity. Legacy opaque tokens are not promoted
+    # to a full workspace verification success.
     $fixtureVerify = New-SwitchFixture `
         -Root (Join-Path $workDirectoryFull 'crud-verify') -Module $module `
         -ActiveBytes $fakeAInitial -TargetBytes $fakeB
+    [System.IO.File]::WriteAllBytes($fixtureVerify.AuthPath, $fakeB)
     $verifyResult = & $module {
         param($Fixture)
         Invoke-VerifyCodexProfile -Name 'B' -ProfilesDirectory $Fixture.Profiles `
+            -CodexHome $Fixture.CodexHome `
             -ProcessData @() -UseProvidedProcessData
     } $fixtureVerify
-    if ($verifyResult.Result -cne 'PROFILE_VERIFY_SUCCESS') {
+    if ($verifyResult.Result -cne 'PROFILE_VERIFY_WORKSPACE_CONTEXT_UNKNOWN' -or
+        $verifyResult.ProfileIntegrity -cne 'Complete' -or
+        $verifyResult.WorkspaceContextStatus -cne 'LegacyUnknown') {
         throw 'SELFTEST_PROFILE_VERIFY_FAILED'
     }
 
@@ -1463,6 +1784,7 @@ try {
             param($Fixture)
             $null = Invoke-VerifyCodexProfile -Name 'B' `
                 -ProfilesDirectory $Fixture.Profiles `
+                -CodexHome $Fixture.CodexHome `
                 -ProcessData @() -UseProvidedProcessData
         } $fixtureVerify
     }
@@ -1533,6 +1855,63 @@ try {
         Remove-Job -Job $lockJob -Force -ErrorAction SilentlyContinue
     }
 
+    & $module {
+        Write-QiehaoDiagnosticEvent -Event 'APP_START' -Result 'STARTED' `
+            -Data @{
+                Version = 'SELFTEST'
+                PowerShellVersion = [string]$PSVersionTable.PSVersion
+                WindowsVersion = 'SELFTEST_WINDOWS'
+                CodexHomeExists = $true
+                CredentialSource = 'File'
+                ProfileCount = 2
+            }
+        Write-QiehaoDiagnosticEvent -Event 'DELETE_FAILED' -Level 'ERROR' `
+            -Result 'SELFTEST_DELETE_FAILED' -Data @{
+                Profile = 'token=test123 user@example.com'
+                ResultCode = 'SELFTEST_DELETE_FAILED'
+                auth = '{"access_token":"DO_NOT_LOG_AUTH"}'
+                account_id = 'DO_NOT_LOG_ACCOUNT_ID'
+            }
+    }
+    $diagnosticLogPath = Join-Path $diagnosticLogDirectory 'qiehao.log'
+    if (-not [System.IO.File]::Exists($diagnosticLogPath)) {
+        throw 'SELFTEST_DIAGNOSTIC_LOG_NOT_WRITTEN'
+    }
+    $diagnosticLogText = [System.IO.File]::ReadAllText($diagnosticLogPath)
+    foreach ($forbiddenText in @(
+        'test123', 'user@example.com', 'DO_NOT_LOG_AUTH',
+        'DO_NOT_LOG_ACCOUNT_ID', 'SELFTEST-ACCESS-', 'SELFTEST-REFRESH-',
+        'SELFTEST-ID-', 'SELFTEST-ACCOUNT-'
+    )) {
+        if ($diagnosticLogText.Contains($forbiddenText)) {
+            throw 'SELFTEST_DIAGNOSTIC_LOG_CONTAINS_SENSITIVE_VALUE'
+        }
+    }
+    $diagnosticEntries = @(
+        [System.IO.File]::ReadAllLines($diagnosticLogPath) | ForEach-Object {
+            ConvertFrom-Json -InputObject $_ -ErrorAction Stop
+        }
+    )
+    $diagnosticEvents = @($diagnosticEntries | ForEach-Object {
+        [string]$_.event
+    })
+    foreach ($requiredEvent in @(
+        'APP_START', 'ADD_START', 'ADD_AUTH_FOUND', 'ADD_IDENTITY_PARSE',
+        'SWITCH_START', 'PROCESS_CHECK_RESULT', 'WORKSPACE_DETECT',
+        'AUTH_REPLACE', 'READBACK_VERIFY', 'SWITCH_SUCCESS',
+        'SWITCH_FAILED', 'VERIFY_START', 'PROFILE_INTEGRITY_RESULT',
+        'CURRENT_IDENTITY_RESULT', 'VERIFY_FAILED',
+        'DELETE_FAILED'
+    )) {
+        if ($diagnosticEvents -cnotcontains $requiredEvent) {
+            throw ('SELFTEST_DIAGNOSTIC_EVENT_MISSING_' + $requiredEvent)
+        }
+    }
+    if ($diagnosticLogText -notmatch '\[token_removed\]' -or
+        $diagnosticLogText -notmatch '\[email_removed\]') {
+        throw 'SELFTEST_DIAGNOSTIC_REDACTION_NOT_APPLIED'
+    }
+
     [pscustomobject]@{
         Result = 'PASS'
         AuthSchemaValidation = 'PASS'
@@ -1554,6 +1933,10 @@ try {
         CodexChatGPTPathBlocked = 'PASS'
         EmptyProcessSetAllowed = 'PASS'
         UnreadableChatGPTIsUnknown = 'PASS'
+        OwnedQuotaChildExcluded = 'PASS'
+        DesktopStillBlocksWithQuotaChild = 'PASS'
+        UnverifiedQuotaChildBlocked = 'PASS'
+        CredentialSourceModesDetected = 'PASS'
         ChromeExtensionHostAllowed = 'PASS'
         EdgeExtensionHostAllowed = 'PASS'
         CodexExtensionHostBlocked = 'PASS'
@@ -1571,6 +1954,12 @@ try {
         UnknownIdentitySyncRejected = 'PASS'
         BrowserExtensionAllowsSwitch = 'PASS'
         CodexProcessBlocksSwitch = 'PASS'
+        SameUserDifferentWorkspacePreserved = 'PASS'
+        TeamPersonalDriftDetected = 'PASS'
+        PersonalTeamDriftDetected = 'PASS'
+        WorkspaceClaimMismatchRejected = 'PASS'
+        VerifyCurrentWorkspaceMismatch = 'PASS'
+        DeleteDriftRecoverySafe = 'PASS'
         InitActiveMismatchRejected = 'PASS'
         RefreshedTokenIdentityMatch = 'PASS'
         ActiveIdentityDriftRejected = 'PASS'
@@ -1604,6 +1993,9 @@ try {
         VerifyIdentityMismatchRejected = 'PASS'
         ConcurrentWriteRejected = 'PASS'
         DefaultUserScopedLock = 'PASS'
+        StructuredDiagnosticLog = 'PASS'
+        DiagnosticSensitiveValuesRemoved = 'PASS'
+        DiagnosticLifecycleEvents = 'PASS'
         RealCodexAuthRead = $false
     }
 }
@@ -1626,6 +2018,9 @@ finally {
         $fakeB,
         $fakeC,
         $fakeX,
+        $fakeWorkspaceTeam,
+        $fakeWorkspacePersonal,
+        $fakeWorkspaceClaimMismatch,
         $fakeInvalidB,
         $fakeIdentitySchemaUnknown
     )) {

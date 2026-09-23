@@ -57,7 +57,8 @@ function Invoke-FakeCleanupTransport {
         [int]$ResponseDelayMilliseconds = 0,
         [int]$ExitDelayMilliseconds = 0,
         [int]$TestDeadlineMilliseconds = 0,
-        [Parameter(Mandatory = $true)][string]$PidFile
+        [Parameter(Mandatory = $true)][string]$PidFile,
+        [AllowNull()][hashtable]$OwnedProcessRegistry
     )
 
     $arguments = @(
@@ -86,16 +87,18 @@ function Invoke-FakeCleanupTransport {
             $CleanupGraceMilliseconds,
             $TestExecutablePath,
             $TestProcessArguments,
-            $TestDeadlineMilliseconds
+            $TestDeadlineMilliseconds,
+            $OwnedProcessRegistry
         )
         Invoke-QiehaoQuotaTransport `
             -TimeoutSeconds $TimeoutSeconds `
             -CleanupGraceMilliseconds $CleanupGraceMilliseconds `
             -TestExecutablePath $TestExecutablePath `
             -TestProcessArguments $TestProcessArguments `
-            -TestDeadlineMilliseconds $TestDeadlineMilliseconds
+            -TestDeadlineMilliseconds $TestDeadlineMilliseconds `
+            -OwnedProcessRegistry $OwnedProcessRegistry
     } $TimeoutSeconds $CleanupGraceMilliseconds $hostExecutable $arguments `
-        $TestDeadlineMilliseconds
+        $TestDeadlineMilliseconds $OwnedProcessRegistry
 }
 
 $tempBase = [System.IO.Path]::GetFullPath(
@@ -118,9 +121,14 @@ $neverPidFile = Join-Path $testDirectory 'never.pid'
 $doublePidFile = Join-Path $testDirectory 'double.pid'
 $boundaryPidFiles = @()
 try {
+    $ownedProcessRegistry = [hashtable]::Synchronized(@{
+        IsActive = $false; ProcessId = 0; ProcessStartTimeUtc = $null
+        ExecutablePath = ''; Arguments = ''; ParentProcessId = 0
+    })
     $normal = Invoke-FakeCleanupTransport -Scenario Normal `
         -TimeoutSeconds 3 -CleanupGraceMilliseconds 1500 `
-        -PidFile (Join-Path $testDirectory 'normal.pid')
+        -PidFile (Join-Path $testDirectory 'normal.pid') `
+        -OwnedProcessRegistry $ownedProcessRegistry
     Assert-CleanupContract (
         [bool]$normal.Succeeded -and
         [bool]$normal.PrimarySucceeded -and
@@ -132,7 +140,19 @@ try {
         [bool]$normal.Diagnostics.StdinCloseAttempted -and
         [bool]$normal.Diagnostics.StdinCloseSucceeded -and
         [bool]$normal.Diagnostics.ChildExitedNaturally -and
-        [bool]$normal.Diagnostics.ChildHasExited
+        [bool]$normal.Diagnostics.ChildHasExited -and
+        -not [bool]$ownedProcessRegistry.IsActive -and
+        [int]$ownedProcessRegistry.ProcessId -gt 0 -and
+        $ownedProcessRegistry.ProcessStartTimeUtc -is [DateTime] -and
+        [System.IO.Path]::GetFullPath(
+            [string]$ownedProcessRegistry.ExecutablePath
+        ).Equals(
+            [System.IO.Path]::GetFullPath($hostExecutable),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -and
+        [string]$ownedProcessRegistry.Arguments -match
+            'FakeQuotaAppServer\.ps1' -and
+        [int]$ownedProcessRegistry.ParentProcessId -eq [int]$PID
     ) 'FAKE_NORMAL_CHILD_CLEANUP_FAILED'
 
     $slow = Invoke-FakeCleanupTransport -Scenario Normal `
@@ -258,6 +278,8 @@ try {
     Write-Output 'FakeNormalSnapshotParsed=True'
     Write-Output 'FakeNormalStdinCloseSucceeded=True'
     Write-Output 'FakeNormalChildExitedNaturally=True'
+    Write-Output 'QuotaChildOwnershipMetadataCaptured=True'
+    Write-Output 'QuotaChildOwnershipInactiveAfterCleanup=True'
     Write-Output 'FakeSlowExitUsesSeparateCleanupBudget=True'
     Write-Output 'FakeNearDeadlineUsesSeparateCleanupBudget=True'
     Write-Output 'ResponseAt2SecondsPasses=True'

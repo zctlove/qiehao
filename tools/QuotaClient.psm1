@@ -345,6 +345,7 @@ function Get-QiehaoQuotaSafeFailureCode {
     $allowed = @(
         'QUOTA_CODEX_NOT_FOUND',
         'QUOTA_APP_SERVER_START_FAILED',
+        'QUOTA_APP_SERVER_OWNERSHIP_FAILED',
         'QUOTA_INITIALIZE_TIMEOUT',
         'QUOTA_INITIALIZE_ERROR',
         'QUOTA_RATE_LIMITS_TIMEOUT',
@@ -387,7 +388,9 @@ function Invoke-QiehaoQuotaTransport {
         [AllowNull()][string]$TestProcessArguments,
 
         [ValidateRange(0, 60000)]
-        [int]$TestDeadlineMilliseconds = 0
+        [int]$TestDeadlineMilliseconds = 0,
+
+        [AllowNull()][hashtable]$OwnedProcessRegistry
     )
 
     $process = $null
@@ -478,6 +481,21 @@ function Invoke-QiehaoQuotaTransport {
         }
         if (-not $processStarted) { throw 'QUOTA_APP_SERVER_START_FAILED' }
         $appServerStarted = $true
+        if ($null -ne $OwnedProcessRegistry) {
+            try {
+                $OwnedProcessRegistry.ProcessId = [int]$process.Id
+                $OwnedProcessRegistry.ProcessStartTimeUtc =
+                    $process.StartTime.ToUniversalTime()
+                $OwnedProcessRegistry.ExecutablePath =
+                    [System.IO.Path]::GetFullPath([string]$executable.Path)
+                $OwnedProcessRegistry.Arguments = $processArguments
+                $OwnedProcessRegistry.ParentProcessId = [int]$PID
+                $OwnedProcessRegistry.IsActive = $true
+            }
+            catch {
+                throw 'QUOTA_APP_SERVER_OWNERSHIP_FAILED'
+            }
+        }
         $stderrTask = $process.StandardError.ReadToEndAsync()
         $deadlineUtc = if ($TestDeadlineMilliseconds -gt 0 -and
             -not [string]::IsNullOrWhiteSpace($TestExecutablePath)) {
@@ -667,6 +685,9 @@ function Invoke-QiehaoQuotaTransport {
         elseif ($null -ne $process) {
             $process.Dispose()
         }
+        if ($null -ne $OwnedProcessRegistry) {
+            $OwnedProcessRegistry.IsActive = $false
+        }
         $initializeResponse = $null
         if ($null -ne $quotaResponse) {
             $quotaResponse.Response = $null
@@ -725,19 +746,22 @@ function Get-QiehaoCurrentQuotaSnapshot {
     [CmdletBinding()]
     param(
         [ValidateRange(1, 60)]
-        [int]$TimeoutSeconds = 30
+        [int]$TimeoutSeconds = 30,
+
+        [AllowNull()][hashtable]$OwnedProcessRegistry
     )
 
     $operation = {
-        param($DeadlineSeconds)
-        Invoke-QiehaoQuotaTransport -TimeoutSeconds $DeadlineSeconds
+        param($DeadlineSeconds, $ProcessRegistry)
+        Invoke-QiehaoQuotaTransport -TimeoutSeconds $DeadlineSeconds `
+            -OwnedProcessRegistry $ProcessRegistry
     }
     try {
         $result = & $script:QuotaAuthModule {
             param($LockedOperation, $Arguments)
             Invoke-WithCodexWriteLock -Operation $LockedOperation `
                 -ArgumentList $Arguments
-        } $operation @($TimeoutSeconds)
+        } $operation @($TimeoutSeconds, $OwnedProcessRegistry)
         if ($null -eq $result) { throw 'QUOTA_RESULT_MISSING' }
         $result.Diagnostics.AccountStabilityLockAcquired = $true
         $result.AccountStabilityLockCleanup = 'Released'
@@ -917,7 +941,8 @@ function Invoke-QiehaoQuotaBackgroundWorker {
     param(
         [ValidateRange(1, 60)][int]$TimeoutSeconds = 30,
         [AllowNull()][scriptblock]$QuotaProvider,
-        [AllowNull()][object]$QuotaProviderArgument
+        [AllowNull()][object]$QuotaProviderArgument,
+        [AllowNull()][hashtable]$OwnedProcessRegistry
     )
 
     $clientCommandAvailable = $null -ne (Get-Command `
@@ -947,7 +972,8 @@ function Invoke-QiehaoQuotaBackgroundWorker {
         }
         if ($null -eq $QuotaProvider) {
             $providerOutput = @(Get-QiehaoCurrentQuotaSnapshot `
-                -TimeoutSeconds $TimeoutSeconds)
+                -TimeoutSeconds $TimeoutSeconds `
+                -OwnedProcessRegistry $OwnedProcessRegistry)
         }
         else {
             $providerOutput = @(

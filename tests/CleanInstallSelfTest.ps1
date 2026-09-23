@@ -150,12 +150,20 @@ try {
                     Write-SafeLog -Event `
                         'PROFILE_REMOVE_QUARANTINE_CLEANUP_FAILED'
                 }
-                $safeLogText = [System.IO.File]::ReadAllText(
-                    (Join-Path $case.Root 'logs\qiehao.log')
+                $safeLogPath = Join-Path $case.Root 'logs\qiehao.log'
+                $safeLogText = [System.IO.File]::ReadAllText($safeLogPath)
+                $safeLogEntries = @(
+                    [System.IO.File]::ReadAllLines($safeLogPath) |
+                        ForEach-Object {
+                            ConvertFrom-Json -InputObject $_ -ErrorAction Stop
+                        }
                 )
                 $recoveryWarningLogAccepted = (
-                    $safeLogText -match
-                        'profile delete quarantine cleanup pending' -and
+                    @($safeLogEntries | Where-Object {
+                        [string]$_.event -ceq
+                            'PROFILE_REMOVE_QUARANTINE_CLEANUP_FAILED' -and
+                        [string]$_.level -ceq 'WARNING'
+                    }).Count -eq 1 -and
                     $safeLogText -notmatch
                         '(?i)access_token|refresh_token|id_token|authorization|cookie'
                 )

@@ -258,11 +258,26 @@ function ConvertTo-QiehaoVerifyMessage {
     )
 
     switch ($ResultCode) {
-        'PROFILE_VERIFY_SUCCESS' { return '账号验证成功' }
+        'PROFILE_VERIFY_SUCCESS' { return '账号资料完整，且与当前 Codex 身份一致' }
+        'PROFILE_VERIFY_IDENTITY_MISMATCH' {
+            return '账号资料完整，但与当前 Codex 登录身份或工作区不一致'
+        }
+        'PROFILE_VERIFY_WORKSPACE_CONTEXT_UNKNOWN' {
+            return '账号资料完整，但旧版身份缺少可确认的工作区上下文，不能显示为完整验证成功'
+        }
         'PROFILE_INCOMPLETE' { return '账号资料不完整' }
         'PROFILE_IDENTITY_MISMATCH' { return '账号身份标记不匹配' }
         'PROFILE_IDENTITY_MARKER_MISSING' { return '身份标记缺失' }
         'PROFILE_METADATA_INVALID' { return '元数据异常' }
+        'AUTH_CREDENTIAL_SOURCE_UNSUPPORTED' {
+            return 'Codex 当前使用本版本不支持的凭据存储来源'
+        }
+        'AUTH_CREDENTIAL_SOURCE_AMBIGUOUS' {
+            return 'Codex 当前凭据来源为自动模式，无法安全确认文件凭据是实际登录来源'
+        }
+        'AUTH_CREDENTIAL_SOURCE_UNKNOWN' {
+            return '无法安全确认 Codex 当前凭据来源'
+        }
         'CODEX_PROCESS_RUNNING' { return 'Codex 正在运行' }
         'CODEX_PROCESS_STATE_UNKNOWN' { return '无法确认 Codex 进程状态' }
         'OPERATION_BUSY' { return '另一个操作正在执行' }
@@ -311,6 +326,7 @@ function Invoke-QiehaoVerifyRequest {
     }
 
     $resultCode = 'VERIFY_UNKNOWN'
+    $result = $null
     try {
         $result = & $VerifyProvider $SelectedProfile
         $resultProperty = if ($null -eq $result) {
@@ -327,8 +343,13 @@ function Invoke-QiehaoVerifyRequest {
         $safeCodes = @(
             'PROFILE_INCOMPLETE',
             'PROFILE_IDENTITY_MISMATCH',
+            'PROFILE_VERIFY_IDENTITY_MISMATCH',
+            'PROFILE_VERIFY_WORKSPACE_CONTEXT_UNKNOWN',
             'PROFILE_IDENTITY_MARKER_MISSING',
             'PROFILE_METADATA_INVALID',
+            'AUTH_CREDENTIAL_SOURCE_UNSUPPORTED',
+            'AUTH_CREDENTIAL_SOURCE_AMBIGUOUS',
+            'AUTH_CREDENTIAL_SOURCE_UNKNOWN',
             'CODEX_PROCESS_RUNNING',
             'CODEX_PROCESS_STATE_UNKNOWN',
             'OPERATION_BUSY'
@@ -339,12 +360,27 @@ function Invoke-QiehaoVerifyRequest {
     }
 
     $success = $resultCode -ceq 'PROFILE_VERIFY_SUCCESS'
-    return [pscustomobject]@{
+    $output = [pscustomobject]@{
         CoreCalled = $true
         ResultCode = $resultCode
         Message = ConvertTo-QiehaoVerifyMessage -ResultCode $resultCode
         VerificationStatus = if ($success) { '已验证' } else { '验证失败' }
     }
+    foreach ($propertyName in @(
+        'ProfileIntegrity',
+        'SavedWorkspaceClass',
+        'CurrentWorkspaceClass',
+        'WorkspaceContextStatus',
+        'CredentialSource',
+        'CredentialSourceConfidence'
+    )) {
+        if ($null -ne $result -and
+            $null -ne $result.PSObject.Properties[$propertyName]) {
+            $output | Add-Member -NotePropertyName $propertyName `
+                -NotePropertyValue $result.$propertyName
+        }
+    }
+    return $output
 }
 
 function Get-QiehaoSafeResultCode {
@@ -387,6 +423,9 @@ function Get-QiehaoSafeResultCode {
             'AUTH_JSON_INVALID',
             'AUTH_SCHEMA_UNEXPECTED',
             'AUTH_IDENTITY_SCHEMA_UNRECOGNIZED',
+            'AUTH_CREDENTIAL_SOURCE_UNSUPPORTED',
+            'AUTH_CREDENTIAL_SOURCE_AMBIGUOUS',
+            'AUTH_CREDENTIAL_SOURCE_UNKNOWN',
             'CODEX_HOME_NOT_FOUND',
             'PROFILE_IDENTITY_SCHEMA_UNRECOGNIZED',
             'CODEX_PROCESS_RUNNING',
@@ -413,6 +452,10 @@ function Get-QiehaoSafeResultCode {
             'PROFILE_RENAME_ROLLBACK_FAILED',
             'PROFILE_RENAME_FAILED',
             'PROFILE_REMOVE_SUCCESS',
+            'PROFILE_DELETE_SAFE',
+            'PROFILE_DELETE_ACTIVE_OUT_OF_SYNC',
+            'PROFILE_DELETE_IDENTITY_UNKNOWN',
+            'CANNOT_REMOVE_CURRENT_CODEX_PROFILE',
             'PROFILE_REMOVE_PARTIAL_FAILURE',
             'PROFILE_REMOVE_CONFIRMATION_REQUIRED',
             'CANNOT_REMOVE_ACTIVE_PROFILE',
@@ -484,6 +527,15 @@ function ConvertTo-QiehaoOperationResult {
         'AUTH_IDENTITY_SCHEMA_UNRECOGNIZED' {
             $message = '当前 Codex 登录文件缺少可安全验证的 ChatGPT 账号身份，未修改任何账号数据。'
         }
+        'AUTH_CREDENTIAL_SOURCE_UNSUPPORTED' {
+            $message = 'Codex 当前使用系统凭据库或临时凭据存储；Qiehao 无法安全确认 auth.json 是实际登录来源。未修改任何账号数据。'
+        }
+        'AUTH_CREDENTIAL_SOURCE_AMBIGUOUS' {
+            $message = 'Codex 当前使用自动凭据存储模式，无法安全确认文件凭据与实际登录身份一致。未修改任何账号数据。'
+        }
+        'AUTH_CREDENTIAL_SOURCE_UNKNOWN' {
+            $message = '无法安全确认 Codex 当前凭据来源。未修改任何账号数据。'
+        }
         'CODEX_HOME_NOT_FOUND' {
             $message = '未找到 Codex 本地数据目录，无法采集登录凭据。未修改任何 Codex 登录状态。'
         }
@@ -537,6 +589,19 @@ function ConvertTo-QiehaoOperationResult {
         }
         'PROFILE_REMOVE_SUCCESS' {
             $message = '本地账号已删除。'; $success = $true; $refresh = $true
+        }
+        'PROFILE_DELETE_SAFE' {
+            $message = '已确认所选账号不是 Codex 当前实际登录账号。'
+            $success = $true
+        }
+        'PROFILE_DELETE_ACTIVE_OUT_OF_SYNC' {
+            $message = 'Qiehao 的当前账号记录已过期。可先同步到 Codex 实际登录的已保存账号，再删除所选旧账号；尚未删除任何文件。'
+        }
+        'PROFILE_DELETE_IDENTITY_UNKNOWN' {
+            $message = '当前 Codex 登录身份不属于可确认的本地账号，无法安全解除当前账号保护。尚未删除任何文件。'
+        }
+        'CANNOT_REMOVE_CURRENT_CODEX_PROFILE' {
+            $message = '不能删除 Codex 当前实际登录的账号。请先安全切换到另一个已保存账号。'
         }
         'PROFILE_REMOVE_PARTIAL_FAILURE' {
             $message = '本地账号仅部分删除，请停止操作并人工检查。'
@@ -733,12 +798,14 @@ function Get-QiehaoActionState {
         Verify = $available -and $hasSelection -and $CodexStatus -ceq '已退出'
         Add = $available
         Rename = $available -and $hasSelection
-        Delete = $available -and $hasSelection -and -not $isActive
+        Delete = $available -and $hasSelection -and
+            $CodexStatus -ceq '已退出'
         ContextSwitch = $available -and $hasSelection
         ContextVerify = $available -and $hasSelection -and
             $CodexStatus -ceq '已退出'
         ContextRename = $available -and $hasSelection
-        ContextDelete = $available -and $hasSelection -and -not $isActive
+        ContextDelete = $available -and $hasSelection -and
+            $CodexStatus -ceq '已退出'
         LaunchCodex = $available -and $LaunchTargetAvailable -and
             $CodexStatus -ceq '已退出'
         IsSelectedProfileActive = $isActive

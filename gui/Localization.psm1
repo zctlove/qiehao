@@ -213,6 +213,9 @@ Add-QiehaoCatalogPair 'Switch.Status.TimedOut' '等待超时，本次未切换�
 Add-QiehaoCatalogPair 'Switch.Status.Closing' '切换等待已停止' 'Switch waiting stopped.'
 Add-QiehaoCatalogPair 'Verify.Working' '正在验证账号…' 'Verifying account…'
 Add-QiehaoCatalogPair 'Verify.Success' "账号：{0}`n状态：已验证" "Account: {0}`nStatus: Verified"
+Add-QiehaoCatalogPair 'Verify.SuccessDetailed' "账号：{0}`nProfile：完整`n保存身份：{1}`n当前 Codex：{2}`n凭据来源：{3}`n结果：身份一致" "Account: {0}`nProfile: complete`nSaved identity: {1}`nCurrent Codex: {2}`nCredential source: {3}`nResult: identity matches"
+Add-QiehaoCatalogPair 'Verify.IdentityMismatchDetailed' "账号：{0}`nProfile：完整`n保存身份：{1}`n当前 Codex：{2}`n凭据来源：{3}`n结果：身份不一致" "Account: {0}`nProfile: complete`nSaved identity: {1}`nCurrent Codex: {2}`nCredential source: {3}`nResult: identity mismatch"
+Add-QiehaoCatalogPair 'Verify.WorkspaceUnknownDetailed' "账号：{0}`nProfile：完整`n工作区身份：旧版资料未知`n凭据来源：{1}`n结果：未完整验证" "Account: {0}`nProfile: complete`nWorkspace identity: unknown for legacy profile`nCredential source: {1}`nResult: not fully verified"
 Add-QiehaoCatalogPair 'Account.Renaming' '正在重命名账号…' 'Renaming account…'
 Add-QiehaoCatalogPair 'Account.Deleting' '正在删除本地账号…' 'Deleting local account…'
 Add-QiehaoCatalogPair 'Account.AddPreparing' '准备添加账号…' 'Preparing to add an account…'
@@ -226,6 +229,7 @@ Add-QiehaoCatalogPair 'Account.AddCurrentAlreadySaved' '当前 Codex 登录的�
 Add-QiehaoCatalogPair 'Account.SyncChecking' '正在核对 Qiehao 当前账号与 Codex 实际登录账号…' 'Checking the Qiehao active account against the account currently signed in to Codex…'
 Add-QiehaoCatalogPair 'Dialog.SyncActive.Title' '同步当前账号状态' 'Synchronize Active Account State'
 Add-QiehaoCatalogPair 'Dialog.SyncActive.Message' 'Qiehao 记录的当前账号与 Codex 实际登录账号不同。如果当前 Codex 登录账号已保存在本地，可仅同步当前状态；不会修改或复制任何账号凭据。' 'The active account recorded by Qiehao differs from the account currently signed in to Codex. If the current Codex account is already saved locally, Qiehao can synchronize only the active-state record. No account credentials will be modified or copied.'
+Add-QiehaoCatalogPair 'Dialog.Delete.SyncActive.Message' 'Qiehao 的当前账号记录已过期。先仅同步到 Codex 实际登录的已保存账号，再继续删除所选旧账号；不会复制或覆盖任何账号凭据。' 'Qiehao''s active-account record is stale. First synchronize it to the saved account currently signed in to Codex, then continue deleting the selected old account. No credentials will be copied or overwritten.'
 Add-QiehaoCatalogPair 'Dialog.SyncActive.Confirm' '同步当前 Codex 登录账号' 'Synchronize Current Codex Account'
 Add-QiehaoCatalogPair 'Common.ProfileSelectionRequired' '请先选择一个账号。' 'Select an account first.'
 Add-QiehaoCatalogPair 'Common.OperationBusy' '另一个操作正在执行。' 'Another operation is in progress.'
@@ -244,6 +248,9 @@ Add-QiehaoCatalogPair 'Operation.PROFILE_REMOVE_SUCCESS' '本地账号已删除�
 Add-QiehaoCatalogPair 'Operation.PROFILE_NAME_ALREADY_EXISTS' '该本地账号名称已经存在。' 'That local account name already exists.'
 Add-QiehaoCatalogPair 'Operation.PROFILE_IDENTITY_ALREADY_EXISTS' '当前 Codex 登录账号已保存在本地账号列表中，不会重复添加。' 'The account currently signed in to Codex is already saved in the local account list and will not be added again.'
 Add-QiehaoCatalogPair 'Operation.CANNOT_REMOVE_ACTIVE_PROFILE' '不能删除当前账号。' 'The current account cannot be deleted.'
+Add-QiehaoCatalogPair 'Operation.CANNOT_REMOVE_CURRENT_CODEX_PROFILE' '不能删除 Codex 当前实际登录的账号。' 'The account currently signed in to Codex cannot be deleted.'
+Add-QiehaoCatalogPair 'Operation.PROFILE_DELETE_ACTIVE_OUT_OF_SYNC' 'Qiehao 的当前账号记录与 Codex 实际登录账号不同。请先安全同步当前状态，再删除旧账号。' 'Qiehao''s active-account record differs from the account currently signed in to Codex. Safely synchronize the active state before deleting the old account.'
+Add-QiehaoCatalogPair 'Operation.PROFILE_DELETE_IDENTITY_UNKNOWN' '无法把 Codex 当前登录身份安全对应到本地账号，已停止删除。' 'The current Codex identity could not be safely matched to a local account. Deletion was stopped.'
 Add-QiehaoCatalogPair 'Operation.PROFILE_NOT_FOUND' '本地账号不存在。' 'The local account does not exist.'
 Add-QiehaoCatalogPair 'Operation.PROFILE_INCOMPLETE' '账号资料不完整。' 'The account profile is incomplete.'
 Add-QiehaoCatalogPair 'Operation.PROFILE_METADATA_INVALID' '账号元数据异常。' 'Account metadata is invalid.'
@@ -256,6 +263,9 @@ Add-QiehaoCatalogPair 'Operation.AUTH_FILE_READ_FAILED' '无法安全读取 Code
 Add-QiehaoCatalogPair 'Operation.AUTH_JSON_INVALID' 'Codex 登录文件不是有效的 JSON，可能已损坏。未修改任何账号数据。' 'The Codex sign-in file is not valid JSON and may be damaged. No account data was changed.'
 Add-QiehaoCatalogPair 'Operation.AUTH_SCHEMA_UNEXPECTED' '当前 Codex 登录文件结构暂无法兼容，未修改任何账号数据。' 'The current Codex sign-in file structure is not yet compatible. No account data was changed.'
 Add-QiehaoCatalogPair 'Operation.AUTH_IDENTITY_SCHEMA_UNRECOGNIZED' '当前 Codex 登录文件缺少可安全验证的 ChatGPT 账号身份，未修改任何账号数据。' 'The Codex sign-in file does not contain a ChatGPT account identity that can be verified safely. No account data was changed.'
+Add-QiehaoCatalogPair 'Operation.AUTH_CREDENTIAL_SOURCE_UNSUPPORTED' 'Codex 当前使用系统凭据库或临时凭据存储；Qiehao 无法安全确认 auth.json 是实际登录来源。未修改任何账号数据。' 'Codex is using the system keyring or temporary credential storage. Qiehao cannot safely confirm that auth.json is the active sign-in source. No account data was changed.'
+Add-QiehaoCatalogPair 'Operation.AUTH_CREDENTIAL_SOURCE_AMBIGUOUS' 'Codex 当前使用自动凭据存储模式，无法安全确认文件凭据与实际登录身份一致。未修改任何账号数据。' 'Codex is using automatic credential storage. Qiehao cannot safely confirm that the file credential matches the actual signed-in identity. No account data was changed.'
+Add-QiehaoCatalogPair 'Operation.AUTH_CREDENTIAL_SOURCE_UNKNOWN' '无法安全确认 Codex 当前凭据来源。未修改任何账号数据。' 'The current Codex credential source could not be safely confirmed. No account data was changed.'
 Add-QiehaoCatalogPair 'Operation.CODEX_HOME_NOT_FOUND' '未找到 Codex 本地数据目录，无法采集登录凭据。未修改任何 Codex 登录状态。' 'The local Codex data directory was not found, so sign-in credentials could not be captured. No Codex sign-in state was changed.'
 
 function Get-QiehaoSupportedLanguages {

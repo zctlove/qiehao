@@ -1586,6 +1586,9 @@ $authErrorCases = @(
     [pscustomobject]@{ Code='AUTH_JSON_INVALID'; Fragment='不是有效的 JSON' },
     [pscustomobject]@{ Code='AUTH_SCHEMA_UNEXPECTED'; Fragment='暂无法兼容' },
     [pscustomobject]@{ Code='AUTH_IDENTITY_SCHEMA_UNRECOGNIZED'; Fragment='可安全验证' },
+    [pscustomobject]@{ Code='AUTH_CREDENTIAL_SOURCE_UNSUPPORTED'; Fragment='系统凭据库或临时凭据存储' },
+    [pscustomobject]@{ Code='AUTH_CREDENTIAL_SOURCE_AMBIGUOUS'; Fragment='自动凭据存储模式' },
+    [pscustomobject]@{ Code='AUTH_CREDENTIAL_SOURCE_UNKNOWN'; Fragment='无法安全确认 Codex 当前凭据来源' },
     [pscustomobject]@{ Code='CODEX_HOME_NOT_FOUND'; Fragment='未找到 Codex 本地数据目录' }
 )
 foreach ($authErrorCase in $authErrorCases) {
@@ -1616,12 +1619,14 @@ $unavailableLaunchActions = Get-QiehaoActionState -SelectedProfile 'Team' `
 Assert-GuiTest -Condition (
     $activeStoppedActions.Switch -and
     $activeStoppedActions.ContextSwitch -and
-    -not $activeStoppedActions.Delete -and
-    -not $activeStoppedActions.ContextDelete -and
+    $activeStoppedActions.Delete -and
+    $activeStoppedActions.ContextDelete -and
     $activeStoppedActions.Rename -and
     $activeStoppedActions.LaunchCodex -and
     $otherRunningActions.Switch -and
     -not $otherRunningActions.Verify -and
+    -not $otherRunningActions.Delete -and
+    -not $otherRunningActions.ContextDelete -and
     -not $otherRunningActions.LaunchCodex -and
     $busyActions.Refresh -and
     -not $busyActions.Switch -and -not $busyActions.Add -and
@@ -1822,14 +1827,53 @@ $successVerify = Invoke-QiehaoVerifyRequest -SelectedProfile 'A' `
     -CodexStatus '已退出' -VerifyProvider ({
         param($Name)
         $verifyCalls.Count++
-        [pscustomobject]@{ Result='PROFILE_VERIFY_SUCCESS'; Profile=$Name }
+        [pscustomobject]@{
+            Result='PROFILE_VERIFY_SUCCESS'; Profile=$Name
+            ProfileIntegrity='Complete'; SavedWorkspaceClass='Team'
+            CurrentWorkspaceClass='Team'; WorkspaceContextStatus='Confirmed'
+            CredentialSource='File'; CredentialSourceConfidence='Explicit'
+        }
     }.GetNewClosure())
 Assert-GuiTest -Condition (
     $successVerify.CoreCalled -and
-    $successVerify.Message -ceq '账号验证成功' -and
+    $successVerify.Message -match '账号资料完整' -and
     $successVerify.VerificationStatus -ceq '已验证' -and
+    $successVerify.ProfileIntegrity -ceq 'Complete' -and
+    $successVerify.SavedWorkspaceClass -ceq 'Team' -and
+    $successVerify.CurrentWorkspaceClass -ceq 'Team' -and
+    $successVerify.CredentialSource -ceq 'File' -and
     $verifyCalls.Count -eq 1
 ) -Code 'GUI_VERIFY_SUCCESS_FAILED'
+
+$currentMismatchVerify = Invoke-QiehaoVerifyRequest -SelectedProfile 'A' `
+    -CodexStatus '已退出' -VerifyProvider {
+        [pscustomobject]@{
+            Result='PROFILE_VERIFY_IDENTITY_MISMATCH'
+            ProfileIntegrity='Complete'; SavedWorkspaceClass='Team'
+            CurrentWorkspaceClass='Personal'; WorkspaceContextStatus='Confirmed'
+            CredentialSource='File'; CredentialSourceConfidence='Explicit'
+        }
+    }
+$legacyWorkspaceVerify = Invoke-QiehaoVerifyRequest -SelectedProfile 'Legacy' `
+    -CodexStatus '已退出' -VerifyProvider {
+        [pscustomobject]@{
+            Result='PROFILE_VERIFY_WORKSPACE_CONTEXT_UNKNOWN'
+            ProfileIntegrity='Complete'; SavedWorkspaceClass='Unknown'
+            CurrentWorkspaceClass='Unknown'; WorkspaceContextStatus='LegacyUnknown'
+            CredentialSource='File'; CredentialSourceConfidence='Inferred'
+        }
+    }
+Assert-GuiTest -Condition (
+    $currentMismatchVerify.CoreCalled -and
+    $currentMismatchVerify.ResultCode -ceq
+        'PROFILE_VERIFY_IDENTITY_MISMATCH' -and
+    $currentMismatchVerify.Message -match '身份或工作区不一致' -and
+    $currentMismatchVerify.VerificationStatus -ceq '验证失败' -and
+    $legacyWorkspaceVerify.ResultCode -ceq
+        'PROFILE_VERIFY_WORKSPACE_CONTEXT_UNKNOWN' -and
+    $legacyWorkspaceVerify.Message -match '不能显示为完整验证成功' -and
+    $legacyWorkspaceVerify.VerificationStatus -ceq '验证失败'
+) -Code 'GUI_VERIFY_CURRENT_IDENTITY_DETAIL_FAILED'
 
 $identityMismatchVerify = Invoke-QiehaoVerifyRequest -SelectedProfile 'A' `
     -CodexStatus '已退出' -VerifyProvider { throw 'PROFILE_IDENTITY_MISMATCH' }
@@ -2686,6 +2730,14 @@ $addWizardSection = [regex]::Match(
     $guiSource,
     '(?s)function Start-QiehaoAddWizard\s*\{.*?(?=\s+function Invoke-QiehaoAddAccount)'
 ).Value
+$addEntrySection = [regex]::Match(
+    $guiSource,
+    '(?s)function Invoke-QiehaoAddAccount\s*\{.*?(?=\s+function Get-QiehaoDataGridRowFromSource)'
+).Value
+$deleteSection = [regex]::Match(
+    $guiSource,
+    '(?s)function Invoke-QiehaoDeleteSelectedProfile\s*\{.*?(?=\s+function Start-QiehaoAddWizard)'
+).Value
 foreach ($requiredBackendCommand in @(
     'Switch-CodexAccountProfile',
     'Add-CodexProfile',
@@ -2736,6 +2788,17 @@ Assert-GuiTest -Condition (
     $addWizardSection -match 'Account.AddCurrentAlreadySaved' -and
     $addWizardSection -match '\bAdd-CodexProfile\b'
 ) -Code 'GUI_ADD_STATE_MACHINE_IDENTITY_HANDLING_FAILED'
+Assert-GuiTest -Condition (
+    -not [string]::IsNullOrWhiteSpace($addEntrySection) -and
+    $addEntrySection.IndexOf('Stop-QiehaoQuotaAsync') -ge 0 -and
+    $addEntrySection.IndexOf('Stop-QiehaoQuotaAsync') -lt
+        $addEntrySection.IndexOf('Get-QiehaoLiveCodexStatus') -and
+    -not [string]::IsNullOrWhiteSpace($deleteSection) -and
+    $deleteSection -match '\bGet-CodexProfileDeleteSafety\b' -and
+    $deleteSection -match 'PROFILE_DELETE_ACTIVE_OUT_OF_SYNC' -and
+    $deleteSection -match '\bSync-CodexActiveProfile\b' -and
+    $deleteSection -match '\bRemove-CodexProfile\b'
+) -Code 'GUI_DELETE_RECOVERY_OR_ADD_QUOTA_ORDER_MISSING'
 Assert-GuiTest -Condition (
     $localizationSource -match '先在 Codex 中登录或切换到目标账号' -and
     $localizationSource -match '退出 Codex 客户端，不是注销当前登录账号' -and
@@ -3038,6 +3101,9 @@ $launchSection = [regex]::Match(
 ).Value
 Assert-GuiTest -Condition (
     -not [string]::IsNullOrWhiteSpace($launchSection) -and
+    $launchSection.IndexOf('Stop-QiehaoQuotaAsync') -ge 0 -and
+    $launchSection.IndexOf('Stop-QiehaoQuotaAsync') -lt
+        $launchSection.IndexOf('Get-QiehaoLiveCodexStatus') -and
     $launchSection -match 'Start-Process' -and
     $launchSection -match 'shell:AppsFolder' -and
     $launchSection -notmatch '(?i)token|account_id|--profile|--user-data-dir|RunAs'
@@ -3225,7 +3291,7 @@ finally {
     ActiveContextSwitchIdentityCheckEnabled = 'PASS'
     ActiveProfileOutOfSyncMapped = 'PASS'
     ActiveProfileSyncMapped = 'PASS'
-    ActiveDeleteDisabled = 'PASS'
+    ActiveDeleteUsesRuntimeSafetyPreflight = 'PASS'
     F2RenameWired = 'PASS'
     RenameSuccess = 'PASS'
     RenameActiveAllowed = 'PASS'

@@ -68,6 +68,9 @@ catch {
     )
     return
 }
+if (-not $SelfTest) {
+    Write-QiehaoAppStartDiagnostic -Version '1.0.0-rc'
+}
 Import-Module -Name $helperModulePath -Force -ErrorAction Stop
 $script:guiLocalizationAvailable = $false
 try {
@@ -484,6 +487,32 @@ try {
     $script:guiQuotaSelfTestScenario = $null
     $script:guiQuotaSelfTestQueryCount = 0
     $script:guiQuotaSelfTestHardCeilingMilliseconds = 0
+    $script:guiQuotaOwnedProcessRegistry = [hashtable]::Synchronized(@{
+        IsActive = $false
+        ProcessId = 0
+        ProcessStartTimeUtc = $null
+        ExecutablePath = ''
+        Arguments = ''
+        ParentProcessId = 0
+    })
+
+    function Get-QiehaoOwnedQuotaProcessDescriptors {
+        if ($null -eq $script:guiQuotaOwnedProcessRegistry -or
+            -not [bool]$script:guiQuotaOwnedProcessRegistry.IsActive) {
+            return @()
+        }
+        return @([pscustomobject]@{
+            IsActive = [bool]$script:guiQuotaOwnedProcessRegistry.IsActive
+            ProcessId = [int]$script:guiQuotaOwnedProcessRegistry.ProcessId
+            ProcessStartTimeUtc =
+                $script:guiQuotaOwnedProcessRegistry.ProcessStartTimeUtc
+            ExecutablePath =
+                [string]$script:guiQuotaOwnedProcessRegistry.ExecutablePath
+            Arguments = [string]$script:guiQuotaOwnedProcessRegistry.Arguments
+            ParentProcessId =
+                [int]$script:guiQuotaOwnedProcessRegistry.ParentProcessId
+        })
+    }
 
     function Set-QiehaoSwitchQuotaStatus {
         param(
@@ -1309,7 +1338,11 @@ try {
             $snapshot = Get-QiehaoGuiSnapshot `
                 -ListProvider { @(Get-CodexAccountSlot) } `
                 -ActiveProvider { Get-CodexActiveProfile } `
-                -ProcessProvider { Test-CodexProcessesStopped } `
+                -ProcessProvider {
+                    Test-CodexProcessesStopped -OwnedProcessDescriptors (
+                        Get-QiehaoOwnedQuotaProcessDescriptors
+                    )
+                } `
                 -ActiveIdentityProvider { Test-CodexActiveIdentity }
             Set-QiehaoSnapshot -Snapshot $snapshot
             $refreshSucceeded = (
@@ -1652,7 +1685,12 @@ try {
         try {
             $powerShell = [PowerShell]::Create()
             $queryScript = {
-                param($ClientModulePath, $Scenario, $TimeoutSeconds)
+                param(
+                    $ClientModulePath,
+                    $Scenario,
+                    $TimeoutSeconds,
+                    $OwnedProcessRegistry
+                )
                 $ErrorActionPreference = 'Stop'
                 $clientModule = @(Import-Module -Name $ClientModulePath `
                     -PassThru -ErrorAction Stop |
@@ -1779,12 +1817,14 @@ try {
                     Invoke-QiehaoQuotaBackgroundWorker `
                         -TimeoutSeconds $TimeoutSeconds `
                         -QuotaProvider $fakeProvider `
-                        -QuotaProviderArgument $Scenario
+                        -QuotaProviderArgument $Scenario `
+                        -OwnedProcessRegistry $OwnedProcessRegistry
                     return
                 }
 
                 Invoke-QiehaoQuotaBackgroundWorker `
-                    -TimeoutSeconds $TimeoutSeconds
+                    -TimeoutSeconds $TimeoutSeconds `
+                    -OwnedProcessRegistry $OwnedProcessRegistry
             }
             $workerScenario = if ($SelfTest) {
                 [string]$script:guiQuotaSelfTestScenario
@@ -1793,7 +1833,8 @@ try {
             $null = $powerShell.AddScript($queryScript.ToString()).
                 AddArgument($quotaClientModulePath).
                 AddArgument($workerScenario).
-                AddArgument($quotaTimeoutSeconds)
+                AddArgument($quotaTimeoutSeconds).
+                AddArgument($script:guiQuotaOwnedProcessRegistry)
             $script:guiQuotaAsyncPowerShell = $powerShell
             $script:guiQuotaAsyncResult = $powerShell.BeginInvoke()
             if ($SelfTest -and -not [string]::IsNullOrWhiteSpace(
@@ -2038,7 +2079,11 @@ try {
 
     function Get-QiehaoLiveCodexStatus {
         try {
-            return ConvertTo-QiehaoCodexStatus -ProcessState (Test-CodexProcessesStopped)
+            return ConvertTo-QiehaoCodexStatus -ProcessState (
+                Test-CodexProcessesStopped -OwnedProcessDescriptors (
+                    Get-QiehaoOwnedQuotaProcessDescriptors
+                )
+            )
         }
         catch { return '未知' }
     }
@@ -2439,6 +2484,7 @@ try {
 
     function Invoke-QiehaoLaunchCodex {
         if ($script:guiIsWriteOperationBusy) { return }
+        Stop-QiehaoQuotaAsync
         $liveStatus = Get-QiehaoLiveCodexStatus
         Set-QiehaoCodexStatusVisual -Status $liveStatus
         if ($liveStatus -ceq '运行中') {
@@ -2613,7 +2659,12 @@ try {
                 -ClosingProvider { [bool]$script:guiIsClosing } `
                 -ProbeProvider {
                     $status = ConvertTo-QiehaoCodexStatus `
-                        -ProcessState (Test-CodexProcessesStopped)
+                        -ProcessState (
+                            Test-CodexProcessesStopped `
+                                -OwnedProcessDescriptors (
+                                    Get-QiehaoOwnedQuotaProcessDescriptors
+                                )
+                        )
                     if ($status -ceq '已退出') {
                         if ([string]$script:guiQuotaAsyncReason -ceq
                             'SwitchBefore' -and
@@ -3106,6 +3157,7 @@ try {
             return
         }
         $selectedProfile = Get-QiehaoSelectedProfileName
+        Stop-QiehaoQuotaAsync
         Set-QiehaoWriteBusy -Value $true -StatusText (
             Get-QiehaoGuiText -Key 'Verify.Working' `
                 -Fallback '正在验证账号…'
@@ -3126,9 +3178,36 @@ try {
             }
             $message = [string]$verifyResult.Message
             if ($verifyResult.ResultCode -ceq 'PROFILE_VERIFY_SUCCESS') {
-                $message = Format-QiehaoGuiText -Key 'Verify.Success' `
-                    -Arguments @($selectedProfile) `
-                    -Fallback "账号：{0}`n状态：已验证"
+                $message = Format-QiehaoGuiText -Key 'Verify.SuccessDetailed' `
+                    -Arguments @(
+                        $selectedProfile,
+                        [string]$verifyResult.SavedWorkspaceClass,
+                        [string]$verifyResult.CurrentWorkspaceClass,
+                        [string]$verifyResult.CredentialSource
+                    ) `
+                    -Fallback "账号：{0}`nProfile：完整`n保存身份：{1}`n当前 Codex：{2}`n凭据来源：{3}`n结果：身份一致"
+            }
+            elseif ($verifyResult.ResultCode -ceq
+                'PROFILE_VERIFY_IDENTITY_MISMATCH') {
+                $message = Format-QiehaoGuiText `
+                    -Key 'Verify.IdentityMismatchDetailed' `
+                    -Arguments @(
+                        $selectedProfile,
+                        [string]$verifyResult.SavedWorkspaceClass,
+                        [string]$verifyResult.CurrentWorkspaceClass,
+                        [string]$verifyResult.CredentialSource
+                    ) `
+                    -Fallback "账号：{0}`nProfile：完整`n保存身份：{1}`n当前 Codex：{2}`n凭据来源：{3}`n结果：身份不一致"
+            }
+            elseif ($verifyResult.ResultCode -ceq
+                'PROFILE_VERIFY_WORKSPACE_CONTEXT_UNKNOWN') {
+                $message = Format-QiehaoGuiText `
+                    -Key 'Verify.WorkspaceUnknownDetailed' `
+                    -Arguments @(
+                        $selectedProfile,
+                        [string]$verifyResult.CredentialSource
+                    ) `
+                    -Fallback "账号：{0}`nProfile：完整`n工作区身份：旧版资料未知`n凭据来源：{1}`n结果：未完整验证"
             }
             Show-QiehaoSafeMessage -Message $message
             if ($verifyResult.CoreCalled) { Invoke-QiehaoReadOnlyRefresh }
@@ -3202,25 +3281,74 @@ try {
     function Invoke-QiehaoDeleteSelectedProfile {
         if ($script:guiIsWriteOperationBusy) { return }
         $profileName = Get-QiehaoSelectedProfileName
-        if ([string]::IsNullOrWhiteSpace($profileName) -or
-            $profileName.Equals($script:guiCurrentActiveProfile,
-                [StringComparison]::OrdinalIgnoreCase)) { return }
-        $message = Format-QiehaoGuiText -Key 'Dialog.Delete.Message' `
-            -Arguments @($profileName) `
-            -Fallback "确定删除本地账号 '{0}' 吗？"
-        if (-not (Show-QiehaoChoiceDialog `
-            -Title (Get-QiehaoGuiText -Key 'Dialog.Delete.Title' `
-                -Fallback '删除本地账号') `
-            -Message $message `
-            -ConfirmText (Get-QiehaoGuiText -Key 'Dialog.Delete.Confirm' `
-                -Fallback '删除') `
-            -ConfirmStyle Danger)) { return }
+        if ([string]::IsNullOrWhiteSpace($profileName)) { return }
         Stop-QiehaoQuotaAsync
+        $liveStatus = Get-QiehaoLiveCodexStatus
+        if ($liveStatus -cne '已退出') {
+            $code = if ($liveStatus -ceq '运行中') {
+                'CODEX_PROCESS_RUNNING'
+            }
+            else { 'CODEX_PROCESS_STATE_UNKNOWN' }
+            Show-QiehaoOperationResult -Result (
+                ConvertTo-QiehaoOperationResult -ResultCode $code
+            )
+            return
+        }
         Set-QiehaoWriteBusy -Value $true -StatusText (
             Get-QiehaoGuiText -Key 'Account.Deleting' `
                 -Fallback '正在删除本地账号…'
         )
         try {
+            $safety = Invoke-QiehaoOperationProvider -Operation 'DELETE' `
+                -Provider {
+                    param($Name)
+                    Get-CodexProfileDeleteSafety -Name $Name
+                } -ArgumentList @($profileName)
+            if ([string]$safety.ResultCode -ceq
+                'PROFILE_DELETE_ACTIVE_OUT_OF_SYNC') {
+                $synchronize = Show-QiehaoChoiceDialog `
+                    -Title (Get-QiehaoGuiText `
+                        -Key 'Dialog.SyncActive.Title' `
+                        -Fallback '同步当前账号状态') `
+                    -Message (Get-QiehaoGuiText `
+                        -Key 'Dialog.Delete.SyncActive.Message' `
+                        -Fallback 'Qiehao 的当前账号记录已过期。先仅同步到 Codex 实际登录的已保存账号，再继续删除所选旧账号；不会复制或覆盖任何账号凭据。') `
+                    -ConfirmText (Get-QiehaoGuiText `
+                        -Key 'Dialog.SyncActive.Confirm' `
+                        -Fallback '同步当前 Codex 登录账号') `
+                    -ConfirmStyle Primary
+                if (-not $synchronize) { return }
+                $syncResult = Invoke-QiehaoOperationProvider `
+                    -Operation 'SYNC_ACTIVE' `
+                    -Provider { Sync-CodexActiveProfile }
+                if (-not $syncResult.IsSuccess) {
+                    Show-QiehaoOperationResult -Result $syncResult
+                    return
+                }
+                Invoke-QiehaoReadOnlyRefresh
+                $safety = Invoke-QiehaoOperationProvider `
+                    -Operation 'DELETE' `
+                    -Provider {
+                        param($Name)
+                        Get-CodexProfileDeleteSafety -Name $Name
+                    } -ArgumentList @($profileName)
+            }
+            if ([string]$safety.ResultCode -cne 'PROFILE_DELETE_SAFE') {
+                Show-QiehaoOperationResult -Result $safety
+                return
+            }
+
+            $message = Format-QiehaoGuiText -Key 'Dialog.Delete.Message' `
+                -Arguments @($profileName) `
+                -Fallback "确定删除本地账号 '{0}' 吗？"
+            if (-not (Show-QiehaoChoiceDialog `
+                -Title (Get-QiehaoGuiText -Key 'Dialog.Delete.Title' `
+                    -Fallback '删除本地账号') `
+                -Message $message `
+                -ConfirmText (Get-QiehaoGuiText -Key 'Dialog.Delete.Confirm' `
+                    -Fallback '删除') `
+                -ConfirmStyle Danger)) { return }
+
             $quotaCacheWarning = $null
             $result = Invoke-QiehaoOperationProvider -Operation 'DELETE' `
                 -Provider { param($Name) Remove-CodexProfile -Name $Name -ConfirmDelete } `
@@ -3309,6 +3437,7 @@ try {
 
     function Invoke-QiehaoAddAccount {
         if ($script:guiIsWriteOperationBusy) { return }
+        Stop-QiehaoQuotaAsync
         $liveStatus = Get-QiehaoLiveCodexStatus
         if ($liveStatus -ceq '未知') {
             Show-QiehaoSafeMessage -Message (Get-QiehaoGuiText `
@@ -3317,7 +3446,6 @@ try {
                 -Severity Warning
             return
         }
-        Stop-QiehaoQuotaAsync
         Set-QiehaoWriteBusy -Value $true -StatusText (
             Get-QiehaoGuiText -Key 'Account.AddPreparing' `
                 -Fallback '准备添加账号…'

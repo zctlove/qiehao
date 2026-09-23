@@ -203,6 +203,105 @@ function Get-CodexHome {
     return $fullPath
 }
 
+# Credential source detection is intentionally metadata-only. It never opens
+# an operating-system keyring or emits credential contents.
+function Get-CodexCredentialSourceInfo {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CodexHome,
+
+        [AllowNull()][string]$ConfigText,
+
+        [switch]$UseProvidedConfigText
+    )
+
+    $homePath = [System.IO.Path]::GetFullPath($CodexHome)
+    $authPath = Join-Path -Path $homePath -ChildPath 'auth.json'
+    $configPath = Join-Path -Path $homePath -ChildPath 'config.toml'
+    $configAvailable = $UseProvidedConfigText
+    if (-not $UseProvidedConfigText -and [System.IO.File]::Exists($configPath)) {
+        try {
+            $configInfo = Get-Item -LiteralPath $configPath -Force -ErrorAction Stop
+            if (($configInfo.Attributes -band
+                    [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                $configInfo.Length -gt $script:MaximumMetadataFileBytes) {
+                throw (New-SafeException -Code 'AUTH_CREDENTIAL_SOURCE_UNKNOWN')
+            }
+            $ConfigText = [System.IO.File]::ReadAllText($configPath)
+            $configAvailable = $true
+        }
+        catch [System.InvalidOperationException] { throw }
+        catch {
+            throw (New-SafeException -Code 'AUTH_CREDENTIAL_SOURCE_UNKNOWN')
+        }
+    }
+
+    $configuredModes = @()
+    $mentionsSetting = $false
+    if ($configAvailable -and $null -ne $ConfigText) {
+        foreach ($line in ($ConfigText -split "`r?`n")) {
+            if ($line -match '(?i)^\s*cli_auth_credentials_store\s*=') {
+                $mentionsSetting = $true
+                $match = [regex]::Match(
+                    $line,
+                    '(?i)^\s*cli_auth_credentials_store\s*=\s*["''](?<mode>file|keyring|auto|ephemeral)["'']\s*(?:#.*)?$'
+                )
+                if (-not $match.Success) {
+                    throw (New-SafeException -Code 'AUTH_CREDENTIAL_SOURCE_UNKNOWN')
+                }
+                $configuredModes += $match.Groups['mode'].Value.ToLowerInvariant()
+            }
+        }
+    }
+    if ($mentionsSetting -and $configuredModes.Count -ne 1) {
+        throw (New-SafeException -Code 'AUTH_CREDENTIAL_SOURCE_UNKNOWN')
+    }
+
+    $mode = if ($configuredModes.Count -eq 1) {
+        [string]$configuredModes[0]
+    }
+    else { 'unspecified' }
+    $source = switch ($mode) {
+        'file' { 'File' }
+        'keyring' { 'CredentialStore' }
+        'auto' { 'Unknown' }
+        'ephemeral' { 'Ephemeral' }
+        # Legacy Codex installations do not declare this setting. Preserve
+        # the file-backed contract so the later sensitive-file read returns
+        # the precise AUTH_FILE_NOT_FOUND guidance when auth.json is absent.
+        default { 'File' }
+    }
+    $resultCode = switch ($mode) {
+        'keyring' { 'AUTH_CREDENTIAL_SOURCE_UNSUPPORTED' }
+        'auto' { 'AUTH_CREDENTIAL_SOURCE_AMBIGUOUS' }
+        'ephemeral' { 'AUTH_CREDENTIAL_SOURCE_UNSUPPORTED' }
+        default {
+            if ($source -ceq 'File') { 'AUTH_CREDENTIAL_SOURCE_FILE' }
+            else { 'AUTH_CREDENTIAL_SOURCE_UNKNOWN' }
+        }
+    }
+    return [pscustomobject]@{
+        Source = $source
+        ConfiguredMode = $mode
+        Confidence = if ($mode -ceq 'unspecified') { 'Inferred' } else { 'Explicit' }
+        ResultCode = $resultCode
+        FileCredentialUsable = $resultCode -ceq 'AUTH_CREDENTIAL_SOURCE_FILE'
+        CodexHome = $homePath
+        ConfigPath = $configPath
+    }
+}
+
+function Assert-CodexFileCredentialSource {
+    param([Parameter(Mandatory = $true)][string]$CodexHome)
+
+    $source = Get-CodexCredentialSourceInfo -CodexHome $CodexHome
+    if (-not $source.FileCredentialUsable) {
+        throw (New-SafeException -Code ([string]$source.ResultCode))
+    }
+    return $source
+}
+
 function ConvertTo-SafeProfileName {
     param(
         [Parameter(Mandatory = $true)]
@@ -615,6 +714,202 @@ function Get-CodexAuthIdentityBytes {
     }
 }
 
+function ConvertFrom-CodexBase64Url {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value) -or $Value.Length -gt 131072) {
+        throw (New-SafeException -Code 'AUTH_WORKSPACE_CONTEXT_UNAVAILABLE')
+    }
+    $base64 = $Value.Replace('-', '+').Replace('_', '/')
+    switch ($base64.Length % 4) {
+        0 { }
+        2 { $base64 += '==' }
+        3 { $base64 += '=' }
+        default {
+            throw (New-SafeException -Code 'AUTH_WORKSPACE_CONTEXT_UNAVAILABLE')
+        }
+    }
+    try {
+        return ,[Convert]::FromBase64String($base64)
+    }
+    catch {
+        throw (New-SafeException -Code 'AUTH_WORKSPACE_CONTEXT_UNAVAILABLE')
+    }
+}
+
+function Get-CodexWorkspaceClass {
+    param([AllowNull()][string]$PlanType)
+
+    if ([string]::IsNullOrWhiteSpace($PlanType)) { return 'Unknown' }
+    switch -Regex ($PlanType.Trim().ToLowerInvariant()) {
+        '^(team|business|enterprise|edu|education)$' { return 'Team' }
+        '^(free|plus|pro|go|personal)$' { return 'Personal' }
+        default { return 'Unknown' }
+    }
+}
+
+function Get-CodexAuthIdentityContext {
+    param(
+        [Parameter(Mandatory = $true)]
+        [byte[]]$Bytes
+    )
+
+    $accountIdBytes = $null
+    $userIdBytes = $null
+    $workspaceAccountIdBytes = $null
+    $authText = $null
+    $payloadBytes = $null
+    $payloadText = $null
+    $planType = $null
+    try {
+        $accountIdBytes = Get-CodexAuthIdentityBytes -Bytes $Bytes
+        try {
+            $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+            $authText = $utf8.GetString($Bytes)
+            $auth = ConvertFrom-Json -InputObject $authText -ErrorAction Stop
+            $idToken = [string]$auth.tokens.id_token
+            $parts = @($idToken -split '\.')
+            if ($parts.Count -ge 2) {
+                $payloadBytes = ConvertFrom-CodexBase64Url -Value $parts[1]
+                if ($payloadBytes.Length -gt 65536) {
+                    throw (New-SafeException -Code 'AUTH_WORKSPACE_CONTEXT_UNAVAILABLE')
+                }
+                $payloadText = $utf8.GetString($payloadBytes)
+                $payload = ConvertFrom-Json -InputObject $payloadText -ErrorAction Stop
+                $authClaimProperty = $payload.PSObject.Properties[
+                    'https://api.openai.com/auth'
+                ]
+                $authClaim = if ($null -ne $authClaimProperty -and
+                    $authClaimProperty.Value -is [pscustomobject]) {
+                    $authClaimProperty.Value
+                }
+                else { $null }
+                $planProperty = if ($null -eq $authClaim) {
+                    $null
+                }
+                else {
+                    $authClaim.PSObject.Properties['chatgpt_plan_type']
+                }
+                if ($null -ne $planProperty -and $planProperty.Value -is [string]) {
+                    $planType = [string]$planProperty.Value
+                }
+                $userProperty = if ($null -eq $authClaim) {
+                    $null
+                }
+                else {
+                    $authClaim.PSObject.Properties['chatgpt_user_id']
+                }
+                if ($null -eq $userProperty) {
+                    if ($null -ne $authClaim) {
+                        $userProperty = $authClaim.PSObject.Properties['user_id']
+                    }
+                }
+                if ($null -ne $userProperty -and
+                    $userProperty.Value -is [string] -and
+                    -not [string]::IsNullOrWhiteSpace([string]$userProperty.Value)) {
+                    $userIdBytes = $utf8.GetBytes([string]$userProperty.Value)
+                }
+                $workspaceProperty = if ($null -eq $authClaim) {
+                    $null
+                }
+                else {
+                    $authClaim.PSObject.Properties['chatgpt_account_id']
+                }
+                if ($null -ne $workspaceProperty -and
+                    $workspaceProperty.Value -is [string] -and
+                    -not [string]::IsNullOrWhiteSpace(
+                        [string]$workspaceProperty.Value
+                    )) {
+                    $workspaceAccountIdBytes = $utf8.GetBytes(
+                        [string]$workspaceProperty.Value
+                    )
+                }
+                $authClaim = $null
+                $payload = $null
+            }
+            $auth = $null
+        }
+        catch {
+            # Older profiles may contain an opaque or legacy id_token. The
+            # account/workspace id remains authoritative, while verification
+            # reports that supplemental workspace context is unavailable.
+            $planType = $null
+            if ($null -ne $userIdBytes -and $userIdBytes.Length -gt 0) {
+                [Array]::Clear($userIdBytes, 0, $userIdBytes.Length)
+            }
+            $userIdBytes = $null
+            if ($null -ne $workspaceAccountIdBytes -and
+                $workspaceAccountIdBytes.Length -gt 0) {
+                [Array]::Clear(
+                    $workspaceAccountIdBytes,
+                    0,
+                    $workspaceAccountIdBytes.Length
+                )
+            }
+            $workspaceAccountIdBytes = $null
+        }
+
+        $workspaceClass = Get-CodexWorkspaceClass -PlanType $planType
+        $workspaceClaimStatus = if ($null -eq $workspaceAccountIdBytes) {
+            'Unavailable'
+        }
+        elseif (Test-IdentityByteArraysEqual -Left $accountIdBytes `
+            -Right $workspaceAccountIdBytes) {
+            'Confirmed'
+        }
+        else { 'Mismatch' }
+        return [pscustomobject]@{
+            AccountIdBytes = $accountIdBytes
+            UserIdBytes = $userIdBytes
+            WorkspaceAccountIdBytes = $workspaceAccountIdBytes
+            WorkspaceClass = $workspaceClass
+            WorkspaceClaimStatus = $workspaceClaimStatus
+            SupplementalContextKnown = (
+                $workspaceClaimStatus -ceq 'Confirmed' -and
+                $workspaceClass -cne 'Unknown' -and
+                $null -ne $userIdBytes -and $userIdBytes.Length -gt 0
+            )
+        }
+    }
+    catch {
+        foreach ($buffer in @(
+            $accountIdBytes,
+            $userIdBytes,
+            $workspaceAccountIdBytes
+        )) {
+            if ($null -ne $buffer -and $buffer.Length -gt 0) {
+                [Array]::Clear($buffer, 0, $buffer.Length)
+            }
+        }
+        throw
+    }
+    finally {
+        if ($null -ne $payloadBytes -and $payloadBytes.Length -gt 0) {
+            [Array]::Clear($payloadBytes, 0, $payloadBytes.Length)
+        }
+        $authText = $null
+        $payloadText = $null
+        $planType = $null
+    }
+}
+
+function Clear-CodexAuthIdentityContext {
+    param([AllowNull()][object]$Context)
+
+    if ($null -eq $Context) { return }
+    foreach ($propertyName in @(
+        'AccountIdBytes',
+        'UserIdBytes',
+        'WorkspaceAccountIdBytes'
+    )) {
+        $property = $Context.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and $property.Value -is [byte[]] -and
+            $property.Value.Length -gt 0) {
+            [Array]::Clear($property.Value, 0, $property.Value.Length)
+        }
+    }
+}
+
 function Protect-CodexIdentityMarkerPayload {
     param(
         [Parameter(Mandatory = $true)]
@@ -907,17 +1202,29 @@ function Get-ProcessInspectionSnapshot {
             'Name',
             'ProcessId',
             'ParentProcessId',
-            'ExecutablePath'
+            'ExecutablePath',
+            'CreationDate'
         ) -ErrorAction Stop)
 
         foreach ($process in $cimProcesses) {
             $processPath = [string]$process.ExecutablePath
+            $startTimeUtc = $null
+            $startTimeStatus = 'Unavailable'
+            try {
+                if ($null -ne $process.CreationDate) {
+                    $startTimeUtc = ([DateTime]$process.CreationDate).ToUniversalTime()
+                    $startTimeStatus = 'Readable'
+                }
+            }
+            catch { }
             [pscustomobject]@{
                 ProcessName = [string]$process.Name
                 Id = [int]$process.ProcessId
                 ParentProcessId = [int]$process.ParentProcessId
                 ParentReadStatus = 'Readable'
                 ExecutablePath = $processPath
+                ProcessStartTimeUtc = $startTimeUtc
+                StartTimeReadStatus = $startTimeStatus
                 PathReadStatus = if ([string]::IsNullOrWhiteSpace($processPath)) {
                     'Unavailable'
                 }
@@ -937,6 +1244,8 @@ function Get-ProcessInspectionSnapshot {
     foreach ($process in $processes) {
         $processPath = $null
         $pathReadStatus = 'Unavailable'
+        $startTimeUtc = $null
+        $startTimeStatus = 'Unavailable'
         try {
             $processPath = $process.Path
             if (-not [string]::IsNullOrWhiteSpace($processPath)) {
@@ -946,6 +1255,11 @@ function Get-ProcessInspectionSnapshot {
         catch {
             # Do not expose the exception or attempt to read the command line.
         }
+        try {
+            $startTimeUtc = $process.StartTime.ToUniversalTime()
+            $startTimeStatus = 'Readable'
+        }
+        catch { }
 
         [pscustomobject]@{
             ProcessName = $process.ProcessName
@@ -954,8 +1268,77 @@ function Get-ProcessInspectionSnapshot {
             ParentReadStatus = 'Unavailable'
             ExecutablePath = $processPath
             PathReadStatus = $pathReadStatus
+            ProcessStartTimeUtc = $startTimeUtc
+            StartTimeReadStatus = $startTimeStatus
         }
     }
+}
+
+function Test-QiehaoOwnedQuotaProcess {
+    param(
+        [Parameter(Mandatory = $true)][object]$Process,
+        [AllowEmptyCollection()][object[]]$OwnedProcessDescriptors
+    )
+
+    $nameProperty = $Process.PSObject.Properties['ProcessName']
+    $idProperty = $Process.PSObject.Properties['Id']
+    $pathProperty = $Process.PSObject.Properties['ExecutablePath']
+    $startProperty = $Process.PSObject.Properties['ProcessStartTimeUtc']
+    $startStatusProperty = $Process.PSObject.Properties['StartTimeReadStatus']
+    $parentProperty = $Process.PSObject.Properties['ParentProcessId']
+    $parentStatusProperty = $Process.PSObject.Properties['ParentReadStatus']
+    if ($null -eq $nameProperty -or $null -eq $idProperty -or
+        $null -eq $pathProperty -or $null -eq $startProperty -or
+        $null -eq $startStatusProperty -or
+        [string]$startStatusProperty.Value -cne 'Readable') {
+        return $false
+    }
+    $normalizedName = Get-NormalizedProcessName -Name ([string]$nameProperty.Value)
+    if ($normalizedName -notmatch '^(?i:codex(?:[-_].*)?)$') {
+        return $false
+    }
+
+    foreach ($descriptor in @($OwnedProcessDescriptors)) {
+        if ($null -eq $descriptor) { continue }
+        $active = $descriptor.PSObject.Properties['IsActive']
+        $pidProperty = $descriptor.PSObject.Properties['ProcessId']
+        $ownedStart = $descriptor.PSObject.Properties['ProcessStartTimeUtc']
+        $ownedPath = $descriptor.PSObject.Properties['ExecutablePath']
+        $arguments = $descriptor.PSObject.Properties['Arguments']
+        $ownedParent = $descriptor.PSObject.Properties['ParentProcessId']
+        if ($null -eq $active -or -not [bool]$active.Value -or
+            $null -eq $pidProperty -or
+            [int]$pidProperty.Value -ne [int]$idProperty.Value -or
+            $null -eq $ownedStart -or $null -eq $ownedPath -or
+            $null -eq $arguments -or
+            [string]$arguments.Value -cne 'app-server --stdio') {
+            continue
+        }
+        if (-not ([string]$ownedPath.Value).Equals(
+                [string]$pathProperty.Value,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            continue
+        }
+        try {
+            $actualStart = ([DateTime]$startProperty.Value).ToUniversalTime()
+            $expectedStart = ([DateTime]$ownedStart.Value).ToUniversalTime()
+            if ([Math]::Abs(($actualStart - $expectedStart).TotalSeconds) -gt 2) {
+                continue
+            }
+        }
+        catch { continue }
+        if ($null -ne $ownedParent) {
+            if ($null -eq $parentProperty -or
+                $null -eq $parentStatusProperty -or
+                [string]$parentStatusProperty.Value -cne 'Readable' -or
+                [int]$ownedParent.Value -ne [int]$parentProperty.Value) {
+                continue
+            }
+        }
+        return $true
+    }
+    return $false
 }
 
 function Get-ExtensionHostClassification {
@@ -1032,7 +1415,11 @@ function Test-CodexProcessesStopped {
     param(
         [Parameter()]
         [AllowEmptyCollection()]
-        [object[]]$ProcessData
+        [object[]]$ProcessData,
+
+        [Parameter()]
+        [AllowEmptyCollection()]
+        [object[]]$OwnedProcessDescriptors = @()
     )
 
     if ($PSBoundParameters.ContainsKey('ProcessData')) {
@@ -1055,6 +1442,7 @@ function Test-CodexProcessesStopped {
     $blocking = @()
     $uncertain = @()
     $browserExtensionHosts = @()
+    $ownedQuotaProcesses = @()
     $processById = @{}
     foreach ($snapshotItem in $snapshot) {
         if ($null -eq $snapshotItem) {
@@ -1094,6 +1482,15 @@ function Test-CodexProcessesStopped {
             ProcessName = $processName
             PID = $processId
             Classification = 'CODEX_PROCESS'
+        }
+
+        if (Test-QiehaoOwnedQuotaProcess -Process $item -OwnedProcessDescriptors $OwnedProcessDescriptors) {
+            $ownedQuotaProcesses += [pscustomobject]@{
+                ProcessName = $processName
+                PID = $processId
+                Classification = 'QIEHAO_QUOTA_APP_SERVER'
+            }
+            continue
         }
 
         # These names are specific enough to block even when their path cannot
@@ -1155,6 +1552,7 @@ function Test-CodexProcessesStopped {
             BlockingProcesses = @($blocking)
             UncertainProcesses = @($uncertain)
             BrowserExtensionHosts = @($browserExtensionHosts)
+            OwnedQuotaProcesses = @($ownedQuotaProcesses)
             ReasonCode = 'CODEX_PROCESS_RUNNING'
         }
     }
@@ -1164,6 +1562,7 @@ function Test-CodexProcessesStopped {
             BlockingProcesses = @()
             UncertainProcesses = @($uncertain)
             BrowserExtensionHosts = @($browserExtensionHosts)
+            OwnedQuotaProcesses = @($ownedQuotaProcesses)
             ReasonCode = 'CODEX_PROCESS_STATE_UNKNOWN'
         }
     }
@@ -1173,6 +1572,7 @@ function Test-CodexProcessesStopped {
         BlockingProcesses = @()
         UncertainProcesses = @()
         BrowserExtensionHosts = @($browserExtensionHosts)
+        OwnedQuotaProcesses = @($ownedQuotaProcesses)
         ReasonCode = 'CODEX_PROCESSES_STOPPED'
     }
 }
@@ -1845,14 +2245,88 @@ function Assert-CodexNotRunning {
     param(
         [object[]]$ProcessData,
 
-        [switch]$UseProvidedProcessData
+        [switch]$UseProvidedProcessData,
+
+        [string]$DiagnosticOperation = '',
+
+        [AllowEmptyCollection()][object[]]$OwnedProcessDescriptors = @()
     )
 
+    if (-not [string]::IsNullOrWhiteSpace($DiagnosticOperation)) {
+        Write-QiehaoDiagnosticEvent -Event 'PROCESS_CHECK_START' `
+            -Result 'STARTED' -Data @{ Role = $DiagnosticOperation }
+    }
     if ($UseProvidedProcessData) {
-        $processState = Test-CodexProcessesStopped -ProcessData $ProcessData
+        $snapshot = @($ProcessData)
     }
     else {
-        $processState = Test-CodexProcessesStopped
+        try { $snapshot = @(Get-ProcessInspectionSnapshot) }
+        catch {
+            if (-not [string]::IsNullOrWhiteSpace($DiagnosticOperation)) {
+                Write-QiehaoDiagnosticEvent -Event 'PROCESS_CHECK_RESULT' `
+                    -Level 'ERROR' -Result 'CODEX_PROCESS_STATE_UNKNOWN' `
+                    -Data @{
+                        Role = $DiagnosticOperation
+                        ProcessCount = 0
+                        Processes = @()
+                        SafeToSave = $false
+                        ReasonCode = 'CODEX_PROCESS_STATE_UNKNOWN'
+                        BlockingCount = 0
+                        UncertainCount = 0
+                    }
+            }
+            throw (New-SafeException -Code 'CODEX_PROCESS_STATE_UNKNOWN')
+        }
+    }
+    $processState = Test-CodexProcessesStopped -ProcessData $snapshot `
+        -OwnedProcessDescriptors $OwnedProcessDescriptors
+    if (-not [string]::IsNullOrWhiteSpace($DiagnosticOperation)) {
+        $diagnosticProcesses = @()
+        foreach ($process in @($snapshot)) {
+            if ($null -eq $process) { continue }
+            $nameProperty = $process.PSObject.Properties['ProcessName']
+            $idProperty = $process.PSObject.Properties['Id']
+            $pathProperty = $process.PSObject.Properties['ExecutablePath']
+            $startProperty = $process.PSObject.Properties['ProcessStartTimeUtc']
+            if ($null -eq $nameProperty -or $null -eq $idProperty) { continue }
+            $processName = [string]$nameProperty.Value
+            $processPath = if ($null -eq $pathProperty) { '' }
+                else { [string]$pathProperty.Value }
+            $normalizedName = Get-NormalizedProcessName -Name $processName
+            $isCodexCandidate = (
+                $normalizedName -match '^(?i:codex(?:[-_].*)?)$' -or
+                $normalizedName -ieq 'ChatGPT' -or
+                $normalizedName -ieq 'extension-host' -or
+                (Test-CodexOwnedExecutablePath -Path $processPath)
+            )
+            if (-not $isCodexCandidate) { continue }
+            $startTime = if ($null -eq $startProperty -or
+                $null -eq $startProperty.Value) { '' }
+                else {
+                    try { ([DateTime]$startProperty.Value).ToUniversalTime().ToString('o') }
+                    catch { '' }
+                }
+            $diagnosticProcesses += [pscustomobject]@{
+                PID = [int]$idProperty.Value
+                ProcessName = $processName
+                ProcessPath = $processPath
+                ProcessStartTime = $startTime
+                IsQiehaoQuotaChild = [bool](Test-QiehaoOwnedQuotaProcess `
+                    -Process $process `
+                    -OwnedProcessDescriptors $OwnedProcessDescriptors)
+            }
+        }
+        Write-QiehaoDiagnosticEvent -Event 'PROCESS_CHECK_RESULT' `
+            -Level $(if ($processState.SafeToSave) { 'INFO' } else { 'WARNING' }) `
+            -Result ([string]$processState.ReasonCode) -Data @{
+                Role = $DiagnosticOperation
+                ProcessCount = @($diagnosticProcesses).Count
+                Processes = @($diagnosticProcesses)
+                SafeToSave = [bool]$processState.SafeToSave
+                ReasonCode = [string]$processState.ReasonCode
+                BlockingCount = @($processState.BlockingProcesses).Count
+                UncertainCount = @($processState.UncertainProcesses).Count
+            }
     }
     if (-not $processState.SafeToSave) {
         throw (New-SafeException -Code $processState.ReasonCode)
@@ -2273,6 +2747,61 @@ function Read-CodexProfileIdentityMarker {
     }
 }
 
+function Compare-CodexAuthToProfileIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][byte[]]$AuthBytes,
+        [Parameter(Mandatory = $true)][string]$ProfilesDirectory
+    )
+
+    $markerIdentityBytes = $null
+    $savedAuthBytes = $null
+    $currentContext = $null
+    $savedContext = $null
+    try {
+        $markerIdentityBytes = Read-CodexProfileIdentityMarker -Name $Name -ProfilesDirectory $ProfilesDirectory
+        $currentContext = Get-CodexAuthIdentityContext -Bytes $AuthBytes
+        $savedAuthBytes = Read-CodexAccountSlotBytes -Name $Name -ProfilesDirectory $ProfilesDirectory
+        $savedContext = Get-CodexAuthIdentityContext -Bytes $savedAuthBytes
+
+        $markerMatchesSaved = Test-IdentityByteArraysEqual -Left $markerIdentityBytes -Right $savedContext.AccountIdBytes
+        $accountMatches = Test-IdentityByteArraysEqual -Left $savedContext.AccountIdBytes -Right $currentContext.AccountIdBytes
+        $userMatches = $true
+        if ($savedContext.SupplementalContextKnown -and
+            $currentContext.SupplementalContextKnown) {
+            $userMatches = Test-IdentityByteArraysEqual -Left $savedContext.UserIdBytes -Right $currentContext.UserIdBytes
+        }
+        $workspaceClaimsValid = (
+            [string]$savedContext.WorkspaceClaimStatus -cne 'Mismatch' -and
+            [string]$currentContext.WorkspaceClaimStatus -cne 'Mismatch'
+        )
+        $contextStatus = if (-not $workspaceClaimsValid) {
+            'Mismatch'
+        }
+        elseif (
+            $savedContext.SupplementalContextKnown -and
+            $currentContext.SupplementalContextKnown
+        ) { 'Confirmed' } else { 'LegacyUnknown' }
+
+        return [pscustomobject]@{
+            Matches = $markerMatchesSaved -and $accountMatches -and
+                $userMatches -and $workspaceClaimsValid
+            WorkspaceContextStatus = $contextStatus
+            SavedWorkspaceClass = [string]$savedContext.WorkspaceClass
+            CurrentWorkspaceClass = [string]$currentContext.WorkspaceClass
+        }
+    }
+    finally {
+        foreach ($buffer in @($markerIdentityBytes, $savedAuthBytes)) {
+            if ($null -ne $buffer -and $buffer.Length -gt 0) {
+                [Array]::Clear($buffer, 0, $buffer.Length)
+            }
+        }
+        Clear-CodexAuthIdentityContext -Context $currentContext
+        Clear-CodexAuthIdentityContext -Context $savedContext
+    }
+}
+
 function Assert-CodexAuthMatchesProfileIdentity {
     param(
         [Parameter(Mandatory = $true)]
@@ -2288,25 +2817,12 @@ function Assert-CodexAuthMatchesProfileIdentity {
         [string]$MismatchCode = 'ACTIVE_PROFILE_IDENTITY_MISMATCH'
     )
 
-    $authIdentityBytes = $null
-    $markerIdentityBytes = $null
-    try {
-        $markerIdentityBytes = Read-CodexProfileIdentityMarker -Name $Name `
-            -ProfilesDirectory $ProfilesDirectory
-        $authIdentityBytes = Get-CodexAuthIdentityBytes -Bytes $AuthBytes
-        if (-not (Test-IdentityByteArraysEqual -Left $markerIdentityBytes `
-            -Right $authIdentityBytes)) {
-            throw (New-SafeException -Code $MismatchCode)
-        }
-        return $true
+    $comparison = Compare-CodexAuthToProfileIdentity -Name $Name `
+        -AuthBytes $AuthBytes -ProfilesDirectory $ProfilesDirectory
+    if (-not $comparison.Matches) {
+        throw (New-SafeException -Code $MismatchCode)
     }
-    finally {
-        foreach ($buffer in @($authIdentityBytes, $markerIdentityBytes)) {
-            if ($null -ne $buffer -and $buffer.Length -gt 0) {
-                [Array]::Clear($buffer, 0, $buffer.Length)
-            }
-        }
-    }
+    return $comparison
 }
 
 function Test-ProfileIdentityExists {
@@ -2316,6 +2832,8 @@ function Test-ProfileIdentityExists {
 
         [Parameter(Mandatory = $true)]
         [string]$ProfilesDirectory,
+
+        [AllowNull()][byte[]]$AuthBytes,
 
         [string]$ExcludeProfileName
     )
@@ -2355,11 +2873,33 @@ function Test-ProfileIdentityExists {
         }
 
         $existingIdentityBytes = $null
+        $existingAuthBytes = $null
+        $existingContext = $null
+        $candidateContext = $null
         try {
             $existingIdentityBytes = Read-CodexProfileIdentityMarker `
                 -Name $profileName -ProfilesDirectory $ProfilesDirectory
             if (Test-IdentityByteArraysEqual -Left $IdentityBytes `
                 -Right $existingIdentityBytes) {
+                if ($null -ne $AuthBytes) {
+                    $candidateContext = Get-CodexAuthIdentityContext `
+                        -Bytes $AuthBytes
+                    $existingAuthBytes = Read-CodexAccountSlotBytes `
+                        -Name $profileName `
+                        -ProfilesDirectory $ProfilesDirectory
+                    $existingContext = Get-CodexAuthIdentityContext `
+                        -Bytes $existingAuthBytes
+                    if ($candidateContext.SupplementalContextKnown -and
+                        $existingContext.SupplementalContextKnown) {
+                        $sameUser = Test-IdentityByteArraysEqual `
+                            -Left $candidateContext.UserIdBytes `
+                            -Right $existingContext.UserIdBytes
+                        if (-not $sameUser) {
+                            throw (New-SafeException `
+                                -Code 'PROFILE_IDENTITY_SCAN_INCOMPLETE')
+                        }
+                    }
+                }
                 return [pscustomobject]@{
                     Exists = $true
                     Profile = $profileName
@@ -2376,9 +2916,13 @@ function Test-ProfileIdentityExists {
             throw
         }
         finally {
-            if ($null -ne $existingIdentityBytes -and $existingIdentityBytes.Length -gt 0) {
-                [Array]::Clear($existingIdentityBytes, 0, $existingIdentityBytes.Length)
+            foreach ($buffer in @($existingIdentityBytes, $existingAuthBytes)) {
+                if ($null -ne $buffer -and $buffer.Length -gt 0) {
+                    [Array]::Clear($buffer, 0, $buffer.Length)
+                }
             }
+            Clear-CodexAuthIdentityContext -Context $existingContext
+            Clear-CodexAuthIdentityContext -Context $candidateContext
         }
     }
 
@@ -2606,6 +3150,197 @@ function Write-CodexAuthFileBytes {
     Write-AtomicByteFile -Path $AuthPath -Bytes $AuthBytes -Force -NoBackup
 }
 
+function ConvertTo-QiehaoDiagnosticSafeValue {
+    param(
+        [AllowNull()][object]$Value,
+        [string]$FieldName = '',
+        [ValidateRange(0, 6)][int]$Depth = 0
+    )
+
+    $allowedFields = @(
+        'ActiveProfile', 'TargetProfile', 'Profile', 'Role',
+        'CredentialSource', 'WorkspaceType', 'IdentityHash', 'ParseResult',
+        'ProcessCount', 'Processes', 'PID', 'ProcessName', 'ProcessPath',
+        'ProcessStartTime', 'IsQiehaoQuotaChild', 'SafeToSave',
+        'ReasonCode', 'BlockingCount', 'UncertainCount', 'ResultCode',
+        'ProfileIntegrity', 'CurrentWorkspaceType', 'SavedWorkspaceType',
+        'Decision', 'Version', 'PowerShellVersion', 'WindowsVersion',
+        'CodexHomeExists', 'ProfileCount'
+    )
+    if (-not [string]::IsNullOrWhiteSpace($FieldName) -and
+        $allowedFields -cnotcontains $FieldName) {
+        return $null
+    }
+    if ($null -eq $Value) { return $null }
+    if ($Depth -ge 6) { return '[depth_limited]' }
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        $safeMap = [ordered]@{}
+        foreach ($key in @($Value.Keys)) {
+            $safeKey = [string]$key
+            if ($allowedFields -ccontains $safeKey) {
+                $safeMap[$safeKey] = ConvertTo-QiehaoDiagnosticSafeValue `
+                    -Value $Value[$key] -FieldName $safeKey `
+                    -Depth ($Depth + 1)
+            }
+        }
+        return $safeMap
+    }
+    if ($Value -is [System.Collections.IEnumerable] -and
+        -not ($Value -is [string])) {
+        $safeItems = @()
+        foreach ($item in @($Value)) {
+            $safeItems += ,(ConvertTo-QiehaoDiagnosticSafeValue `
+                -Value $item -Depth ($Depth + 1))
+        }
+        return $safeItems
+    }
+    if ($Value -is [pscustomobject]) {
+        $safeObject = [ordered]@{}
+        foreach ($property in @($Value.PSObject.Properties)) {
+            if ($allowedFields -ccontains [string]$property.Name) {
+                $safeObject[[string]$property.Name] =
+                    ConvertTo-QiehaoDiagnosticSafeValue `
+                        -Value $property.Value `
+                        -FieldName ([string]$property.Name) `
+                        -Depth ($Depth + 1)
+            }
+        }
+        return $safeObject
+    }
+    if ($Value -is [bool] -or $Value -is [byte] -or
+        $Value -is [int16] -or $Value -is [int32] -or
+        $Value -is [int64] -or $Value -is [uint16] -or
+        $Value -is [uint32] -or $Value -is [uint64] -or
+        $Value -is [double] -or $Value -is [decimal]) {
+        return $Value
+    }
+
+    $text = [string]$Value
+    $text = [regex]::Replace(
+        $text,
+        '(?i)\b(?:access_token|refresh_token|id_token|token)\s*[:=]\s*[^\s,;]+',
+        '[token_removed]'
+    )
+    $text = [regex]::Replace(
+        $text,
+        '(?i)\b(?:authorization|cookie)\s*[:=]\s*[^\r\n]+',
+        '[header_removed]'
+    )
+    $text = [regex]::Replace(
+        $text,
+        '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+',
+        '[authorization_removed]'
+    )
+    $text = [regex]::Replace(
+        $text,
+        '(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*',
+        '[jwt_removed]'
+    )
+    $text = [regex]::Replace(
+        $text,
+        '(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b',
+        '[email_removed]'
+    )
+    if ($text.Length -gt 1024) {
+        $text = $text.Substring(0, 1024) + '[truncated]'
+    }
+    return $text
+}
+
+function Get-QiehaoDiagnosticIdentityHash {
+    param([Parameter(Mandatory = $true)][byte[]]$IdentityBytes)
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $domainBytes = $null
+    $combinedBytes = $null
+    $hashBytes = $null
+    try {
+        $domainBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes(
+            'QIEHAO_DIAGNOSTIC_IDENTITY_V1'
+        )
+        $combinedBytes = New-Object byte[] ($domainBytes.Length + 1 +
+            $IdentityBytes.Length)
+        [Array]::Copy($domainBytes, 0, $combinedBytes, 0, $domainBytes.Length)
+        [Array]::Copy(
+            $IdentityBytes,
+            0,
+            $combinedBytes,
+            $domainBytes.Length + 1,
+            $IdentityBytes.Length
+        )
+        $hashBytes = $sha256.ComputeHash($combinedBytes)
+        return ([BitConverter]::ToString($hashBytes, 0, 16)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+        foreach ($buffer in @($domainBytes, $combinedBytes, $hashBytes)) {
+            if ($null -ne $buffer -and $buffer.Length -gt 0) {
+                [Array]::Clear($buffer, 0, $buffer.Length)
+            }
+        }
+    }
+}
+
+function Write-QiehaoDiagnosticEvent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet(
+            'APP_START',
+            'ADD_START', 'ADD_AUTH_FOUND', 'ADD_IDENTITY_PARSE',
+            'ADD_SUCCESS', 'ADD_FAILED',
+            'SWITCH_START', 'PROCESS_CHECK_START', 'PROCESS_CHECK_RESULT',
+            'AUTH_REPLACE', 'READBACK_VERIFY', 'WORKSPACE_DETECT',
+            'SWITCH_SUCCESS', 'SWITCH_FAILED',
+            'VERIFY_START', 'PROFILE_INTEGRITY_RESULT',
+            'CURRENT_IDENTITY_RESULT', 'WORKSPACE_RESULT',
+            'VERIFY_SUCCESS', 'VERIFY_MISMATCH', 'VERIFY_FAILED',
+            'DELETE_START', 'DELETE_DECISION', 'DELETE_SUCCESS',
+            'DELETE_FAILED', 'SAVE_STARTED', 'SAVE_SUCCEEDED', 'SAVE_FAILED',
+            'PROFILE_REMOVE_QUARANTINE_CLEANUP_FAILED'
+        )]
+        [string]$Event,
+
+        [ValidateSet('INFO', 'WARNING', 'ERROR')]
+        [string]$Level = 'INFO',
+
+        [string]$Result = '',
+
+        [AllowNull()][System.Collections.IDictionary]$Data,
+
+        [string]$LogDirectory = $script:LogsDirectory
+    )
+
+    if (-not [System.IO.Directory]::Exists($LogDirectory)) { return }
+    $safeData = ConvertTo-QiehaoDiagnosticSafeValue -Value $Data
+    $entry = [ordered]@{
+        time = [DateTime]::UtcNow.ToString('o')
+        level = $Level
+        event = $Event
+        result = ConvertTo-QiehaoDiagnosticSafeValue -Value $Result
+        data = $safeData
+    }
+    $json = $null
+    try {
+        $json = $entry | ConvertTo-Json -Compress -Depth 8
+        $logPath = Join-Path -Path $LogDirectory -ChildPath 'qiehao.log'
+        [System.IO.File]::AppendAllText(
+            $logPath,
+            $json + [Environment]::NewLine,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+    }
+    catch {
+        # Diagnostics are best effort and must never alter a secure operation.
+    }
+    finally {
+        $json = $null
+        $entry = $null
+        $safeData = $null
+    }
+}
+
 function Write-SafeLog {
     param(
         [Parameter(Mandatory = $true)]
@@ -2624,34 +3359,51 @@ function Write-SafeLog {
         return
     }
 
-    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    switch ($Event) {
-        'SAVE_STARTED' {
-            $line = '{0} INFO profile save started: {1}' -f $timestamp, $ProfileName
+    $level = if ($Event -ceq 'SAVE_FAILED') { 'ERROR' }
+        elseif ($Event -ceq 'PROFILE_REMOVE_QUARANTINE_CLEANUP_FAILED') {
+            'WARNING'
         }
-        'SAVE_SUCCEEDED' {
-            $line = '{0} INFO encrypted profile written successfully: {1}' -f $timestamp, $ProfileName
-        }
-        'SAVE_FAILED' {
-            $line = '{0} ERROR profile save failed: SAFE_FAILURE' -f $timestamp
-        }
-        'PROFILE_REMOVE_QUARANTINE_CLEANUP_FAILED' {
-            $line = '{0} WARNING profile delete quarantine cleanup pending' -f `
-                $timestamp
-        }
-    }
+        else { 'INFO' }
+    $data = if ([string]::IsNullOrWhiteSpace($ProfileName)) { @{} }
+        else { @{ Profile = $ProfileName } }
+    Write-QiehaoDiagnosticEvent -Event $Event -Level $level `
+        -Result $Event -Data $data
+}
 
+function Write-QiehaoAppStartDiagnostic {
+    [CmdletBinding()]
+    param([string]$Version = '1.0.0-rc')
+
+    $codexHomeExists = $false
+    $credentialSource = 'Unknown'
+    $profileCount = 0
     try {
-        $logPath = Join-Path -Path $script:LogsDirectory -ChildPath 'qiehao.log'
-        [System.IO.File]::AppendAllText(
-            $logPath,
-            $line + [Environment]::NewLine,
-            (New-Object System.Text.UTF8Encoding($false))
-        )
+        $codexHome = Get-CodexHome
+        $codexHomeExists = [System.IO.Directory]::Exists($codexHome)
+        try {
+            $sourceInfo = Get-CodexCredentialSourceInfo `
+                -CodexHome $codexHome
+            $credentialSource = [string]$sourceInfo.Source
+        }
+        catch { $credentialSource = 'Unknown' }
     }
-    catch {
-        # Logging must never expose an exception object or block secure cleanup.
+    catch { }
+    try {
+        $profileCount = @(Get-CodexAccountSlotState `
+            -ProfilesDirectory $script:ProfilesDirectory `
+            -StateDirectory $script:StateDirectory).Count
     }
+    catch { $profileCount = 0 }
+
+    Write-QiehaoDiagnosticEvent -Event 'APP_START' -Result 'STARTED' `
+        -Data @{
+            Version = $Version
+            PowerShellVersion = [string]$PSVersionTable.PSVersion
+            WindowsVersion = [Environment]::OSVersion.VersionString
+            CodexHomeExists = $codexHomeExists
+            CredentialSource = $credentialSource
+            ProfileCount = $profileCount
+        }
 }
 
 function Invoke-SaveCodexAccountSlotUnlocked {
@@ -2738,6 +3490,7 @@ function Invoke-SaveCodexActiveProfile {
     try {
         Assert-CodexNotRunning -ProcessData $ProcessData `
             -UseProvidedProcessData:$UseProvidedProcessData
+        $null = Assert-CodexFileCredentialSource -CodexHome $CodexHome
 
         $activeState = Read-ActiveProfileState -StateDirectory $StateDirectory
         $activeName = [string]$activeState.ActiveProfile
@@ -2869,6 +3622,7 @@ function Invoke-InitializeCodexActiveProfile {
     try {
         Assert-CodexNotRunning -ProcessData $ProcessData `
             -UseProvidedProcessData:$UseProvidedProcessData
+        $null = Assert-CodexFileCredentialSource -CodexHome $CodexHome
 
         $safeName = ConvertTo-SafeProfileName -Name $Name
         $profileBytes = Read-CodexAccountSlotBytes -Name $safeName `
@@ -2942,6 +3696,7 @@ function Invoke-TestCodexActiveIdentity {
     try {
         Assert-CodexNotRunning -ProcessData $ProcessData `
             -UseProvidedProcessData:$UseProvidedProcessData
+        $null = Assert-CodexFileCredentialSource -CodexHome $CodexHome
         $activeState = Read-ActiveProfileState -StateDirectory $StateDirectory
         $authPath = Join-Path -Path $CodexHome -ChildPath 'auth.json'
         $authBytes = Read-SensitiveFileBytes -Path $authPath
@@ -2962,6 +3717,9 @@ function Invoke-TestCodexActiveIdentity {
             'PROFILE_IDENTITY_MARKER_INVALID',
             'AUTH_IDENTITY_SCHEMA_UNRECOGNIZED',
             'PROFILE_IDENTITY_SCHEMA_UNRECOGNIZED',
+            'AUTH_CREDENTIAL_SOURCE_UNSUPPORTED',
+            'AUTH_CREDENTIAL_SOURCE_AMBIGUOUS',
+            'AUTH_CREDENTIAL_SOURCE_UNKNOWN',
             'CODEX_PROCESS_RUNNING',
             'CODEX_PROCESS_STATE_UNKNOWN'
         )
@@ -3022,10 +3780,26 @@ function Invoke-CodexAccountSwitch {
     $stateWasCommitted = $false
     $activeName = $null
     $targetName = ConvertTo-SafeProfileName -Name $Name
+    $currentContext = $null
+    $targetContext = $null
+    $diagnosticActiveName = 'Unknown'
+    try {
+        $diagnosticActiveName = [string](
+            Read-ActiveProfileState -StateDirectory $StateDirectory
+        ).ActiveProfile
+    }
+    catch { }
+    Write-QiehaoDiagnosticEvent -Event 'SWITCH_START' -Result 'STARTED' `
+        -Data @{
+            ActiveProfile = $diagnosticActiveName
+            TargetProfile = $targetName
+        }
 
     try {
         Assert-CodexNotRunning -ProcessData $ProcessData `
-            -UseProvidedProcessData:$UseProvidedProcessData
+            -UseProvidedProcessData:$UseProvidedProcessData `
+            -DiagnosticOperation 'SWITCH'
+        $null = Assert-CodexFileCredentialSource -CodexHome $CodexHome
 
         $activeState = Read-ActiveProfileState -StateDirectory $StateDirectory
         $activeName = $activeState.ActiveProfile
@@ -3053,6 +3827,17 @@ function Invoke-CodexAccountSwitch {
         # the target slot; Codex may have refreshed OAuth data while running.
         $currentAuthBytes = Read-SensitiveFileBytes -Path $authPath
         $null = Test-CodexAuthBytes -Bytes $currentAuthBytes
+        $currentContext = Get-CodexAuthIdentityContext `
+            -Bytes $currentAuthBytes
+        $currentIdentityHash = Get-QiehaoDiagnosticIdentityHash `
+            -IdentityBytes $currentContext.AccountIdBytes
+        Write-QiehaoDiagnosticEvent -Event 'WORKSPACE_DETECT' `
+            -Result ([string]$currentContext.WorkspaceClaimStatus) -Data @{
+                Role = 'SWITCH_CURRENT_AUTH'
+                WorkspaceType = [string]$currentContext.WorkspaceClass
+                IdentityHash = $currentIdentityHash
+                ParseResult = [string]$currentContext.WorkspaceClaimStatus
+            }
         # Never trust the active profile label by itself. This identity check is
         # intentionally before the first write to the active slot, preventing a
         # manual Codex sign-out/sign-in from contaminating another profile.
@@ -3067,9 +3852,25 @@ function Invoke-CodexAccountSwitch {
         $null = Assert-CodexAuthMatchesProfileIdentity -Name $targetName `
             -AuthBytes $targetAuthBytes -ProfilesDirectory $ProfilesDirectory `
             -MismatchCode 'PROFILE_IDENTITY_MISMATCH'
+        $targetContext = Get-CodexAuthIdentityContext -Bytes $targetAuthBytes
+        $targetIdentityHash = Get-QiehaoDiagnosticIdentityHash `
+            -IdentityBytes $targetContext.AccountIdBytes
+        Write-QiehaoDiagnosticEvent -Event 'WORKSPACE_DETECT' `
+            -Result ([string]$targetContext.WorkspaceClaimStatus) -Data @{
+                Role = 'SWITCH_TARGET_PROFILE'
+                WorkspaceType = [string]$targetContext.WorkspaceClass
+                IdentityHash = $targetIdentityHash
+                ParseResult = [string]$targetContext.WorkspaceClaimStatus
+            }
 
         Write-CodexAuthFileBytes -AuthPath $authPath -AuthBytes $targetAuthBytes
         $authWasReplaced = $true
+        Write-QiehaoDiagnosticEvent -Event 'AUTH_REPLACE' `
+            -Result 'SUCCESS' -Data @{
+                ActiveProfile = $activeName
+                TargetProfile = $targetName
+                IdentityHash = $targetIdentityHash
+            }
 
         if ($SimulatePostReplaceVerificationFailure) {
             throw (New-SafeException -Code 'SWITCH_POST_REPLACE_VERIFICATION_FAILED')
@@ -3081,9 +3882,22 @@ function Invoke-CodexAccountSwitch {
             throw (New-SafeException -Code 'SWITCH_POST_REPLACE_VERIFICATION_FAILED')
         }
 
+        Write-QiehaoDiagnosticEvent -Event 'READBACK_VERIFY' `
+            -Result 'SUCCESS' -Data @{
+                TargetProfile = $targetName
+                IdentityHash = $targetIdentityHash
+            }
+
         # This is deliberately the final durable state change.
         Write-ActiveProfileState -Name $targetName -StateDirectory $StateDirectory
         $stateWasCommitted = $true
+        Write-QiehaoDiagnosticEvent -Event 'SWITCH_SUCCESS' `
+            -Result 'SWITCH_SUCCESS' -Data @{
+                ActiveProfile = $activeName
+                TargetProfile = $targetName
+                WorkspaceType = [string]$targetContext.WorkspaceClass
+                IdentityHash = $targetIdentityHash
+            }
 
         return [pscustomobject]@{
             Result = 'SWITCH_SUCCESS'
@@ -3111,11 +3925,34 @@ function Invoke-CodexAccountSwitch {
             }
 
             if ($rollbackSucceeded) {
+                Write-QiehaoDiagnosticEvent -Event 'SWITCH_FAILED' `
+                    -Level 'ERROR' -Result 'SWITCH_FAILED_ROLLED_BACK' `
+                    -Data @{
+                        ActiveProfile = $diagnosticActiveName
+                        TargetProfile = $targetName
+                        ResultCode = 'SWITCH_FAILED_ROLLED_BACK'
+                    }
                 throw (New-SafeException -Code 'SWITCH_FAILED_ROLLED_BACK')
             }
+            Write-QiehaoDiagnosticEvent -Event 'SWITCH_FAILED' `
+                -Level 'ERROR' -Result 'SWITCH_ROLLBACK_FAILED' `
+                -Data @{
+                    ActiveProfile = $diagnosticActiveName
+                    TargetProfile = $targetName
+                    ResultCode = 'SWITCH_ROLLBACK_FAILED'
+                }
             throw (New-SafeException -Code 'SWITCH_ROLLBACK_FAILED')
         }
 
+        $switchFailureCode = if ($_.Exception.Message -match `
+            '^[A-Z][A-Z0-9_]+$') { $_.Exception.Message }
+            else { 'SWITCH_FAILED' }
+        Write-QiehaoDiagnosticEvent -Event 'SWITCH_FAILED' `
+            -Level 'ERROR' -Result $switchFailureCode -Data @{
+                ActiveProfile = $diagnosticActiveName
+                TargetProfile = $targetName
+                ResultCode = $switchFailureCode
+            }
         if ($_.Exception.Message -match '^[A-Z][A-Z0-9_]+$') {
             throw
         }
@@ -3133,6 +3970,8 @@ function Invoke-CodexAccountSwitch {
                 [Array]::Clear($buffer, 0, $buffer.Length)
             }
         }
+        Clear-CodexAuthIdentityContext -Context $currentContext
+        Clear-CodexAuthIdentityContext -Context $targetContext
     }
 }
 
@@ -3159,6 +3998,7 @@ function Invoke-SyncCodexActiveProfile {
     try {
         Assert-CodexNotRunning -ProcessData $ProcessData `
             -UseProvidedProcessData:$UseProvidedProcessData
+        $null = Assert-CodexFileCredentialSource -CodexHome $CodexHome
         $activeState = Read-ActiveProfileState -StateDirectory $StateDirectory
         $authPath = Join-Path -Path $CodexHome -ChildPath 'auth.json'
         $currentAuthBytes = Read-SensitiveFileBytes -Path $authPath
@@ -3166,7 +4006,7 @@ function Invoke-SyncCodexActiveProfile {
         $currentIdentityBytes = Get-CodexAuthIdentityBytes `
             -Bytes $currentAuthBytes
         $identityMatch = Test-ProfileIdentityExists `
-            -IdentityBytes $currentIdentityBytes `
+            -IdentityBytes $currentIdentityBytes -AuthBytes $currentAuthBytes `
             -ProfilesDirectory $ProfilesDirectory
         if (-not $identityMatch.Exists) {
             throw (New-SafeException `
@@ -3322,9 +4162,15 @@ function Invoke-AddCodexProfile {
     $writeAttempted = $false
     $stateCommitted = $false
     $paths = $null
+    $identityContext = $null
+    Write-QiehaoDiagnosticEvent -Event 'ADD_START' -Result 'STARTED' `
+        -Data @{ Profile = $Name }
     try {
         Assert-CodexNotRunning -ProcessData $ProcessData `
-            -UseProvidedProcessData:$UseProvidedProcessData
+            -UseProvidedProcessData:$UseProvidedProcessData `
+            -DiagnosticOperation 'ADD'
+        $credentialSource = Assert-CodexFileCredentialSource `
+            -CodexHome $CodexHome
         $safeName = ConvertTo-SafeProfileName -Name $Name
         $paths = Get-StrictProfileArtifactPaths -Name $safeName `
             -ProfilesDirectory $ProfilesDirectory
@@ -3334,9 +4180,32 @@ function Invoke-AddCodexProfile {
 
         $authPath = Join-Path -Path $CodexHome -ChildPath 'auth.json'
         $authBytes = Read-SensitiveFileBytes -Path $authPath
+        Write-QiehaoDiagnosticEvent -Event 'ADD_AUTH_FOUND' `
+            -Result 'AUTH_FILE_READ' -Data @{
+                Profile = $safeName
+                CredentialSource = [string]$credentialSource.Source
+            }
         $null = Test-CodexAuthBytes -Bytes $authBytes
         $identityBytes = Get-CodexAuthIdentityBytes -Bytes $authBytes
+        $identityContext = Get-CodexAuthIdentityContext -Bytes $authBytes
+        $identityHash = Get-QiehaoDiagnosticIdentityHash `
+            -IdentityBytes $identityBytes
+        Write-QiehaoDiagnosticEvent -Event 'ADD_IDENTITY_PARSE' `
+            -Result 'SUCCESS' -Data @{
+                Profile = $safeName
+                ParseResult = 'SUCCESS'
+                WorkspaceType = [string]$identityContext.WorkspaceClass
+                IdentityHash = $identityHash
+            }
+        Write-QiehaoDiagnosticEvent -Event 'WORKSPACE_DETECT' `
+            -Result ([string]$identityContext.WorkspaceClaimStatus) -Data @{
+                Role = 'ADD_CURRENT_AUTH'
+                WorkspaceType = [string]$identityContext.WorkspaceClass
+                IdentityHash = $identityHash
+                ParseResult = [string]$identityContext.WorkspaceClaimStatus
+            }
         $identityMatch = Test-ProfileIdentityExists -IdentityBytes $identityBytes `
+            -AuthBytes $authBytes `
             -ProfilesDirectory $ProfilesDirectory
         if ($identityMatch.Exists) {
             $duplicateException = New-SafeException `
@@ -3361,6 +4230,12 @@ function Invoke-AddCodexProfile {
         # non-secret active state only after all three new artifacts verify.
         Write-ActiveProfileState -Name $safeName -StateDirectory $StateDirectory
         $stateCommitted = $true
+        Write-QiehaoDiagnosticEvent -Event 'ADD_SUCCESS' `
+            -Result 'PROFILE_ADD_SUCCESS' -Data @{
+                Profile = $safeName
+                WorkspaceType = [string]$identityContext.WorkspaceClass
+                IdentityHash = $identityHash
+            }
         return [pscustomobject]@{
             Result = 'PROFILE_ADD_SUCCESS'
             Profile = $safeName
@@ -3371,9 +4246,20 @@ function Invoke-AddCodexProfile {
         if ($writeAttempted -and -not $stateCommitted -and $null -ne $paths) {
             $cleanupFailures = @(Remove-NewProfileArtifactsBestEffort -Paths $paths)
             if ($cleanupFailures.Count -gt 0) {
+                Write-QiehaoDiagnosticEvent -Event 'ADD_FAILED' `
+                    -Level 'ERROR' -Result 'PROFILE_ADD_ROLLBACK_FAILED' `
+                    -Data @{ Profile = $Name; ResultCode = 'PROFILE_ADD_ROLLBACK_FAILED' }
                 throw (New-SafeException -Code 'PROFILE_ADD_ROLLBACK_FAILED')
             }
         }
+        $failureCode = if ($originalException.Message -match `
+            '^[A-Z][A-Z0-9_]+$') { $originalException.Message }
+            else { 'PROFILE_ADD_FAILED' }
+        Write-QiehaoDiagnosticEvent -Event 'ADD_FAILED' -Level 'ERROR' `
+            -Result $failureCode -Data @{
+                Profile = $Name
+                ResultCode = $failureCode
+            }
         if ($originalException.Message -match '^[A-Z][A-Z0-9_]+$') {
             throw $originalException
         }
@@ -3385,6 +4271,7 @@ function Invoke-AddCodexProfile {
                 [Array]::Clear($buffer, 0, $buffer.Length)
             }
         }
+        Clear-CodexAuthIdentityContext -Context $identityContext
     }
 }
 
@@ -3907,6 +4794,118 @@ function Invoke-RecoverCodexProfileDeleteTransactions {
     } -ArgumentList @($ProfilesDirectory, $StateDirectory)
 }
 
+function Invoke-GetCodexProfileDeleteSafety {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$CodexHome,
+        [Parameter(Mandatory = $true)][string]$ProfilesDirectory,
+        [Parameter(Mandatory = $true)][string]$StateDirectory,
+        [object[]]$ProcessData,
+        [switch]$UseProvidedProcessData
+    )
+
+    $currentAuthBytes = $null
+    $currentIdentityBytes = $null
+    try {
+        Assert-CodexNotRunning -ProcessData $ProcessData `
+            -UseProvidedProcessData:$UseProvidedProcessData `
+            -DiagnosticOperation 'DELETE'
+        $credentialSource = Assert-CodexFileCredentialSource `
+            -CodexHome $CodexHome
+        $safeName = ConvertTo-SafeProfileName -Name $Name
+        $paths = Get-StrictProfileArtifactPaths -Name $safeName `
+            -ProfilesDirectory $ProfilesDirectory
+        if (-not (Test-AnyProfileArtifactExists -Paths $paths)) {
+            throw (New-SafeException -Code 'PROFILE_NOT_FOUND')
+        }
+        if (-not [System.IO.File]::Exists($paths.EncryptedPath) -or
+            -not [System.IO.File]::Exists($paths.IdentityMarkerPath) -or
+            -not [System.IO.File]::Exists($paths.MetadataPath)) {
+            throw (New-SafeException -Code 'PROFILE_INCOMPLETE')
+        }
+        $activeState = Read-ActiveProfileState -StateDirectory $StateDirectory
+        $authPath = Join-Path -Path $CodexHome -ChildPath 'auth.json'
+        $currentAuthBytes = Read-SensitiveFileBytes -Path $authPath
+        $null = Test-CodexAuthBytes -Bytes $currentAuthBytes
+
+        $targetComparison = Compare-CodexAuthToProfileIdentity `
+            -Name $safeName -AuthBytes $currentAuthBytes `
+            -ProfilesDirectory $ProfilesDirectory
+        if ($targetComparison.Matches) {
+            return [pscustomobject]@{
+                Result = 'CANNOT_REMOVE_CURRENT_CODEX_PROFILE'
+                Profile = $safeName
+                ActiveProfile = [string]$activeState.ActiveProfile
+                CurrentProfile = $safeName
+                CredentialSource = [string]$credentialSource.Source
+            }
+        }
+
+        $currentIdentityBytes = Get-CodexAuthIdentityBytes `
+            -Bytes $currentAuthBytes
+        $identityMatch = Test-ProfileIdentityExists `
+            -IdentityBytes $currentIdentityBytes `
+            -AuthBytes $currentAuthBytes `
+            -ProfilesDirectory $ProfilesDirectory
+        $currentProfile = if ($identityMatch.Exists) {
+            [string]$identityMatch.Profile
+        }
+        else { $null }
+        if ($activeState.ActiveProfile.Equals(
+                $safeName,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            if ([string]::IsNullOrWhiteSpace($currentProfile)) {
+                return [pscustomobject]@{
+                    Result = 'PROFILE_DELETE_IDENTITY_UNKNOWN'
+                    Profile = $safeName
+                    ActiveProfile = [string]$activeState.ActiveProfile
+                    CurrentProfile = $null
+                    CredentialSource = [string]$credentialSource.Source
+                }
+            }
+            return [pscustomobject]@{
+                Result = 'PROFILE_DELETE_ACTIVE_OUT_OF_SYNC'
+                Profile = $safeName
+                ActiveProfile = [string]$activeState.ActiveProfile
+                CurrentProfile = $currentProfile
+                CredentialSource = [string]$credentialSource.Source
+            }
+        }
+        return [pscustomobject]@{
+            Result = 'PROFILE_DELETE_SAFE'
+            Profile = $safeName
+            ActiveProfile = [string]$activeState.ActiveProfile
+            CurrentProfile = $currentProfile
+            CredentialSource = [string]$credentialSource.Source
+        }
+    }
+    finally {
+        foreach ($buffer in @($currentAuthBytes, $currentIdentityBytes)) {
+            if ($null -ne $buffer -and $buffer.Length -gt 0) {
+                [Array]::Clear($buffer, 0, $buffer.Length)
+            }
+        }
+    }
+}
+
+function Get-CodexProfileDeleteSafety {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string]$Name
+    )
+
+    return Invoke-WithCodexWriteLock -Operation {
+        param($LockedName)
+        $codexHome = Get-CodexHome
+        Invoke-GetCodexProfileDeleteSafety -Name $LockedName `
+            -CodexHome $codexHome `
+            -ProfilesDirectory $script:ProfilesDirectory `
+            -StateDirectory $script:StateDirectory
+    } -ArgumentList @($Name)
+}
+
 function Invoke-RemoveCodexProfileUnlocked {
     param(
         [Parameter(Mandatory = $true)]
@@ -4126,10 +5125,71 @@ function Remove-CodexProfile {
         [switch]$ConfirmDelete
     )
 
-    return Invoke-RemoveCodexProfile -Name $Name `
-        -ProfilesDirectory $script:ProfilesDirectory `
-        -StateDirectory $script:StateDirectory `
-        -ConfirmDelete:$ConfirmDelete
+    Write-QiehaoDiagnosticEvent -Event 'DELETE_START' -Result 'STARTED' `
+        -Data @{ Profile = $Name }
+    try {
+        if (-not $ConfirmDelete) {
+            throw (New-SafeException `
+                -Code 'PROFILE_REMOVE_CONFIRMATION_REQUIRED')
+        }
+        return Invoke-WithCodexWriteLock -Operation {
+            param($LockedName, $LockedConfirmation)
+            $null = Invoke-RecoverCodexProfileDeleteTransactionsUnlocked `
+                -ProfilesDirectory $script:ProfilesDirectory `
+                -StateDirectory $script:StateDirectory
+            $codexHome = Get-CodexHome
+            $safety = Invoke-GetCodexProfileDeleteSafety `
+                -Name $LockedName -CodexHome $codexHome `
+                -ProfilesDirectory $script:ProfilesDirectory `
+                -StateDirectory $script:StateDirectory
+            $decision = if ([string]$safety.Result -ceq `
+                'PROFILE_DELETE_SAFE') { 'ALLOW' }
+                elseif ([string]$safety.Result -ceq `
+                    'PROFILE_DELETE_ACTIVE_OUT_OF_SYNC') { 'SYNC_REQUIRED' }
+                else { 'DENY' }
+            Write-QiehaoDiagnosticEvent -Event 'DELETE_DECISION' `
+                -Result $decision -Data @{
+                    Profile = $LockedName
+                    ActiveProfile = [string]$safety.ActiveProfile
+                    Decision = $decision
+                    ResultCode = [string]$safety.Result
+                    CredentialSource = [string]$safety.CredentialSource
+                }
+            if ([string]$safety.Result -cne 'PROFILE_DELETE_SAFE') {
+                throw (New-SafeException -Code ([string]$safety.Result))
+            }
+            $removeResult = Invoke-RemoveCodexProfileUnlocked `
+                -Name $LockedName `
+                -ProfilesDirectory $script:ProfilesDirectory `
+                -StateDirectory $script:StateDirectory `
+                -ConfirmDelete:$LockedConfirmation
+            if ([string]$removeResult.Result -ceq 'PROFILE_REMOVE_SUCCESS') {
+                Write-QiehaoDiagnosticEvent -Event 'DELETE_SUCCESS' `
+                    -Result 'PROFILE_REMOVE_SUCCESS' `
+                    -Data @{ Profile = $LockedName; Decision = 'ALLOW' }
+            }
+            else {
+                Write-QiehaoDiagnosticEvent -Event 'DELETE_FAILED' `
+                    -Level 'ERROR' -Result ([string]$removeResult.Result) `
+                    -Data @{
+                        Profile = $LockedName
+                        ResultCode = [string]$removeResult.Result
+                    }
+            }
+            return $removeResult
+        } -ArgumentList @($Name, [bool]$ConfirmDelete)
+    }
+    catch {
+        $deleteFailureCode = if ($_.Exception.Message -match `
+            '^[A-Z][A-Z0-9_]+$') { $_.Exception.Message }
+            else { 'PROFILE_REMOVE_FAILED' }
+        Write-QiehaoDiagnosticEvent -Event 'DELETE_FAILED' `
+            -Level 'ERROR' -Result $deleteFailureCode -Data @{
+                Profile = $Name
+                ResultCode = $deleteFailureCode
+            }
+        throw
+    }
 }
 
 function Invoke-RenameCodexProfile {
@@ -4306,15 +5366,30 @@ function Invoke-VerifyCodexProfile {
         [Parameter(Mandatory = $true)]
         [string]$ProfilesDirectory,
 
+        [Parameter(Mandatory = $true)]
+        [string]$CodexHome,
+
         [object[]]$ProcessData,
 
         [switch]$UseProvidedProcessData
     )
 
-    $authBytes = $null
+    $profileAuthBytes = $null
+    $currentAuthBytes = $null
+    $profileContext = $null
+    $comparison = $null
+    $profileComparison = $null
+    $credentialSource = $null
+    $metadataState = $null
+    $currentContext = $null
+    Write-QiehaoDiagnosticEvent -Event 'VERIFY_START' -Result 'STARTED' `
+        -Data @{ Profile = $Name }
     try {
         Assert-CodexNotRunning -ProcessData $ProcessData `
-            -UseProvidedProcessData:$UseProvidedProcessData
+            -UseProvidedProcessData:$UseProvidedProcessData `
+            -DiagnosticOperation 'VERIFY'
+        $credentialSource = Assert-CodexFileCredentialSource `
+            -CodexHome $CodexHome
         $safeName = ConvertTo-SafeProfileName -Name $Name
         $paths = Get-StrictProfileArtifactPaths -Name $safeName `
             -ProfilesDirectory $ProfilesDirectory
@@ -4332,20 +5407,138 @@ function Invoke-VerifyCodexProfile {
             throw (New-SafeException -Code 'PROFILE_METADATA_INVALID')
         }
 
-        $authBytes = Read-CodexAccountSlotBytes -Name $safeName `
+        $profileAuthBytes = Read-CodexAccountSlotBytes -Name $safeName `
             -ProfilesDirectory $ProfilesDirectory
-        $null = Assert-CodexAuthMatchesProfileIdentity -Name $safeName `
-            -AuthBytes $authBytes -ProfilesDirectory $ProfilesDirectory `
+        $profileComparison = Assert-CodexAuthMatchesProfileIdentity `
+            -Name $safeName -AuthBytes $profileAuthBytes `
+            -ProfilesDirectory $ProfilesDirectory `
             -MismatchCode 'PROFILE_IDENTITY_MISMATCH'
+        $profileContext = Get-CodexAuthIdentityContext -Bytes $profileAuthBytes
+        $profileIdentityHash = Get-QiehaoDiagnosticIdentityHash `
+            -IdentityBytes $profileContext.AccountIdBytes
+        Write-QiehaoDiagnosticEvent -Event 'PROFILE_INTEGRITY_RESULT' `
+            -Result 'COMPLETE' -Data @{
+                Profile = $safeName
+                ProfileIntegrity = 'Complete'
+                SavedWorkspaceType = [string]$profileContext.WorkspaceClass
+                IdentityHash = $profileIdentityHash
+            }
+        Write-QiehaoDiagnosticEvent -Event 'WORKSPACE_DETECT' `
+            -Result ([string]$profileContext.WorkspaceClaimStatus) -Data @{
+                Role = 'VERIFY_SAVED_PROFILE'
+                WorkspaceType = [string]$profileContext.WorkspaceClass
+                IdentityHash = $profileIdentityHash
+                ParseResult = [string]$profileContext.WorkspaceClaimStatus
+            }
+
+        $authPath = Join-Path -Path $CodexHome -ChildPath 'auth.json'
+        $currentAuthBytes = Read-SensitiveFileBytes -Path $authPath
+        $null = Test-CodexAuthBytes -Bytes $currentAuthBytes
+        $currentContext = Get-CodexAuthIdentityContext -Bytes $currentAuthBytes
+        $currentIdentityHash = Get-QiehaoDiagnosticIdentityHash `
+            -IdentityBytes $currentContext.AccountIdBytes
+        Write-QiehaoDiagnosticEvent -Event 'CURRENT_IDENTITY_RESULT' `
+            -Result 'PARSED' -Data @{
+                Profile = $safeName
+                CredentialSource = [string]$credentialSource.Source
+                CurrentWorkspaceType = [string]$currentContext.WorkspaceClass
+                IdentityHash = $currentIdentityHash
+            }
+        Write-QiehaoDiagnosticEvent -Event 'WORKSPACE_RESULT' `
+            -Result ([string]$currentContext.WorkspaceClaimStatus) -Data @{
+                Profile = $safeName
+                CurrentWorkspaceType = [string]$currentContext.WorkspaceClass
+                SavedWorkspaceType = [string]$profileContext.WorkspaceClass
+                IdentityHash = $currentIdentityHash
+                ParseResult = [string]$currentContext.WorkspaceClaimStatus
+            }
+        $comparison = Compare-CodexAuthToProfileIdentity -Name $safeName `
+            -AuthBytes $currentAuthBytes -ProfilesDirectory $ProfilesDirectory
+        if (-not $comparison.Matches) {
+            Write-QiehaoDiagnosticEvent -Event 'VERIFY_MISMATCH' `
+                -Level 'WARNING' -Result 'PROFILE_VERIFY_IDENTITY_MISMATCH' `
+                -Data @{
+                    Profile = $safeName
+                    SavedWorkspaceType = [string]$profileContext.WorkspaceClass
+                    CurrentWorkspaceType = [string]$comparison.CurrentWorkspaceClass
+                    ResultCode = 'PROFILE_VERIFY_IDENTITY_MISMATCH'
+                }
+            return [pscustomobject]@{
+                Result = 'PROFILE_VERIFY_IDENTITY_MISMATCH'
+                Profile = $safeName
+                ProfileIntegrity = 'Complete'
+                SavedWorkspaceClass = [string]$profileContext.WorkspaceClass
+                CurrentWorkspaceClass =
+                    [string]$comparison.CurrentWorkspaceClass
+                WorkspaceContextStatus =
+                    [string]$comparison.WorkspaceContextStatus
+                CredentialSource = [string]$credentialSource.Source
+                CredentialSourceConfidence =
+                    [string]$credentialSource.Confidence
+            }
+        }
+        if ([string]$profileComparison.WorkspaceContextStatus -cne
+            'Confirmed' -or
+            [string]$comparison.WorkspaceContextStatus -cne 'Confirmed') {
+            Write-QiehaoDiagnosticEvent -Event 'VERIFY_FAILED' `
+                -Level 'WARNING' `
+                -Result 'PROFILE_VERIFY_WORKSPACE_CONTEXT_UNKNOWN' `
+                -Data @{
+                    Profile = $safeName
+                    SavedWorkspaceType = [string]$profileContext.WorkspaceClass
+                    CurrentWorkspaceType = [string]$comparison.CurrentWorkspaceClass
+                    ResultCode = 'PROFILE_VERIFY_WORKSPACE_CONTEXT_UNKNOWN'
+                }
+            return [pscustomobject]@{
+                Result = 'PROFILE_VERIFY_WORKSPACE_CONTEXT_UNKNOWN'
+                Profile = $safeName
+                ProfileIntegrity = 'Complete'
+                SavedWorkspaceClass = [string]$profileContext.WorkspaceClass
+                CurrentWorkspaceClass =
+                    [string]$comparison.CurrentWorkspaceClass
+                WorkspaceContextStatus = 'LegacyUnknown'
+                CredentialSource = [string]$credentialSource.Source
+                CredentialSourceConfidence =
+                    [string]$credentialSource.Confidence
+            }
+        }
+        Write-QiehaoDiagnosticEvent -Event 'VERIFY_SUCCESS' `
+            -Result 'PROFILE_VERIFY_SUCCESS' -Data @{
+                Profile = $safeName
+                SavedWorkspaceType = [string]$profileContext.WorkspaceClass
+                CurrentWorkspaceType = [string]$comparison.CurrentWorkspaceClass
+                IdentityHash = $currentIdentityHash
+            }
         return [pscustomobject]@{
             Result = 'PROFILE_VERIFY_SUCCESS'
             Profile = $safeName
+            ProfileIntegrity = 'Complete'
+            SavedWorkspaceClass = [string]$profileContext.WorkspaceClass
+            CurrentWorkspaceClass = [string]$comparison.CurrentWorkspaceClass
+            WorkspaceContextStatus = 'Confirmed'
+            CredentialSource = [string]$credentialSource.Source
+            CredentialSourceConfidence = [string]$credentialSource.Confidence
         }
     }
+    catch {
+        $verifyFailureCode = if ($_.Exception.Message -match `
+            '^[A-Z][A-Z0-9_]+$') { $_.Exception.Message }
+            else { 'PROFILE_VERIFY_FAILED' }
+        Write-QiehaoDiagnosticEvent -Event 'VERIFY_FAILED' `
+            -Level 'ERROR' -Result $verifyFailureCode -Data @{
+                Profile = $Name
+                ResultCode = $verifyFailureCode
+            }
+        throw
+    }
     finally {
-        if ($null -ne $authBytes -and $authBytes.Length -gt 0) {
-            [Array]::Clear($authBytes, 0, $authBytes.Length)
+        foreach ($buffer in @($profileAuthBytes, $currentAuthBytes)) {
+            if ($null -ne $buffer -and $buffer.Length -gt 0) {
+                [Array]::Clear($buffer, 0, $buffer.Length)
+            }
         }
+        Clear-CodexAuthIdentityContext -Context $profileContext
+        Clear-CodexAuthIdentityContext -Context $currentContext
         $metadataState = $null
     }
 }
@@ -4359,8 +5552,10 @@ function Test-CodexProfile {
 
     return Invoke-WithCodexWriteLock -Operation {
         param($LockedName)
+        $codexHome = Get-CodexHome
         Invoke-VerifyCodexProfile -Name $LockedName `
-            -ProfilesDirectory $script:ProfilesDirectory
+            -ProfilesDirectory $script:ProfilesDirectory `
+            -CodexHome $codexHome
     } -ArgumentList @($Name)
 }
 
@@ -4499,7 +5694,9 @@ function Get-CodexAccountSlot {
 
 Export-ModuleMember -Function @(
     'Initialize-QiehaoRuntimeDirectories',
+    'Write-QiehaoAppStartDiagnostic',
     'Get-CodexHome',
+    'Get-CodexCredentialSourceInfo',
     'Test-CodexAuthFile',
     'Protect-CodexAuthBytes',
     'Unprotect-CodexAuthBytes',
@@ -4511,6 +5708,7 @@ Export-ModuleMember -Function @(
     'Get-CodexAccountSlot',
     'Add-CodexProfile',
     'Remove-CodexProfile',
+    'Get-CodexProfileDeleteSafety',
     'Rename-CodexProfile',
     'Test-CodexProfile',
     'Initialize-CodexProfileIdentityMarker',
