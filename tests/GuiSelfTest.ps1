@@ -1474,13 +1474,40 @@ Assert-GuiTest -Condition (
 
 $alreadyActiveSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Plus' `
     -ActiveProfile 'Plus' `
-    -ProcessProvider { throw 'PROCESS_SHOULD_NOT_BE_CALLED' } `
-    -SwitchProvider ({ $switchCalls.Count++ }.GetNewClosure())
+    -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESSES_STOPPED' } } `
+    -SwitchProvider ({
+        param($Name)
+        $switchCalls.Count++
+        [pscustomobject]@{ Result='ALREADY_ACTIVE' }
+    }.GetNewClosure())
 Assert-GuiTest -Condition (
-    -not $alreadyActiveSwitch.CoreCalled -and
+    $alreadyActiveSwitch.CoreCalled -and
     $alreadyActiveSwitch.ResultCode -ceq 'ALREADY_ACTIVE' -and
-    $switchCalls.Count -eq 1
-) -Code 'GUI_SWITCH_ACTIVE_WROTE_AUTH'
+    $switchCalls.Count -eq 2
+) -Code 'GUI_SWITCH_ACTIVE_IDENTITY_NOT_CHECKED'
+
+$outOfSyncSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Plus' `
+    -ActiveProfile 'Plus' `
+    -ProcessProvider { [pscustomobject]@{ ReasonCode='CODEX_PROCESSES_STOPPED' } } `
+    -SwitchProvider {
+        [pscustomobject]@{ Result='ACTIVE_PROFILE_OUT_OF_SYNC' }
+    }
+Assert-GuiTest -Condition (
+    $outOfSyncSwitch.CoreCalled -and
+    $outOfSyncSwitch.ResultCode -ceq 'ACTIVE_PROFILE_OUT_OF_SYNC' -and
+    $outOfSyncSwitch.Message -notmatch '已经是当前账号'
+) -Code 'GUI_ACTIVE_OUT_OF_SYNC_MAPPING_FAILED'
+
+$syncCalls = [pscustomobject]@{ Count=0 }
+$syncResult = Invoke-QiehaoOperationProvider -Operation 'SYNC_ACTIVE' `
+    -Provider ({
+        $syncCalls.Count++
+        [pscustomobject]@{ Result='ACTIVE_PROFILE_SYNCED' }
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    $syncResult.CoreCalled -and $syncResult.IsSuccess -and
+    $syncResult.RefreshRequired -and $syncCalls.Count -eq 1
+) -Code 'GUI_ACTIVE_SYNC_RESULT_FAILED'
 
 $unknownSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' `
@@ -1489,7 +1516,7 @@ $unknownSwitch = Invoke-QiehaoSwitchRequest -SelectedProfile 'Team' `
 Assert-GuiTest -Condition (
     -not $unknownSwitch.CoreCalled -and
     $unknownSwitch.ResultCode -ceq 'CODEX_PROCESS_STATE_UNKNOWN' -and
-    $switchCalls.Count -eq 1
+    $switchCalls.Count -eq 2
 ) -Code 'GUI_SWITCH_UNKNOWN_EXECUTED'
 
 $runningFlow = [pscustomobject]@{ Wait=0; Switch=0; Target=''; Order=@() }
@@ -1552,6 +1579,30 @@ Assert-GuiTest -Condition (
     $identityResult.Message -match '已阻止操作'
 ) -Code 'GUI_SWITCH_RESULT_MAPPING_FAILED'
 
+$authErrorCases = @(
+    [pscustomobject]@{ Code='AUTH_FILE_NOT_FOUND'; Fragment='系统凭据库' },
+    [pscustomobject]@{ Code='AUTH_FILE_EMPTY'; Fragment='登录文件为空' },
+    [pscustomobject]@{ Code='AUTH_FILE_READ_FAILED'; Fragment='无法安全读取' },
+    [pscustomobject]@{ Code='AUTH_JSON_INVALID'; Fragment='不是有效的 JSON' },
+    [pscustomobject]@{ Code='AUTH_SCHEMA_UNEXPECTED'; Fragment='暂无法兼容' },
+    [pscustomobject]@{ Code='AUTH_IDENTITY_SCHEMA_UNRECOGNIZED'; Fragment='可安全验证' },
+    [pscustomobject]@{ Code='CODEX_HOME_NOT_FOUND'; Fragment='未找到 Codex 本地数据目录' }
+)
+foreach ($authErrorCase in $authErrorCases) {
+    $mappedAuthError = Invoke-QiehaoOperationProvider -Operation 'ADD' `
+        -Provider ({ throw [string]$authErrorCase.Code }.GetNewClosure())
+    Assert-GuiTest -Condition (
+        $mappedAuthError.CoreCalled -and
+        $mappedAuthError.ResultCode -ceq [string]$authErrorCase.Code -and
+        $mappedAuthError.Message -match [regex]::Escape(
+            [string]$authErrorCase.Fragment
+        ) -and
+        $mappedAuthError.Message -cne '操作失败，未进行不安全的继续操作。' -and
+        $mappedAuthError.Message -notmatch
+            '(?i)access_token|refresh_token|id_token|authorization|cookie\s*:'
+    ) -Code ('GUI_AUTH_ERROR_MAPPING_FAILED_' + [string]$authErrorCase.Code)
+}
+
 $activeStoppedActions = Get-QiehaoActionState -SelectedProfile 'Plus' `
     -ActiveProfile 'Plus' -CodexStatus '已退出'
 $otherRunningActions = Get-QiehaoActionState -SelectedProfile 'Team' `
@@ -1563,8 +1614,8 @@ $waitingActions = Get-QiehaoActionState -SelectedProfile 'Team' `
 $unavailableLaunchActions = Get-QiehaoActionState -SelectedProfile 'Team' `
     -ActiveProfile 'Plus' -CodexStatus '已退出' -LaunchTargetAvailable:$false
 Assert-GuiTest -Condition (
-    -not $activeStoppedActions.Switch -and
-    -not $activeStoppedActions.ContextSwitch -and
+    $activeStoppedActions.Switch -and
+    $activeStoppedActions.ContextSwitch -and
     -not $activeStoppedActions.Delete -and
     -not $activeStoppedActions.ContextDelete -and
     $activeStoppedActions.Rename -and
@@ -1677,8 +1728,9 @@ $addDuplicateIdentity = Invoke-QiehaoOperationProvider -Operation 'ADD' `
     -Provider { throw 'PROFILE_IDENTITY_ALREADY_EXISTS' }
 Assert-GuiTest -Condition (
     $addSuccess.IsSuccess -and
+    $addSuccess.Message -ceq '已识别当前 Codex 登录账号，凭据已安全保存，账号添加成功。' -and
     $addDuplicateName.Message -ceq '该本地账号名称已经存在。' -and
-    $addDuplicateIdentity.Message -ceq '该账号已经存在于本地账号列表中。' -and
+    $addDuplicateIdentity.Message -ceq '当前 Codex 登录账号已保存在本地账号列表中，不会重复添加。' -and
     $addDuplicateIdentity.Message -notmatch '(?i)account_id|@'
 ) -Code 'GUI_ADD_RESULT_MAPPING_FAILED'
 
@@ -1708,6 +1760,29 @@ $guardedRow | Add-Member -MemberType ScriptProperty -Name Identity -Value {
 $guardedSearch = @(Select-QiehaoProfileRows -Rows @($guardedRow) -SearchText 'safe')
 Assert-GuiTest -Condition ($guardedSearch.Count -eq 1) `
     -Code 'GUI_SEARCH_READ_SENSITIVE_PROPERTY'
+
+$elevenProfileRows = @(1..11 | ForEach-Object {
+    [pscustomobject]@{ Name = ('A{0:D2}' -f $_) }
+})
+$eleventhSelection = @(Select-QiehaoProfileRows -Rows $elevenProfileRows `
+    -SearchText 'A11')
+$eleventhSwitchTarget = [pscustomobject]@{ Value = '' }
+$eleventhSwitch = Invoke-QiehaoSwitchRequest `
+    -SelectedProfile ([string]$eleventhSelection[0].Name) `
+    -ActiveProfile 'A01' `
+    -ProcessProvider { [pscustomobject]@{ ReasonCode = 'CODEX_PROCESSES_STOPPED' } } `
+    -SwitchProvider ({
+        param($Name)
+        $eleventhSwitchTarget.Value = [string]$Name
+        [pscustomobject]@{ Result = 'SWITCH_SUCCESS' }
+    }.GetNewClosure())
+Assert-GuiTest -Condition (
+    $elevenProfileRows.Count -eq 11 -and
+    $eleventhSelection.Count -eq 1 -and
+    [string]$eleventhSelection[0].Name -ceq 'A11' -and
+    $eleventhSwitch.IsSuccess -and
+    $eleventhSwitchTarget.Value -ceq 'A11'
+) -Code 'GUI_ELEVENTH_PROFILE_SELECTION_OR_SWITCH_TARGET_FAILED'
 
 $verifyCalls = [pscustomobject]@{ Count=0 }
 $noSelectionVerify = Invoke-QiehaoVerifyRequest -SelectedProfile $null `
@@ -2607,8 +2682,11 @@ $helperSource = [System.IO.File]::ReadAllText($helperModulePath)
 $localizationSource = [System.IO.File]::ReadAllText($localizationModulePath)
 $localizedGuiSource = $guiSource + [Environment]::NewLine +
     $localizationSource
+$addWizardSection = [regex]::Match(
+    $guiSource,
+    '(?s)function Start-QiehaoAddWizard\s*\{.*?(?=\s+function Invoke-QiehaoAddAccount)'
+).Value
 foreach ($requiredBackendCommand in @(
-    'Save-CodexActiveProfile',
     'Switch-CodexAccountProfile',
     'Add-CodexProfile',
     'Remove-CodexProfile',
@@ -2644,11 +2722,27 @@ Assert-GuiTest -Condition (
     $guiSource -match 'DataGridRow' -and
     $guiSource -match 'OriginalSource' -and
     $guiSource -match 'ConfirmDelete' -and
-    $localizedGuiSource -match '我已登录新账号并退出' -and
-    $localizedGuiSource -match '本工具不会自动操作 OAuth' -and
+    $localizedGuiSource -match '我已登录账号并退出' -and
+    $localizedGuiSource -match '登录或切换到要添加的账号' -and
+    $localizedGuiSource -match '不是注销当前登录账号' -and
     $guiSource -match 'liveStatus -ceq ''运行中''' -and
     $guiSource -match 'liveStatus -cne ''已退出'''
 ) -Code 'GUI_ACCOUNT_MANAGEMENT_GUARDS_MISSING'
+Assert-GuiTest -Condition (
+    -not [string]::IsNullOrWhiteSpace($addWizardSection) -and
+    $addWizardSection -notmatch '\bSave-CodexActiveProfile\b' -and
+    $addWizardSection -match '\bTest-CodexActiveIdentity\b' -and
+    $addWizardSection -match 'ACTIVE_IDENTITY_CONFIRMED' -and
+    $addWizardSection -match 'Account.AddCurrentAlreadySaved' -and
+    $addWizardSection -match '\bAdd-CodexProfile\b'
+) -Code 'GUI_ADD_STATE_MACHINE_IDENTITY_HANDLING_FAILED'
+Assert-GuiTest -Condition (
+    $localizationSource -match '先在 Codex 中登录或切换到目标账号' -and
+    $localizationSource -match '退出 Codex 客户端，不是注销当前登录账号' -and
+    $localizationSource -match 'No importable Codex sign-in credentials were detected' -and
+    $localizationSource.IndexOf('未检测到可导入的 Codex 登录凭据') -lt
+        $localizationSource.IndexOf('可能使用系统凭据库')
+) -Code 'GUI_ADD_ACTIONABLE_GUIDANCE_MISSING'
 
 [xml]$xamlDocument = [System.IO.File]::ReadAllText($xamlPath)
 $xamlTextForEncoding = [System.IO.File]::ReadAllText($xamlPath)
@@ -3125,9 +3219,12 @@ finally {
     SwitchRollbackSafe = 'PASS'
     SwitchRollbackFailureCritical = 'PASS'
     IdentityMismatchSafe = 'PASS'
+    AuthErrorsRemainSpecificAndSafe = 'PASS'
     OperationBusyRejected = 'PASS'
     RightClickSelectsRow = 'PASS'
-    ActiveContextSwitchDisabled = 'PASS'
+    ActiveContextSwitchIdentityCheckEnabled = 'PASS'
+    ActiveProfileOutOfSyncMapped = 'PASS'
+    ActiveProfileSyncMapped = 'PASS'
     ActiveDeleteDisabled = 'PASS'
     F2RenameWired = 'PASS'
     RenameSuccess = 'PASS'
@@ -3136,6 +3233,10 @@ finally {
     DeleteNonActiveSuccess = 'PASS'
     DeleteConfirmationRequired = 'PASS'
     AddSuccess = 'PASS'
+    AddStateMachineDoesNotSavePreviousActive = 'PASS'
+    AddCurrentSavedIdentityGuidance = 'PASS'
+    AddRunningGuidance = 'PASS'
+    AuthFileNotFoundGuidanceOrder = 'PASS'
     AddDuplicateNameSafe = 'PASS'
     AddDuplicateIdentitySafe = 'PASS'
     AddRunningGuard = 'PASS'
@@ -3144,6 +3245,8 @@ finally {
     SearchSubstring = 'PASS'
     SearchClearRestoresAll = 'PASS'
     SearchNameOnly = 'PASS'
+    ElevenProfilesSelectable = 'PASS'
+    EleventhProfileSwitchTargetExact = 'PASS'
     BusyDisablesWriteEntrypoints = 'PASS'
     WriteButtonsInitialStateSafe = 'PASS'
     SecondInstanceBlocked = 'PASS'

@@ -374,11 +374,20 @@ function Get-QiehaoSafeResultCode {
         $safeCodes = @(
             'SWITCH_SUCCESS',
             'ALREADY_ACTIVE',
+            'ACTIVE_PROFILE_OUT_OF_SYNC',
+            'ACTIVE_PROFILE_SYNCED',
+            'ACTIVE_PROFILE_SYNC_FAILED',
             'ACTIVE_PROFILE_IDENTITY_MISMATCH',
             'PROFILE_IDENTITY_MISMATCH',
             'PROFILE_IDENTITY_MARKER_MISSING',
             'PROFILE_IDENTITY_MARKER_INVALID',
+            'AUTH_FILE_NOT_FOUND',
+            'AUTH_FILE_EMPTY',
+            'AUTH_FILE_READ_FAILED',
+            'AUTH_JSON_INVALID',
+            'AUTH_SCHEMA_UNEXPECTED',
             'AUTH_IDENTITY_SCHEMA_UNRECOGNIZED',
+            'CODEX_HOME_NOT_FOUND',
             'PROFILE_IDENTITY_SCHEMA_UNRECOGNIZED',
             'CODEX_PROCESS_RUNNING',
             'CODEX_PROCESS_STATE_UNKNOWN',
@@ -441,14 +450,42 @@ function ConvertTo-QiehaoOperationResult {
             $message = '切换成功。'; $success = $true; $refresh = $true
         }
         'ALREADY_ACTIVE' { $message = '已经是当前账号。'; $severity = 'Information' }
+        'ACTIVE_PROFILE_OUT_OF_SYNC' {
+            $message = 'Qiehao 记录的当前账号与 Codex 实际登录账号不同。未修改任何账号数据。'
+        }
+        'ACTIVE_PROFILE_SYNCED' {
+            $message = '已将 Qiehao 当前账号状态同步为 Codex 实际登录的本地账号。'
+            $success = $true; $refresh = $true
+        }
+        'ACTIVE_PROFILE_SYNC_FAILED' {
+            $message = '无法安全同步当前账号状态。未修改任何账号凭据。'
+        }
         'ACTIVE_PROFILE_IDENTITY_MISMATCH' {
             $message = '当前账号身份与本地记录不一致，已阻止操作。'
         }
         'PROFILE_IDENTITY_MISMATCH' { $message = '目标账号身份验证失败。' }
         'PROFILE_IDENTITY_MARKER_MISSING' { $message = '目标账号身份标记缺失。' }
         'PROFILE_IDENTITY_MARKER_INVALID' { $message = '目标账号身份标记异常。' }
+        'AUTH_FILE_NOT_FOUND' {
+            $message = "未检测到可导入的 Codex 登录凭据。`n`n请启动 Codex，使用官方流程完成目标账号登录。确认登录成功后，请完全退出 Codex 客户端（不要注销当前账号），然后返回 Qiehao 再次点击「添加账号」。`n`n如果完成登录并退出后仍然出现此提示，当前 Codex 可能使用系统凭据库存储登录信息，本版本暂不支持直接导入该存储方式。`n`n未修改任何 Codex 登录状态。"
+        }
+        'AUTH_FILE_EMPTY' {
+            $message = 'Codex 登录文件为空，无法安全采集账号。未修改任何 Codex 登录状态。'
+        }
+        'AUTH_FILE_READ_FAILED' {
+            $message = '无法安全读取 Codex 登录文件。请确认 Codex 已完全退出后重试；未修改任何 Codex 登录状态。'
+        }
+        'AUTH_JSON_INVALID' {
+            $message = 'Codex 登录文件不是有效的 JSON，可能已损坏。未修改任何账号数据。'
+        }
+        'AUTH_SCHEMA_UNEXPECTED' {
+            $message = '当前 Codex 登录文件结构暂无法兼容，未修改任何账号数据。'
+        }
         'AUTH_IDENTITY_SCHEMA_UNRECOGNIZED' {
-            $message = '当前 Codex 登录结构无法识别。'
+            $message = '当前 Codex 登录文件缺少可安全验证的 ChatGPT 账号身份，未修改任何账号数据。'
+        }
+        'CODEX_HOME_NOT_FOUND' {
+            $message = '未找到 Codex 本地数据目录，无法采集登录凭据。未修改任何 Codex 登录状态。'
         }
         'PROFILE_IDENTITY_SCHEMA_UNRECOGNIZED' {
             $message = '本地账号身份结构无法识别。'
@@ -474,11 +511,12 @@ function ConvertTo-QiehaoOperationResult {
             $severity = 'Critical'
         }
         'PROFILE_ADD_SUCCESS' {
-            $message = '账号已添加。'; $success = $true; $refresh = $true
+            $message = '已识别当前 Codex 登录账号，凭据已安全保存，账号添加成功。'
+            $success = $true; $refresh = $true
         }
         'PROFILE_NAME_ALREADY_EXISTS' { $message = '该本地账号名称已经存在。' }
         'PROFILE_IDENTITY_ALREADY_EXISTS' {
-            $message = '该账号已经存在于本地账号列表中。'
+            $message = '当前 Codex 登录账号已保存在本地账号列表中，不会重复添加。'
         }
         'PROFILE_IDENTITY_SCAN_INCOMPLETE' {
             $message = '本地账号身份检查不完整，已停止添加。'
@@ -540,7 +578,9 @@ function Invoke-QiehaoOperationProvider {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('SWITCH', 'ADD', 'RENAME', 'DELETE', 'SAVE_ACTIVE')]
+        [ValidateSet(
+            'SWITCH', 'ADD', 'RENAME', 'DELETE', 'SAVE_ACTIVE', 'SYNC_ACTIVE'
+        )]
         [string]$Operation,
 
         [Parameter(Mandatory = $true)]
@@ -563,6 +603,7 @@ function Invoke-QiehaoOperationProvider {
         'RENAME' { 'PROFILE_RENAME_FAILED' }
         'DELETE' { 'PROFILE_REMOVE_FAILED' }
         'SAVE_ACTIVE' { 'ACTIVE_PROFILE_SAVE_FAILED' }
+        'SYNC_ACTIVE' { 'ACTIVE_PROFILE_SYNC_FAILED' }
     }
     $code = $fallback
     try {
@@ -688,12 +729,12 @@ function Get-QiehaoActionState {
     $available = -not $IsWriteOperationBusy
     return [pscustomobject]@{
         Refresh = $true
-        Switch = $available -and $hasSelection -and -not $isActive
+        Switch = $available -and $hasSelection
         Verify = $available -and $hasSelection -and $CodexStatus -ceq '已退出'
         Add = $available
         Rename = $available -and $hasSelection
         Delete = $available -and $hasSelection -and -not $isActive
-        ContextSwitch = $available -and $hasSelection -and -not $isActive
+        ContextSwitch = $available -and $hasSelection
         ContextVerify = $available -and $hasSelection -and
             $CodexStatus -ceq '已退出'
         ContextRename = $available -and $hasSelection
@@ -734,13 +775,6 @@ function Invoke-QiehaoSwitchRequest {
         $mapped | Add-Member -NotePropertyName CoreCalled -NotePropertyValue $false
         return $mapped
     }
-    if (-not [string]::IsNullOrWhiteSpace($ActiveProfile) -and
-        $SelectedProfile.Equals($ActiveProfile, [StringComparison]::OrdinalIgnoreCase)) {
-        $mapped = ConvertTo-QiehaoOperationResult -ResultCode 'ALREADY_ACTIVE'
-        $mapped | Add-Member -NotePropertyName CoreCalled -NotePropertyValue $false
-        return $mapped
-    }
-
     try {
         $status = ConvertTo-QiehaoCodexStatus -ProcessState (& $ProcessProvider)
     }

@@ -61,6 +61,55 @@ Assert-LocalizationTest (
     (Get-QiehaoLocalizedString -Language 'en-US' `
         -Key 'Does.Not.Exist') -ceq '[Missing:Does.Not.Exist]'
 ) 'LOCALIZATION_MISSING_KEY_NOT_SAFE'
+$authOperationKeys = @(
+    'AUTH_FILE_NOT_FOUND',
+    'AUTH_FILE_EMPTY',
+    'AUTH_FILE_READ_FAILED',
+    'AUTH_JSON_INVALID',
+    'AUTH_SCHEMA_UNEXPECTED',
+    'AUTH_IDENTITY_SCHEMA_UNRECOGNIZED',
+    'CODEX_HOME_NOT_FOUND'
+)
+foreach ($authOperationKey in $authOperationKeys) {
+    $zhAuthMessage = Get-QiehaoLocalizedString -Language 'zh-CN' `
+        -Key ('Operation.' + $authOperationKey)
+    $enAuthMessage = Get-QiehaoLocalizedString -Language 'en-US' `
+        -Key ('Operation.' + $authOperationKey)
+    Assert-LocalizationTest (
+        -not [string]::IsNullOrWhiteSpace($zhAuthMessage) -and
+        -not [string]::IsNullOrWhiteSpace($enAuthMessage) -and
+        $zhAuthMessage -notmatch '^\[Missing:' -and
+        $enAuthMessage -notmatch '^\[Missing:' -and
+        $zhAuthMessage -cne '操作失败，未进行不安全的继续操作。' -and
+        $enAuthMessage -cne 'The operation failed. No unsafe continuation was attempted.'
+    ) ('LOCALIZATION_AUTH_ERROR_NOT_SPECIFIC_' + $authOperationKey)
+}
+$zhMissingAuth = Get-QiehaoLocalizedString -Language 'zh-CN' `
+    -Key 'Operation.AUTH_FILE_NOT_FOUND'
+$enMissingAuth = Get-QiehaoLocalizedString -Language 'en-US' `
+    -Key 'Operation.AUTH_FILE_NOT_FOUND'
+Assert-LocalizationTest (
+    $zhMissingAuth.IndexOf('未检测到可导入的 Codex 登录凭据') -eq 0 -and
+    $zhMissingAuth.IndexOf('启动 Codex') -lt
+        $zhMissingAuth.IndexOf('系统凭据库') -and
+    $zhMissingAuth -match '不要注销当前账号' -and
+    $enMissingAuth.IndexOf('No importable Codex sign-in credentials') -eq 0 -and
+    $enMissingAuth.IndexOf('Start Codex') -lt
+        $enMissingAuth.IndexOf('operating system keyring') -and
+    $enMissingAuth -match 'do not sign out'
+) 'LOCALIZATION_AUTH_FILE_NOT_FOUND_GUIDANCE_ORDER_INVALID'
+$zhAddInstructions = Get-QiehaoLocalizedString -Language 'zh-CN' `
+    -Key 'Account.AddInstructions'
+$enAddInstructions = Get-QiehaoLocalizedString -Language 'en-US' `
+    -Key 'Account.AddInstructions'
+Assert-LocalizationTest (
+    $zhAddInstructions -match '登录或切换' -and
+    $zhAddInstructions -match '不是注销当前登录账号' -and
+    $zhAddInstructions -match '每个账号只需添加一次' -and
+    $enAddInstructions -match 'sign in or switch' -and
+    $enAddInstructions -match 'do not sign out' -and
+    $enAddInstructions -match 'only needs to be added once'
+) 'LOCALIZATION_ADD_WORKFLOW_GUIDANCE_INVALID'
 Assert-LocalizationTest (
     (Get-QiehaoLocalizedThemeName -Language 'zh-CN' `
         -ThemeId '04-purple-tech') -ceq '紫蓝星河' -and
@@ -233,6 +282,10 @@ Write-Output 'AllProductionKeysExistEnUs=True'
 Write-Output 'NoDuplicateKeys=True'
 Write-Output 'FormattedStringArgumentsWork=True'
 Write-Output 'MissingKeyFailsSafe=True'
+Write-Output 'AuthErrorMessagesSpecificZhCn=True'
+Write-Output 'AuthErrorMessagesSpecificEnUs=True'
+Write-Output 'AuthFileNotFoundGuidanceOrder=True'
+Write-Output 'AddWorkflowGuidanceZhCnEnUs=True'
 Write-Output 'ThemeDisplayNamesLocalized=True'
 Write-Output 'NewThemeDisplayNamesLocalized=True'
 Write-Output 'DiagnosticCodesRemainUntranslated=True'

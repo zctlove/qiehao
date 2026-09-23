@@ -10,20 +10,17 @@
 
 ## Reporting a Vulnerability（报告安全问题）
 
-请优先使用 GitHub Private Vulnerability Reporting / Security Advisory（GitHub 私密漏洞报告/安全公告）功能提交安全问题。在任何情况下，都不要在公开 Issue（议题）、Discussion（讨论）或 Pull Request（拉取请求）中披露可利用细节或真实凭据。
+公开 GitHub 仓库创建后，请优先使用 GitHub Private Vulnerability Reporting / Security Advisory（GitHub 私密漏洞报告/安全公告）功能提交安全问题（如果该功能可用）。在私密渠道建立前，请不要在公开 Issue（问题）、Discussion（讨论）或 Pull Request（拉取请求）中披露可利用细节。
 
 报告时请提供可复现步骤、影响范围和最小化的假数据示例。请勿提交或粘贴：
 
 - auth.json 或其内容；
 - Access Token / Refresh Token（访问令牌/刷新令牌）；
-- Cookie（浏览器会话凭据）；
 - 真实邮箱或账号 ID；
 - 浏览器 Cookie、LocalStorage、IndexedDB 或会话文件；
 - *.auth.dpapi、*.identity.dpapi 或其他认证备份；
 - 含凭据、个人路径或身份信息的日志；
 - 真实 account/rateLimits/read 响应。
-
-如果私密漏洞报告入口暂时不可用，请先只提交不含漏洞细节和凭据的最小联系请求，等待建立私密沟通渠道；不要为了报告问题而公开敏感材料。
 
 ## Security Boundaries（安全边界）
 
@@ -35,7 +32,5 @@
 - **Process gate（进程门禁）**：认证写操作必须在 Codex 确认完全退出后执行；未知状态必须安全拒绝。
 - **Quota（额度）**：只查询当前活动档案；失败不得触发自动切号，也不得清除旧快照。
 - **Sensitive files（敏感文件）**：运行时档案、状态、日志、备份、认证文件和额度缓存不得进入 Git 或发布包。
-
-Windows DPAPI CurrentUser 主要保护认证快照的静态存储，避免明文落盘。它不能防御已经能够以同一个 Windows 用户身份运行的恶意程序，也不构成“绝对安全”“永远无法解密”或“永远不会被窃取”的保证。
 
 测试报告必须使用虚构数据。若复现确实依赖真实环境，请先去除 Token、账号标识、邮箱、路径和其他可关联信息，再通过私密渠道说明最小必要条件。

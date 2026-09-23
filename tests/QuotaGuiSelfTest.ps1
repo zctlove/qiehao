@@ -577,7 +577,7 @@ try {
         $quotaCellTemplate -notmatch '(?i)\b(?:Min)?Height='
     ) 'QUOTA_CELL_TEMPLATE_NOT_COMPACT_SINGLE_LINE'
     $gitIgnore = [System.IO.File]::ReadAllText($gitIgnorePath)
-    Assert-QuotaTest ($gitIgnore -match '(?m)^state/\*\r?$') `
+    Assert-QuotaTest ($gitIgnore -match '(?m)^state/\*$') `
         'QUOTA_CACHE_NOT_GIT_IGNORED'
 
     [pscustomobject]@{

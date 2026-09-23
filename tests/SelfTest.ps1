@@ -25,6 +25,43 @@ function Test-ByteArrayEqual {
     return $true
 }
 
+function Assert-FakeAuthRejected {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.PSModuleInfo]$Module,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Json,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$ExpectedCodes,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FailureCode
+    )
+
+    $bytes = (New-Object System.Text.UTF8Encoding($false, $true)).GetBytes($Json)
+    $actualCode = $null
+    try {
+        & $Module {
+            param($AuthBytes)
+            $null = Test-CodexAuthBytes -Bytes $AuthBytes
+        } $bytes
+    }
+    catch {
+        $actualCode = [string]$_.Exception.Message
+    }
+    finally {
+        if ($bytes.Length -gt 0) {
+            [Array]::Clear($bytes, 0, $bytes.Length)
+        }
+    }
+
+    if ($ExpectedCodes -cnotcontains $actualCode) {
+        throw $FailureCode
+    }
+}
+
 function Get-FakeTreeStamp {
     param([Parameter(Mandatory = $true)][string]$Root)
     $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
@@ -171,10 +208,13 @@ function Invoke-FakeSwitch {
 
 $fakeJson = @'
 {
-  "auth_mode": "fake",
+  "auth_mode": "chatgpt",
   "OPENAI_API_KEY": null,
   "tokens": {
-    "fake": "THIS_IS_NOT_A_REAL_TOKEN"
+    "id_token": "SELFTEST-ID-LEGACY",
+    "access_token": "SELFTEST-ACCESS-LEGACY",
+    "refresh_token": "SELFTEST-REFRESH-LEGACY",
+    "account_id": "SELFTEST-ACCOUNT-LEGACY"
   },
   "last_refresh": "2000-01-01T00:00:00Z"
 }
@@ -191,11 +231,14 @@ if (-not $workDirectoryFull.StartsWith($requiredPrefix, [StringComparison]::Ordi
 }
 
 $fakeAuthPath = Join-Path -Path $workDirectoryFull -ChildPath 'auth.json'
-$unexpectedAuthPath = Join-Path -Path $workDirectoryFull -ChildPath 'unexpected-auth.json'
+$agentIdentityAuthPath = Join-Path -Path $workDirectoryFull -ChildPath 'agent-identity-auth.json'
+$unknownOptionalAuthPath = Join-Path -Path $workDirectoryFull -ChildPath 'unknown-optional-auth.json'
 $temporaryWritePath = Join-Path -Path $workDirectoryFull -ChildPath 'SelfTest.auth.dpapi'
-$cleanupPaths = @($fakeAuthPath, $unexpectedAuthPath, $temporaryWritePath)
 $plainBytes = $null
-$unexpectedBytes = $null
+$agentIdentityBytes = $null
+$unknownOptionalBytes = $null
+$forwardRoundTripBytes = $null
+$forwardIdentityBytes = $null
 $protectedBytes = $null
 $unprotectedBytes = $null
 $roundTripBytes = $null
@@ -216,19 +259,92 @@ try {
         throw 'SELFTEST_SCHEMA_VALIDATION_FAILED'
     }
 
-    $unexpectedJson = $fakeJson.TrimEnd() -replace '\}\s*$', ',"unexpected":true}'
-    $unexpectedBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($unexpectedJson)
-    [System.IO.File]::WriteAllBytes($unexpectedAuthPath, $unexpectedBytes)
-    $unexpectedRejected = $false
-    try {
-        $null = Test-CodexAuthFile -Path $unexpectedAuthPath
+    $agentIdentityJson = $fakeJson.TrimEnd() -replace '\}\s*$', `
+        ',"agent_identity":"SELFTEST-AGENT-IDENTITY"}'
+    $agentIdentityBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes(
+        $agentIdentityJson
+    )
+    [System.IO.File]::WriteAllBytes($agentIdentityAuthPath, $agentIdentityBytes)
+    $agentIdentityValidation = Test-CodexAuthFile -Path $agentIdentityAuthPath
+    if (-not $agentIdentityValidation.SchemaExpected) {
+        throw 'SELFTEST_AGENT_IDENTITY_FIELD_NOT_ACCEPTED'
     }
-    catch {
-        $unexpectedRejected = $_.Exception.Message -ceq 'AUTH_SCHEMA_UNEXPECTED'
+
+    $unknownOptionalJson = $fakeJson.TrimEnd() -replace '\}\s*$', `
+        ',"future_optional":{"enabled":true,"version":2}}'
+    $unknownOptionalBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes(
+        $unknownOptionalJson
+    )
+    [System.IO.File]::WriteAllBytes($unknownOptionalAuthPath, $unknownOptionalBytes)
+    $unknownOptionalValidation = Test-CodexAuthFile -Path $unknownOptionalAuthPath
+    if (-not $unknownOptionalValidation.SchemaExpected) {
+        throw 'SELFTEST_UNKNOWN_OPTIONAL_FIELD_NOT_ACCEPTED'
     }
-    if (-not $unexpectedRejected) {
-        throw 'SELFTEST_UNEXPECTED_SCHEMA_NOT_REJECTED'
+
+    $forwardProfiles = Join-Path $workDirectoryFull 'forward-compatible-profiles'
+    [System.IO.Directory]::CreateDirectory($forwardProfiles) | Out-Null
+    & $module {
+        param($Bytes, $Profiles)
+        $null = Write-CodexAccountSlotBytes -Name 'ForwardCompatible' `
+            -AuthBytes $Bytes -ProfilesDirectory $Profiles
+    } $unknownOptionalBytes $forwardProfiles
+    $forwardRoundTripBytes = & $module {
+        param($Profiles)
+        Read-CodexAccountSlotBytes -Name 'ForwardCompatible' `
+            -ProfilesDirectory $Profiles
+    } $forwardProfiles
+    $forwardIdentityBytes = & $module {
+        param($Bytes)
+        Get-CodexAuthIdentityBytes -Bytes $Bytes
+    } $unknownOptionalBytes
+    if (-not (Test-ByteArrayEqual -Left $unknownOptionalBytes `
+            -Right $forwardRoundTripBytes) -or
+        $forwardIdentityBytes.Length -le 0) {
+        throw 'SELFTEST_FORWARD_COMPATIBLE_BYTES_NOT_PRESERVED'
     }
+
+    Assert-FakeAuthRejected -Module $module -Json '{BROKEN JSON' `
+        -ExpectedCodes @('AUTH_JSON_INVALID') `
+        -FailureCode 'SELFTEST_DAMAGED_JSON_NOT_REJECTED'
+    Assert-FakeAuthRejected -Module $module -Json '[]' `
+        -ExpectedCodes @('AUTH_SCHEMA_UNEXPECTED') `
+        -FailureCode 'SELFTEST_NON_OBJECT_ROOT_NOT_REJECTED'
+    Assert-FakeAuthRejected -Module $module `
+        -Json '{"tokens":{"account_id":"SELFTEST"}}' `
+        -ExpectedCodes @('AUTH_SCHEMA_UNEXPECTED') `
+        -FailureCode 'SELFTEST_MISSING_AUTH_MODE_NOT_REJECTED'
+    Assert-FakeAuthRejected -Module $module `
+        -Json '{"auth_mode":"api_key","tokens":{"account_id":"SELFTEST"}}' `
+        -ExpectedCodes @('AUTH_IDENTITY_SCHEMA_UNRECOGNIZED') `
+        -FailureCode 'SELFTEST_ILLEGAL_AUTH_MODE_NOT_REJECTED'
+    Assert-FakeAuthRejected -Module $module `
+        -Json '{"auth_mode":"chatgpt"}' `
+        -ExpectedCodes @('AUTH_SCHEMA_UNEXPECTED') `
+        -FailureCode 'SELFTEST_MISSING_TOKENS_NOT_REJECTED'
+    Assert-FakeAuthRejected -Module $module `
+        -Json '{"auth_mode":"chatgpt","tokens":"invalid"}' `
+        -ExpectedCodes @('AUTH_IDENTITY_SCHEMA_UNRECOGNIZED') `
+        -FailureCode 'SELFTEST_NON_OBJECT_TOKENS_NOT_REJECTED'
+    Assert-FakeAuthRejected -Module $module `
+        -Json '{"auth_mode":"chatgpt","tokens":{}}' `
+        -ExpectedCodes @('AUTH_IDENTITY_SCHEMA_UNRECOGNIZED') `
+        -FailureCode 'SELFTEST_MISSING_ACCOUNT_ID_NOT_REJECTED'
+    Assert-FakeAuthRejected -Module $module `
+        -Json '{"auth_mode":"chatgpt","tokens":{"account_id":123}}' `
+        -ExpectedCodes @('AUTH_IDENTITY_SCHEMA_UNRECOGNIZED') `
+        -FailureCode 'SELFTEST_NON_STRING_ACCOUNT_ID_NOT_REJECTED'
+    Assert-FakeAuthRejected -Module $module `
+        -Json '{"auth_mode":"chatgpt","tokens":{"account_id":"   "}}' `
+        -ExpectedCodes @('AUTH_IDENTITY_SCHEMA_UNRECOGNIZED') `
+        -FailureCode 'SELFTEST_EMPTY_ACCOUNT_ID_NOT_REJECTED'
+    Assert-FakeAuthRejected -Module $module `
+        -Json '{"auth_mode":"chatgpt","auth_mode":"chatgpt","tokens":{"account_id":"SELFTEST"}}' `
+        -ExpectedCodes @('AUTH_SCHEMA_UNEXPECTED') `
+        -FailureCode 'SELFTEST_DUPLICATE_AUTH_MODE_NOT_REJECTED'
+    Assert-FakeAuthRejected -Module $module `
+        -Json '{"auth_mode":"chatgpt","tokens":{"account_id":"SELFTEST-A","account_id":"SELFTEST-B"}}' `
+        -ExpectedCodes @('AUTH_IDENTITY_SCHEMA_UNRECOGNIZED') `
+        -FailureCode 'SELFTEST_DUPLICATE_ACCOUNT_ID_NOT_REJECTED'
 
     $protectedBytes = Protect-CodexAuthBytes -Data $plainBytes
     $unprotectedBytes = Unprotect-CodexAuthBytes -Data $protectedBytes
@@ -396,7 +512,9 @@ try {
         -CredentialRevision 'B'
     $fakeC = New-FakeAuthBytes -Identity 'SELFTEST-ACCOUNT-C' `
         -CredentialRevision 'C'
-    $invalidJson = '{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{},"last_refresh":"2000-01-01T00:00:00Z","unexpected":true}'
+    $fakeX = New-FakeAuthBytes -Identity 'SELFTEST-ACCOUNT-X' `
+        -CredentialRevision 'X-UNKNOWN'
+    $invalidJson = '{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"last_refresh":"2000-01-01T00:00:00Z"}'
     $fakeInvalidB = (New-Object System.Text.UTF8Encoding($false)).GetBytes($invalidJson)
     $invalidJson = $null
 
@@ -558,6 +676,106 @@ try {
     catch { $code7 = $_.Exception.Message }
     if ($code7 -cne 'ALREADY_ACTIVE') {
         throw 'SELFTEST_ALREADY_ACTIVE_NOT_REJECTED'
+    }
+
+    # 7b: the Active label cannot short-circuit identity verification. If the
+    # recorded Active profile is A while Codex is signed in as saved profile B,
+    # switching to A reports an explicit out-of-sync state without any write.
+    $fixture7b = New-SwitchFixture `
+        -Root (Join-Path $workDirectoryFull 'active-out-of-sync') `
+        -Module $module -ActiveBytes $fakeAInitial -TargetBytes $fakeB
+    [System.IO.File]::WriteAllBytes($fixture7b.AuthPath, $fakeB)
+    $fixture7bProfilesBefore = Get-FakeTreeStamp -Root $fixture7b.Profiles
+    $fixture7bStateBefore = Get-FakeTreeStamp -Root $fixture7b.State
+    $fixture7bAuthBefore = [System.IO.File]::ReadAllBytes($fixture7b.AuthPath)
+    $code7b = $null
+    try {
+        $null = Invoke-FakeSwitch -Module $module -Fixture $fixture7b `
+            -Target 'A'
+    }
+    catch { $code7b = [string]$_.Exception.Message }
+    $fixture7bAuthAfter = [System.IO.File]::ReadAllBytes($fixture7b.AuthPath)
+    try {
+        if ($code7b -cne 'ACTIVE_PROFILE_OUT_OF_SYNC' -or
+            (Get-FakeTreeStamp -Root $fixture7b.Profiles) -cne
+                $fixture7bProfilesBefore -or
+            (Get-FakeTreeStamp -Root $fixture7b.State) -cne
+                $fixture7bStateBefore -or
+            -not (Test-ByteArrayEqual -Left $fixture7bAuthBefore `
+                -Right $fixture7bAuthAfter)) {
+            throw 'SELFTEST_ACTIVE_OUT_OF_SYNC_NOT_SAFE'
+        }
+    }
+    finally {
+        [Array]::Clear($fixture7bAuthBefore, 0, $fixture7bAuthBefore.Length)
+        [Array]::Clear($fixture7bAuthAfter, 0, $fixture7bAuthAfter.Length)
+    }
+
+    # 7c: explicit recovery may update only active-profile.json after the
+    # current identity is proven to match a complete saved profile.
+    $syncProfilesBefore = Get-FakeTreeStamp -Root $fixture7b.Profiles
+    $syncAuthBefore = [System.IO.File]::ReadAllBytes($fixture7b.AuthPath)
+    $syncResult = & $module {
+        param($Fixture)
+        Invoke-SyncCodexActiveProfile -CodexHome $Fixture.CodexHome `
+            -ProfilesDirectory $Fixture.Profiles `
+            -StateDirectory $Fixture.State `
+            -ProcessData @() -UseProvidedProcessData
+    } $fixture7b
+    $syncState = & $module {
+        param($State)
+        Read-ActiveProfileState -StateDirectory $State
+    } $fixture7b.State
+    $syncAuthAfter = [System.IO.File]::ReadAllBytes($fixture7b.AuthPath)
+    try {
+        if ($syncResult.Result -cne 'ACTIVE_PROFILE_SYNCED' -or
+            $syncResult.ActiveProfile -cne 'B' -or
+            $syncState.ActiveProfile -cne 'B' -or
+            (Get-FakeTreeStamp -Root $fixture7b.Profiles) -cne
+                $syncProfilesBefore -or
+            -not (Test-ByteArrayEqual -Left $syncAuthBefore `
+                -Right $syncAuthAfter)) {
+            throw 'SELFTEST_ACTIVE_SYNC_MODIFIED_CREDENTIALS'
+        }
+    }
+    finally {
+        [Array]::Clear($syncAuthBefore, 0, $syncAuthBefore.Length)
+        [Array]::Clear($syncAuthAfter, 0, $syncAuthAfter.Length)
+    }
+
+    # 7d: an unknown external identity remains fail-closed for both ordinary
+    # switching and the explicit state-only recovery operation.
+    $fixture7d = New-SwitchFixture `
+        -Root (Join-Path $workDirectoryFull 'active-unknown-identity') `
+        -Module $module -ActiveBytes $fakeAInitial -TargetBytes $fakeB
+    [System.IO.File]::WriteAllBytes($fixture7d.AuthPath, $fakeX)
+    $fixture7dProfilesBefore = Get-FakeTreeStamp -Root $fixture7d.Profiles
+    $fixture7dStateBefore = Get-FakeTreeStamp -Root $fixture7d.State
+    $unknownSwitchCode = $null
+    $unknownSyncCode = $null
+    try {
+        $null = Invoke-FakeSwitch -Module $module -Fixture $fixture7d `
+            -Target 'B'
+    }
+    catch { $unknownSwitchCode = [string]$_.Exception.Message }
+    try {
+        & $module {
+            param($Fixture)
+            $null = Invoke-SyncCodexActiveProfile `
+                -CodexHome $Fixture.CodexHome `
+                -ProfilesDirectory $Fixture.Profiles `
+                -StateDirectory $Fixture.State `
+                -ProcessData @() -UseProvidedProcessData
+        } $fixture7d
+    }
+    catch { $unknownSyncCode = [string]$_.Exception.Message }
+    if ($unknownSwitchCode -cne 'ACTIVE_PROFILE_IDENTITY_MISMATCH' -or
+        $unknownSyncCode -cne 'ACTIVE_PROFILE_IDENTITY_MISMATCH' -or
+        (Get-FakeTreeStamp -Root $fixture7d.Profiles) -cne
+            $fixture7dProfilesBefore -or
+        (Get-FakeTreeStamp -Root $fixture7d.State) -cne
+            $fixture7dStateBefore) {
+        throw 'SELFTEST_UNKNOWN_IDENTITY_NOT_FAIL_CLOSED'
     }
 
     # 8: browser-owned extension host must not block an otherwise valid switch.
@@ -875,11 +1093,37 @@ try {
         throw 'SELFTEST_RENAMED_MARKER_NOT_ASSOCIATED'
     }
 
+    # A missing file-backed credential may mean Codex is using the OS keyring.
+    # Qiehao must stop safely without creating any profile artifacts or state.
+    $missingAuthRoot = Join-Path $workDirectoryFull 'missing-auth-file'
+    $missingAuthHome = Join-Path $missingAuthRoot 'codex-home'
+    $missingAuthProfiles = Join-Path $missingAuthRoot 'profiles'
+    $missingAuthState = Join-Path $missingAuthRoot 'state'
+    [System.IO.Directory]::CreateDirectory($missingAuthHome) | Out-Null
+    [System.IO.Directory]::CreateDirectory($missingAuthProfiles) | Out-Null
+    [System.IO.Directory]::CreateDirectory($missingAuthState) | Out-Null
+    $missingAuthCode = $null
+    try {
+        & $module {
+            param($Home, $Profiles, $State)
+            $null = Invoke-AddCodexProfile -Name 'MissingAuth' -CodexHome $Home `
+                -ProfilesDirectory $Profiles -StateDirectory $State `
+                -ProcessData @() -UseProvidedProcessData
+        } $missingAuthHome $missingAuthProfiles $missingAuthState
+    }
+    catch { $missingAuthCode = [string]$_.Exception.Message }
+    if ($missingAuthCode -cne 'AUTH_FILE_NOT_FOUND' -or
+        @(Get-ChildItem -LiteralPath $missingAuthProfiles -Force).Count -ne 0 -or
+        @(Get-ChildItem -LiteralPath $missingAuthState -Force).Count -ne 0) {
+        throw 'SELFTEST_MISSING_AUTH_FILE_NOT_FAIL_CLOSED'
+    }
+
     # CRUD 1 + 4: add an arbitrary third identity C. This is not a special
     # Plus/Team code path and commits active state only after read-back checks.
     $fixtureAddC = New-SwitchFixture `
         -Root (Join-Path $workDirectoryFull 'crud-add-c') -Module $module `
         -ActiveBytes $fakeAInitial -TargetBytes $fakeB
+    $existingProfilesBeforeAddC = Get-FakeTreeStamp -Root $fixtureAddC.Profiles
     [System.IO.File]::WriteAllBytes($fixtureAddC.AuthPath, $fakeC)
     $addCResult = & $module {
         param($Fixture)
@@ -902,6 +1146,30 @@ try {
             -not [System.IO.File]::Exists((Join-Path $fixtureAddC.Profiles 'C.identity.dpapi')) -or
             -not [System.IO.File]::Exists((Join-Path $fixtureAddC.Profiles 'C.meta.json'))) {
             throw 'SELFTEST_ADD_THIRD_PROFILE_FAILED'
+        }
+        $existingProfilesAfterAddC = @(
+            Get-ChildItem -LiteralPath $fixtureAddC.Profiles -File | Where-Object {
+                $_.BaseName -notlike 'C.*' -and
+                $_.Name -notlike 'C.auth.dpapi' -and
+                $_.Name -notlike 'C.identity.dpapi' -and
+                $_.Name -notlike 'C.meta.json'
+            }
+        )
+        $existingProfilesCopy = Join-Path $workDirectoryFull 'crud-add-c-existing-copy'
+        [System.IO.Directory]::CreateDirectory($existingProfilesCopy) | Out-Null
+        foreach ($existingFile in $existingProfilesAfterAddC) {
+            [System.IO.File]::Copy(
+                $existingFile.FullName,
+                (Join-Path $existingProfilesCopy $existingFile.Name)
+            )
+            [System.IO.File]::SetLastWriteTimeUtc(
+                (Join-Path $existingProfilesCopy $existingFile.Name),
+                $existingFile.LastWriteTimeUtc
+            )
+        }
+        if ((Get-FakeTreeStamp -Root $existingProfilesCopy) -cne
+            $existingProfilesBeforeAddC) {
+            throw 'SELFTEST_ADD_NEW_IDENTITY_MODIFIED_EXISTING_PROFILES'
         }
     }
     finally {
@@ -927,20 +1195,26 @@ try {
         throw 'SELFTEST_DUPLICATE_PROFILE_NAME_NOT_REJECTED'
     }
 
-    # CRUD 3: a different display name cannot duplicate A's account/workspace.
+    # CRUD 3: when active state remains A but Codex is currently signed in as
+    # the already-saved B identity, ADD rejects the duplicate without changing
+    # A, B, or active state.
     $fixtureAddDuplicateIdentity = New-SwitchFixture `
         -Root (Join-Path $workDirectoryFull 'crud-add-duplicate-identity') `
         -Module $module -ActiveBytes $fakeAInitial -TargetBytes $fakeB
     [System.IO.File]::WriteAllBytes(
         $fixtureAddDuplicateIdentity.AuthPath,
-        $fakeARefreshed
+        $fakeB
     )
+    $duplicateIdentityTreeBefore = Get-FakeTreeStamp `
+        -Root $fixtureAddDuplicateIdentity.Profiles
+    $duplicateIdentityStateBefore = Get-FakeTreeStamp `
+        -Root $fixtureAddDuplicateIdentity.State
     $duplicateIdentityCode = $null
     $duplicateIdentityProfile = $null
     try {
         & $module {
             param($Fixture)
-            $null = Invoke-AddCodexProfile -Name 'AnotherA' `
+            $null = Invoke-AddCodexProfile -Name 'AnotherB' `
                 -CodexHome $Fixture.CodexHome `
                 -ProfilesDirectory $Fixture.Profiles -StateDirectory $Fixture.State `
                 -ProcessData @() -UseProvidedProcessData
@@ -951,8 +1225,12 @@ try {
         $duplicateIdentityProfile = [string]$_.Exception.Data['ExistingProfile']
     }
     if ($duplicateIdentityCode -cne 'PROFILE_IDENTITY_ALREADY_EXISTS' -or
-        $duplicateIdentityProfile -cne 'A' -or
-        [System.IO.File]::Exists((Join-Path $fixtureAddDuplicateIdentity.Profiles 'AnotherA.auth.dpapi'))) {
+        $duplicateIdentityProfile -cne 'B' -or
+        [System.IO.File]::Exists((Join-Path $fixtureAddDuplicateIdentity.Profiles 'AnotherB.auth.dpapi')) -or
+        (Get-FakeTreeStamp -Root $fixtureAddDuplicateIdentity.Profiles) -cne
+            $duplicateIdentityTreeBefore -or
+        (Get-FakeTreeStamp -Root $fixtureAddDuplicateIdentity.State) -cne
+            $duplicateIdentityStateBefore) {
         throw 'SELFTEST_DUPLICATE_IDENTITY_NOT_REJECTED'
     }
 
@@ -1029,7 +1307,8 @@ try {
         throw 'SELFTEST_MISSING_PROFILE_REMOVE_NOT_REJECTED'
     }
 
-    # Partial delete reports file types only and never claims full success.
+    # A quarantine move failure restores every formal Profile artifact and
+    # reports a rolled-back delete rather than leaving a half-deleted slot.
     $fixtureRemovePartial = New-SwitchFixture `
         -Root (Join-Path $workDirectoryFull 'crud-remove-partial') -Module $module `
         -ActiveBytes $fakeAInitial -TargetBytes $fakeB
@@ -1039,9 +1318,11 @@ try {
             -StateDirectory $Fixture.State -ConfirmDelete `
             -SimulateDeleteFailureType 'IdentityMarker'
     } $fixtureRemovePartial
-    if ($removePartialResult.Result -cne 'PROFILE_REMOVE_PARTIAL_FAILURE' -or
+    if ($removePartialResult.Result -cne 'PROFILE_REMOVE_FAILED_ROLLED_BACK' -or
         -not ($removePartialResult.FailedFileTypes -ccontains 'IdentityMarker') -or
-        -not [System.IO.File]::Exists((Join-Path $fixtureRemovePartial.Profiles 'B.identity.dpapi'))) {
+        -not [System.IO.File]::Exists((Join-Path $fixtureRemovePartial.Profiles 'B.auth.dpapi')) -or
+        -not [System.IO.File]::Exists((Join-Path $fixtureRemovePartial.Profiles 'B.identity.dpapi')) -or
+        -not [System.IO.File]::Exists((Join-Path $fixtureRemovePartial.Profiles 'B.meta.json'))) {
         throw 'SELFTEST_PARTIAL_REMOVE_NOT_REPORTED'
     }
 
@@ -1255,7 +1536,15 @@ try {
     [pscustomobject]@{
         Result = 'PASS'
         AuthSchemaValidation = 'PASS'
-        UnexpectedSchemaRejected = 'PASS'
+        AgentIdentityTopLevelFieldAccepted = 'PASS'
+        UnknownOptionalTopLevelFieldAccepted = 'PASS'
+        ForwardCompatibleBytesPreserved = 'PASS'
+        InvalidJsonRejected = 'PASS'
+        NonObjectRootRejected = 'PASS'
+        MissingOrInvalidAuthModeRejected = 'PASS'
+        MissingOrInvalidTokensRejected = 'PASS'
+        MissingInvalidOrEmptyAccountIdRejected = 'PASS'
+        DuplicateCriticalFieldsRejected = 'PASS'
         DpapiRoundTrip = 'PASS'
         AtomicProfileRoundTrip = 'PASS'
         DefaultOverwriteRejected = 'PASS'
@@ -1276,6 +1565,10 @@ try {
         PostReplaceFailureRollsBack = 'PASS'
         MissingActiveRejected = 'PASS'
         AlreadyActiveRejected = 'PASS'
+        ActiveProfileOutOfSyncDetected = 'PASS'
+        SavedIdentityActiveStateSynchronized = 'PASS'
+        ActiveStateSyncPreservesCredentialArtifacts = 'PASS'
+        UnknownIdentitySyncRejected = 'PASS'
         BrowserExtensionAllowsSwitch = 'PASS'
         CodexProcessBlocksSwitch = 'PASS'
         InitActiveMismatchRejected = 'PASS'
@@ -1291,9 +1584,12 @@ try {
         SaveActiveIdentityDriftRejected = 'PASS'
         RenamedProfileMarkerAssociated = 'PASS'
         WebSessionIsolation = 'PASS'
+        MissingAuthFileFailsClosed = 'PASS'
         AddThirdProfile = 'PASS'
+        AddDifferentIdentityPreservesExistingProfiles = 'PASS'
         DuplicateProfileNameRejected = 'PASS'
         DuplicateIdentityRejected = 'PASS'
+        DuplicateSavedIdentityPreservesProfilesAndState = 'PASS'
         AddNewIdentity = 'PASS'
         RemoveNonActiveProfile = 'PASS'
         RemoveActiveProfileRejected = 'PASS'
@@ -1318,7 +1614,10 @@ finally {
 
     foreach ($buffer in @(
         $plainBytes,
-        $unexpectedBytes,
+        $agentIdentityBytes,
+        $unknownOptionalBytes,
+        $forwardRoundTripBytes,
+        $forwardIdentityBytes,
         $protectedBytes,
         $unprotectedBytes,
         $roundTripBytes,
@@ -1326,6 +1625,7 @@ finally {
         $fakeARefreshed,
         $fakeB,
         $fakeC,
+        $fakeX,
         $fakeInvalidB,
         $fakeIdentitySchemaUnknown
     )) {
@@ -1334,5 +1634,6 @@ finally {
         }
     }
     $fakeJson = $null
-    $unexpectedJson = $null
+    $agentIdentityJson = $null
+    $unknownOptionalJson = $null
 }

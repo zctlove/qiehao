@@ -161,15 +161,22 @@ Quota refresh and account switching are separate operations. My tradeoff is simp
 
 PowerShell 7 is used only for compatibility and development testing. Regular users do not need to install it to run Qiehao. The current version supports Windows only, not macOS.
 
-## Starting Qiehao
+## Download, install, and start
 
-For normal use, double-click this file in the repository or fully extracted ZIP directory:
+Regular users should download the latest Qiehao Release ZIP from GitHub Releases:
+
+1. Download the latest Release ZIP.
+2. Fully extract the ZIP to a local directory where your Windows user has write access.
+3. Do not run Qiehao directly inside the ZIP archive.
+4. Double-click this file in the repository or fully extracted ZIP root directory:
 
 ~~~text
-Start-Qiehao.bat
+Start-Qiehao.cmd
 ~~~
 
-`Start-Qiehao.cmd` remains available. You can also start Qiehao manually from the root directory:
+Qiehao does not require administrator privileges, Node.js, Python, Visual Studio, or third-party PowerShell modules.
+
+Regular users do not need to run the following PowerShell command. It is only for advanced troubleshooting:
 
 ~~~powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File ".\gui\QiehaoGui.ps1"
@@ -179,15 +186,34 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File ".\gui\QiehaoGui.ps
 
 ## Usage
 
-1. Start Qiehao.
-2. Sign in through the official Codex login flow.
-3. Follow the UI to add a local profile.
-4. When you want to switch, select the target profile and click the switch button.
-5. Exit Codex normally through its official menu or system tray when prompted.
-6. Qiehao performs the safe switch only after it detects that Codex has completely exited.
-7. Start Codex again manually after the switch completes.
+To add the first account:
+
+1. Sign in to the account you want to save through the official Codex flow.
+2. After sign-in succeeds, completely exit the Codex client.
+3. Open Qiehao and click Add Account.
+4. Qiehao validates and securely saves the current file-based Codex credentials.
+
+To add a second or later account:
+
+1. Sign in or switch to the new target account in Codex.
+2. Confirm that sign-in succeeded, then completely exit the Codex client.
+3. Return to Qiehao and click Add Account.
+4. Qiehao saves the new account without writing its credentials into the previous active profile.
+
+“Exit Codex” means closing the Codex client, including any process still running in the system tray. It does not mean signing out of the account. Each account only needs to be added once; later switching between saved accounts does not require repeating OAuth sign-in.
 
 Closing the main Codex window is not necessarily the same as exiting it; Codex may still be running in the system tray. Qiehao does not treat force-killing Codex in Task Manager as the normal workflow.
+
+## Updating
+
+Regular users should update with the latest GitHub Releases ZIP:
+
+1. Completely exit Qiehao.
+2. Download the new Release ZIP.
+3. Fully extract its contents over the existing Qiehao directory, replacing only program files with the same names. Do not delete the whole old directory.
+4. Start the updated version with `Start-Qiehao.cmd`.
+
+Advanced Git users should first run `git status --short`. If there are no local source changes, run `git pull --ff-only`. The `--ff-only` option prevents Git from creating an automatic merge commit when histories have diverged.
 
 ## Themes and languages
 
@@ -206,13 +232,15 @@ Themes change only the visual presentation. They do not change account data, aut
 ## Privacy
 
 - **Local-first**: profiles, state, and quota cache stay in the local runtime directory.
+- Account data is protected by Windows DPAPI CurrentUser and bound to the current Windows user and local protection environment.
+- Do not copy the `profiles/` directory directly to another computer and assume it can be decrypted there.
 - **Browser/PWA untouched**: browser session data is neither read nor modified.
 - No telemetry or analytics are included.
 - This project does not operate a relay server.
 - Inactive accounts are not queried for quota.
 - `profiles/`, `state/`, `logs/`, `backup/`, `auth.json`, DPAPI containers, and quota cache must never be committed to Git.
 
-Protect your Windows account, Codex login, and local computer. Never paste authentication files, tokens, email addresses, account IDs, cookies, or logs containing credentials into a public issue.
+Protect your Windows account, Codex login, and local computer. Never upload `profiles/`, `state/`, `logs/`, `backup/`, or `auth.json` to GitHub, cloud drives, chat tools, or public issues. Never paste tokens, email addresses, account IDs, cookies, or logs containing credentials into a public issue.
 
 ## Command-line entry point
 
@@ -232,7 +260,11 @@ Commands that save, add, rename, delete, or switch profiles have additional proc
 The project is tested under both Windows PowerShell 5.1 and PowerShell 7. Core self-tests in `tests/` include:
 
 - `SelfTest.ps1`
+- `MultiAccountStressSelfTest.ps1`
 - `GuiSelfTest.ps1`
+- `LongTermSafetyAuditSelfTest.ps1`
+- `ProfileDeleteTransactionSelfTest.ps1`
+- `CleanInstallSelfTest.ps1`
 - `VisualPolishSelfTest.ps1`
 - `AccountGridLayoutSelfTest.ps1`
 - `LocalizationSelfTest.ps1`

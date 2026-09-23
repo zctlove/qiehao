@@ -5,7 +5,7 @@ Qiehao v1.0.0
 使用：
 
 1. 请先把 ZIP 完整解压，不要直接在压缩包里运行。
-2. 双击 Start-Qiehao.bat。
+2. 双击 Start-Qiehao.cmd。
 3. 第一次添加新账号，仍需使用 Codex 官方 OAuth 手动登录。
 4. 切换账号时，按照提示正常退出 Codex。
 5. Qiehao 不自动切号、不做账号池、不后台轮询多个账号、不读取浏览器 Cookie。
@@ -23,7 +23,7 @@ First things first: Qiehao is not a reverse proxy.
 Usage:
 
 1. Extract the ZIP completely before running it.
-2. Double-click Start-Qiehao.bat.
+2. Double-click Start-Qiehao.cmd.
 3. New accounts must still be signed in manually through the official Codex OAuth flow.
 4. When switching, exit Codex normally when prompted.
 5. Qiehao does not automatically rotate accounts, maintain an account pool, poll multiple accounts in the background, or read browser cookies.
