@@ -258,6 +258,10 @@ function ConvertTo-QiehaoVerifyMessage {
     )
 
     switch ($ResultCode) {
+        'PROFILE_ACCOUNT_VERIFIED' { return '本地档案：正常；Codex 登录状态：已验证' }
+        'PROFILE_ACCOUNT_UNVERIFIED' { return '本地档案：正常；Codex 登录状态：暂未验证' }
+        'PROFILE_ACCOUNT_REAUTH_REQUIRED' { return '本地档案：正常；Codex 登录状态：需要重新登录' }
+        'PROFILE_INTEGRITY_ONLY_SUCCESS' { return '本地档案：正常；非当前账号，仅验证本地完整性' }
         'PROFILE_VERIFY_SUCCESS' { return '账号资料完整，且与当前 Codex 身份一致' }
         'PROFILE_VERIFY_IDENTITY_MISMATCH' {
             return '账号资料完整，但与当前 Codex 登录身份或工作区不一致'
@@ -359,12 +363,12 @@ function Invoke-QiehaoVerifyRequest {
         }
     }
 
-    $success = $resultCode -ceq 'PROFILE_VERIFY_SUCCESS'
+    $success = $resultCode -in @('PROFILE_VERIFY_SUCCESS','PROFILE_ACCOUNT_VERIFIED')
     $output = [pscustomobject]@{
         CoreCalled = $true
         ResultCode = $resultCode
         Message = ConvertTo-QiehaoVerifyMessage -ResultCode $resultCode
-        VerificationStatus = if ($success) { '已验证' } else { '验证失败' }
+        VerificationStatus = if ($success) { '已验证' } elseif ($resultCode -in @('PROFILE_ACCOUNT_UNVERIFIED','PROFILE_INTEGRITY_ONLY_SUCCESS')) { '未验证' } else { '验证失败' }
     }
     foreach ($propertyName in @(
         'ProfileIntegrity',
@@ -372,7 +376,7 @@ function Invoke-QiehaoVerifyRequest {
         'CurrentWorkspaceClass',
         'WorkspaceContextStatus',
         'CredentialSource',
-        'CredentialSourceConfidence'
+        'CredentialSourceConfidence', 'VerificationState'
     )) {
         if ($null -ne $result -and
             $null -ne $result.PSObject.Properties[$propertyName]) {
@@ -489,6 +493,21 @@ function ConvertTo-QiehaoOperationResult {
     $refresh = $false
 
     switch ($ResultCode) {
+        'SWITCH_VERIFIED_SUCCESS' {
+            $message = '切换成功。'; $success = $true; $refresh = $true
+        }
+        'SWITCH_AUTH_UNVERIFIED_TRANSIENT' { $message = '本地账号已切换，登录状态暂未验证。可以启动 Codex 使用；稍后可点击“验证”。'; $refresh = $true; $severity = 'Information' }
+        'SWITCH_REAUTH_REQUIRED' { $message = '目标账号的本地登录状态已失效，需要重新登录该账号。'; $refresh = $true }
+        'SWITCH_POST_VERIFY_IDENTITY_MISMATCH' { $message = '账号身份验证不一致，已停止切换。'; $refresh = $true }
+        'DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED' { $message = '安全恢复未完成，请勿启动 Codex，需要人工检查。'; $severity = 'Critical'; $refresh = $true }
+        'ADD_VERIFIED_SUCCESS' { $message = '已识别当前 Codex 登录账号，凭据已安全保存，账号添加成功。'; $success = $true; $refresh = $true }
+        'ADD_SUCCESS_UNVERIFIED' { $message = '本地账号已安全保存，登录状态暂未验证。'; $success = $true; $refresh = $true }
+        'ADD_REAUTH_REQUIRED' { $message = '登录状态已失效，请通过官方流程重新登录。' }
+        'ACCOUNT_LOGIN_MANUAL_FALLBACK_REQUIRED' { $message = '当前 Codex 版本暂不支持直接登录，请先在 Codex 中完成登录并退出，然后确认手动添加。' }
+        'ACCOUNT_LOGIN_CANCELLED' { $message = '添加已取消，未创建账号档案。'; $severity = 'Information' }
+        'ACCOUNT_LOGIN_FAILED' { $message = '官方登录未完成，未创建账号档案。请重试。' }
+        'ACCOUNT_LOGIN_TIMEOUT' { $message = '等待官方登录超时，请重新添加账号。' }
+        'ACCOUNT_LOGIN_IDENTITY_MISMATCH' { $message = '登录身份验证不一致，未创建账号档案。' }
         'SWITCH_SUCCESS' {
             $message = '切换成功。'; $success = $true; $refresh = $true
         }
@@ -636,6 +655,8 @@ function ConvertTo-QiehaoOperationResult {
         Severity = $severity
         IsSuccess = $success
         RefreshRequired = $refresh
+        LocalCommitted = ($ResultCode -in @('SWITCH_VERIFIED_SUCCESS','SWITCH_AUTH_UNVERIFIED_TRANSIENT','SWITCH_REAUTH_REQUIRED'))
+        VerificationState = $(switch ($ResultCode) { 'SWITCH_VERIFIED_SUCCESS' {'Verified'} 'SWITCH_AUTH_UNVERIFIED_TRANSIENT' {'Unverified'} default {''} })
     }
 }
 
@@ -703,9 +724,10 @@ function Invoke-QiehaoSwitchUiCompletion {
         [scriptblock]$BusyProvider
     )
 
-    $backendSucceeded = (
+    $transientCommitted = ([string]$Result.ResultCode -ceq 'SWITCH_AUTH_UNVERIFIED_TRANSIENT')
+    $backendSucceeded = $transientCommitted -or (
         [bool]$Result.IsSuccess -and
-        [string]$Result.ResultCode -ceq 'SWITCH_SUCCESS'
+        [string]$Result.ResultCode -in @('SWITCH_SUCCESS','SWITCH_VERIFIED_SUCCESS')
     )
     if (-not $backendSucceeded) {
         try { $null = & $BusyProvider $false }
@@ -726,7 +748,10 @@ function Invoke-QiehaoSwitchUiCompletion {
 
     try { $null = & $BusyProvider $false }
     catch { }
-    $state = if ($refreshSucceeded) {
+    $state = if ($transientCommitted) {
+        'SwitchUnverified'
+    }
+    elseif ($refreshSucceeded) {
         'SwitchSucceeded'
     }
     else {
@@ -793,7 +818,7 @@ function Get-QiehaoActionState {
         $SelectedProfile.Equals($ActiveProfile, [StringComparison]::OrdinalIgnoreCase)
     $available = -not $IsWriteOperationBusy
     return [pscustomobject]@{
-        Refresh = $true
+        Refresh = $available
         Switch = $available -and $hasSelection
         Verify = $available -and $hasSelection -and $CodexStatus -ceq '已退出'
         Add = $available
@@ -977,7 +1002,7 @@ function Get-QiehaoGuiSnapshot {
         $rawProfiles = @(& $ListProvider)
     }
     catch {
-        $errors += 'PROFILE_LIST_UNAVAILABLE'
+        $errors += $(if ($_.Exception.Message -ceq 'OPERATION_BUSY') { 'OPERATION_BUSY' } else { 'PROFILE_LIST_UNAVAILABLE' })
         $rawProfiles = @()
     }
 
@@ -993,7 +1018,7 @@ function Get-QiehaoGuiSnapshot {
         }
     }
     catch {
-        $errors += 'ACTIVE_PROFILE_UNAVAILABLE'
+        if ($_.Exception.Message -cne 'ACTIVE_PROFILE_NOT_INITIALIZED') { $errors += 'ACTIVE_PROFILE_UNAVAILABLE' }
     }
 
     $codexStatus = '未知'
@@ -1009,8 +1034,8 @@ function Get-QiehaoGuiSnapshot {
         default { 'Unknown' }
     }
 
-    $rows = ConvertTo-QiehaoGuiProfileRows -ProfileData $rawProfiles `
-        -ActiveProfile $activeProfile -ActiveProfileKnown:$activeProfileKnown
+    $rows = @(ConvertTo-QiehaoGuiProfileRows -ProfileData $rawProfiles `
+        -ActiveProfile $activeProfile -ActiveProfileKnown:$activeProfileKnown)
 
     $identityStatus = '无法确认'
     if ($codexStatus -ceq '运行中') {
@@ -1053,6 +1078,11 @@ function Get-QiehaoGuiSnapshot {
         default { 'Unavailable' }
     }
 
+    if (@($rows | Where-Object { $_.Name -ceq '<Unknown>' }).Count -or
+        @($rows).Count -ne $rawProfiles.Count -or
+        ($activeProfileKnown -and @($rows | Where-Object { $_.Name -ieq $activeProfile }).Count -ne 1)) {
+        $errors += 'GUI_PROFILE_SNAPSHOT_INCOMPLETE'
+    }
     return [pscustomobject]@{
         CodexState = $codexState
         CodexDesktop = $codexStatus
@@ -1064,7 +1094,42 @@ function Get-QiehaoGuiSnapshot {
         WebChatGPT = '不受影响'
         Profiles = @($rows)
         ReadOnlyErrors = @($errors)
+        SnapshotComplete = ($errors.Count -eq 0)
     }
+}
+
+function Get-QiehaoCommittedProfileSnapshot {
+    [CmdletBinding()]
+    param([scriptblock]$ListProvider,[scriptblock]$ActiveProvider,[switch]$ForceUnknown)
+    $raw = @(); $errors = @(); $active = ''; $known = $false
+    try { $raw = @(& $ListProvider) } catch { $errors += $(if ($_.Exception.Message -ceq 'OPERATION_BUSY') {'OPERATION_BUSY'} else {'PROFILE_LIST_UNAVAILABLE'}) }
+    try {
+        $value = & $ActiveProvider
+        $active = [string](Get-ObjectPropertyValue $value 'ActiveProfile' '')
+        $known = -not [string]::IsNullOrWhiteSpace($active)
+    } catch {
+        if ($_.Exception.Message -cne 'ACTIVE_PROFILE_NOT_INITIALIZED') { $errors += 'ACTIVE_PROFILE_UNAVAILABLE' }
+    }
+    if ($ForceUnknown -or $errors.Count) { $known = $false; $active = '' }
+    # Never fall back to the Active flags captured by the earlier list read.
+    $rows = @(ConvertTo-QiehaoGuiProfileRows -ProfileData $raw -ActiveProfile $active -ActiveProfileKnown)
+    $marked = @($rows | Where-Object { $_.ActiveCode -ceq 'Yes' })
+    if (($known -and ($marked.Count -ne 1 -or $marked[0].Name -ine $active)) -or
+        (-not $known -and $marked.Count)) {
+        $errors += 'GUI_ACTIVE_PROFILE_INVARIANT_FAILED'
+        $known = $false; $active = ''
+    }
+    if (-not $known) { foreach ($row in $rows) { $row.ActiveCode = if ($errors.Count -or $ForceUnknown) { 'Unknown' } else { 'No' } } }
+    if (@($rows | Where-Object { $_.Name -ceq '<Unknown>' }).Count -or $rows.Count -ne $raw.Count) { $errors += 'GUI_PROFILE_SNAPSHOT_INCOMPLETE' }
+    return [pscustomobject]@{Profiles=$rows;ActiveProfile=$active;ActiveProfileKnown=$known;ReadOnlyErrors=$errors;SnapshotComplete=($errors.Count -eq 0)}
+}
+
+function Test-QiehaoSnapshotReady {
+    param([AllowNull()][object]$Snapshot)
+    if ($null -eq $Snapshot) { return $false }
+    $complete = $Snapshot.PSObject.Properties['SnapshotComplete']
+    return ($null -ne $complete -and $complete.Value -is [bool] -and $complete.Value -and
+        @($Snapshot.ReadOnlyErrors).Count -eq 0 -and $null -ne $Snapshot.PSObject.Properties['Profiles'])
 }
 
 function Get-QiehaoBackgroundThemes {
@@ -2298,6 +2363,8 @@ Export-ModuleMember -Function @(
     'Invoke-QiehaoSwitchRequest',
     'ConvertTo-QiehaoExitMessage',
     'Get-QiehaoGuiSnapshot',
+    'Get-QiehaoCommittedProfileSnapshot',
+    'Test-QiehaoSnapshotReady',
     'Get-QiehaoBackgroundThemes',
     'Get-QiehaoBackgroundTheme',
     'Get-QiehaoSwitchDialogPalette',

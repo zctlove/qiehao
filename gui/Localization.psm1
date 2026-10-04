@@ -269,6 +269,29 @@ Add-QiehaoCatalogPair 'Operation.AUTH_CREDENTIAL_SOURCE_AMBIGUOUS' 'Codex 当前
 Add-QiehaoCatalogPair 'Operation.AUTH_CREDENTIAL_SOURCE_UNKNOWN' '无法安全确认 Codex 当前凭据来源。未修改任何账号数据。' 'The current Codex credential source could not be safely confirmed. No account data was changed.'
 Add-QiehaoCatalogPair 'Operation.CODEX_HOME_NOT_FOUND' '未找到 Codex 本地数据目录，无法采集登录凭据。未修改任何 Codex 登录状态。' 'The local Codex data directory was not found, so sign-in credentials could not be captured. No Codex sign-in state was changed.'
 
+Add-QiehaoCatalogPair 'Account.LocalSwitchWorking' "正在切换本地账号……" "Switching the local account…"
+Add-QiehaoCatalogPair 'Account.VerifyingOfficial' "正在验证 Codex 登录状态……" "Verifying Codex sign-in state…"
+Add-QiehaoCatalogPair 'Account.LoginStarting' "正在启动官方登录……" "Starting official sign-in…"
+Add-QiehaoCatalogPair 'Account.LoginBrowserOpened' "浏览器已打开，请完成官方登录……（Esc 可取消）" "Browser opened. Complete official sign-in… (Esc to cancel)"
+Add-QiehaoCatalogPair 'Account.LoginSaving' "正在保存账号……" "Saving the account…"
+Add-QiehaoCatalogPair 'Operation.SWITCH_VERIFIED_SUCCESS' "切换成功。" "Account switched successfully."
+Add-QiehaoCatalogPair 'Operation.SWITCH_AUTH_UNVERIFIED_TRANSIENT' '本地账号已切换，登录状态暂未验证。可以启动 Codex 使用；稍后可点击“验证”。' 'Local account switched; sign-in status is not verified yet. You can start Codex; select Verify later.'
+Add-QiehaoCatalogPair 'Operation.SWITCH_REAUTH_REQUIRED' "目标账号的本地登录状态已失效，需要重新登录该账号。" "The saved sign-in for this account is no longer valid. Sign in to this account again."
+Add-QiehaoCatalogPair 'Operation.SWITCH_POST_VERIFY_IDENTITY_MISMATCH' "账号身份验证不一致，已停止切换。" "Account identity verification did not match. The switch was stopped."
+Add-QiehaoCatalogPair 'Operation.DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED' "安全恢复未完成，请勿启动 Codex，需要人工检查。" "Safe recovery did not complete. Do not start Codex; manual recovery is required."
+Add-QiehaoCatalogPair 'Operation.ADD_VERIFIED_SUCCESS' "已识别当前 Codex 登录账号，凭据已安全保存，账号添加成功。" "The Codex sign-in was identified and securely saved. Account added successfully."
+Add-QiehaoCatalogPair 'Operation.ADD_SUCCESS_UNVERIFIED' "本地账号已安全保存，登录状态暂未验证。" "The local account was securely saved; sign-in status could not be verified yet."
+Add-QiehaoCatalogPair 'Operation.ADD_REAUTH_REQUIRED' "登录状态已失效，请通过官方流程重新登录。" "This sign-in is no longer valid. Sign in again using the official flow."
+Add-QiehaoCatalogPair 'Operation.ACCOUNT_LOGIN_MANUAL_FALLBACK_REQUIRED' "当前 Codex 版本暂不支持直接登录，请先在 Codex 中完成登录并退出，然后确认手动添加。" "This Codex version does not support direct sign-in. Sign in using Codex, fully quit it, then explicitly confirm manual import."
+Add-QiehaoCatalogPair 'Operation.ACCOUNT_LOGIN_CANCELLED' "添加已取消，未创建账号档案。" "Adding was cancelled. No account profile was created."
+Add-QiehaoCatalogPair 'Operation.ACCOUNT_LOGIN_FAILED' "官方登录未完成，未创建账号档案。请重试。" "Official sign-in did not complete. No account profile was created. Try again."
+Add-QiehaoCatalogPair 'Operation.ACCOUNT_LOGIN_TIMEOUT' "等待官方登录超时，请重新添加账号。" "Official sign-in timed out. Please add the account again."
+Add-QiehaoCatalogPair 'Operation.ACCOUNT_LOGIN_IDENTITY_MISMATCH' "登录身份验证不一致，未创建账号档案。" "Sign-in identity did not match. No account profile was created."
+Add-QiehaoCatalogPair 'Operation.PROFILE_ACCOUNT_VERIFIED' "本地档案：正常`nCodex 登录状态：已验证" "Local profile: intact`nCodex sign-in state: verified"
+Add-QiehaoCatalogPair 'Operation.PROFILE_ACCOUNT_UNVERIFIED' "本地档案：正常`nCodex 登录状态：暂未验证" "Local profile: intact`nCodex sign-in state: not verified yet"
+Add-QiehaoCatalogPair 'Operation.PROFILE_ACCOUNT_REAUTH_REQUIRED' "本地档案：正常`nCodex 登录状态：需要重新登录" "Local profile: intact`nCodex sign-in state: sign-in required"
+Add-QiehaoCatalogPair 'Operation.PROFILE_INTEGRITY_ONLY_SUCCESS' "本地档案：正常`n非当前账号：仅验证本地完整性，未切换或验证在线登录" "Local profile: intact`nInactive account: local integrity only; sign-in was not switched or checked"
+
 function Get-QiehaoSupportedLanguages {
     [CmdletBinding()]
     param()

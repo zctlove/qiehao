@@ -17,6 +17,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $guiRoot = $PSScriptRoot
+. (Join-Path $guiRoot 'LifecycleWorker.ps1')
 $projectRoot = Split-Path -Parent $guiRoot
 $coreModulePath = Join-Path -Path $projectRoot -ChildPath 'lib\CodexAuth.psm1'
 $helperModulePath = Join-Path -Path $guiRoot -ChildPath 'GuiHelpers.psm1'
@@ -69,9 +70,10 @@ catch {
     return
 }
 if (-not $SelfTest) {
-    Write-QiehaoAppStartDiagnostic -Version '1.0.0-rc'
+    Write-QiehaoAppStartDiagnostic -Version '1.1.0'
 }
 Import-Module -Name $helperModulePath -Force -ErrorAction Stop
+Import-Module (Join-Path $projectRoot 'tools\AppServerOwnership.psm1') -ErrorAction Stop
 $script:guiLocalizationAvailable = $false
 try {
     $localizationModule = @(Import-Module -Name $localizationModulePath `
@@ -261,10 +263,8 @@ function Format-QiehaoQuotaFailureStatus {
         [Parameter(Mandatory = $true)][string]$BaseText,
         [Parameter(Mandatory = $true)][string]$FailureCode
     )
-    return ($BaseText + ' ' + (Format-QiehaoGuiText `
-        -Key 'Quota.ErrorCode' `
-        -Arguments @((Get-QiehaoSafeQuotaFailureCode -Value $FailureCode)) `
-        -Fallback '错误代码：{0}'))
+    # Preserve the code in diagnostics, not in ordinary user-facing text.
+    return $BaseText
 }
 
 function Read-QiehaoMainWindow {
@@ -495,24 +495,22 @@ try {
         ExecutablePath = ''
         Arguments = ''
         ParentProcessId = 0
+        DiagnosticLogDirectory = (Join-Path $projectRoot 'logs')
     })
+    $script:guiLifecycleRegistry.DiagnosticLogDirectory = Join-Path $projectRoot 'logs'
 
     function Get-QiehaoOwnedQuotaProcessDescriptors {
-        if ($null -eq $script:guiQuotaOwnedProcessRegistry -or
-            -not [bool]$script:guiQuotaOwnedProcessRegistry.IsActive) {
-            return @()
+        Get-QiehaoOwnedAppServerDescriptor -Registry $script:guiQuotaOwnedProcessRegistry
+        Get-QiehaoOwnedAppServerDescriptor -Registry $script:guiLifecycleRegistry
+    }
+
+    function Get-QiehaoGuiProcessState {
+        return Invoke-QiehaoOwnedProcessInspection -Registries @(
+            $script:guiQuotaOwnedProcessRegistry,$script:guiLifecycleRegistry
+        ) -InspectionProvider {
+            param($Descriptors)
+            Test-CodexProcessesStopped -OwnedProcessDescriptors $Descriptors
         }
-        return @([pscustomobject]@{
-            IsActive = [bool]$script:guiQuotaOwnedProcessRegistry.IsActive
-            ProcessId = [int]$script:guiQuotaOwnedProcessRegistry.ProcessId
-            ProcessStartTimeUtc =
-                $script:guiQuotaOwnedProcessRegistry.ProcessStartTimeUtc
-            ExecutablePath =
-                [string]$script:guiQuotaOwnedProcessRegistry.ExecutablePath
-            Arguments = [string]$script:guiQuotaOwnedProcessRegistry.Arguments
-            ParentProcessId =
-                [int]$script:guiQuotaOwnedProcessRegistry.ParentProcessId
-        })
     }
 
     function Set-QiehaoSwitchQuotaStatus {
@@ -547,6 +545,9 @@ try {
     function Update-QiehaoLocalizedProfileRows {
         foreach ($row in @($script:guiAllProfileRows)) {
             if ($null -eq $row) { continue }
+            if ($script:guiVerificationStateCodes.ContainsKey([string]$row.Name)) {
+                $row.VerificationCode = [string]$script:guiVerificationStateCodes[[string]$row.Name]
+            }
             $activeKey = switch ([string]$row.ActiveCode) {
                 'Yes' { 'Profile.Active.Yes' }
                 'No' { 'Profile.Active.No' }
@@ -769,6 +770,10 @@ try {
         $contextVerifyMenuItem.IsEnabled = [bool]$state.ContextVerify
         $contextRenameMenuItem.IsEnabled = [bool]$state.ContextRename
         $contextDeleteMenuItem.IsEnabled = [bool]$state.ContextDelete
+        if ($script:guiManualRecoveryRequired) {
+            foreach ($control in @($refreshButton,$switchButton,$verifyButton,$addButton,$deleteButton,$launchCodexButton,
+                $contextSwitchMenuItem,$contextVerifyMenuItem,$contextDeleteMenuItem,$refreshQuotaButton)) { $control.IsEnabled = $false }
+        }
         Update-QiehaoCodexSafetyHint
     }
 
@@ -779,6 +784,20 @@ try {
             [string]$StatusText = ''
         )
         $script:guiIsWriteOperationBusy = $Value
+        if ($Value) {
+            $script:guiRefreshEpoch.Generation++
+            $script:guiRefreshEpoch.Sequence++
+            $script:guiLifecycleFinalCode = ''
+            $script:guiCurrentStatusKey = ''
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($script:guiLifecycleFinalCode) -and
+            [string]::IsNullOrWhiteSpace($script:guiCurrentStatusKey)) {
+            $final = ConvertTo-QiehaoOperationResult -ResultCode $script:guiLifecycleFinalCode
+            Set-QiehaoLocalizedStatus -Key ('Operation.' + $final.ResultCode) -Fallback $final.Message
+        }
+        elseif (-not $Value -and [string]::IsNullOrWhiteSpace($script:guiCurrentStatusKey)) {
+            Set-QiehaoLocalizedStatus -Key 'Status.Ready'
+        }
         if (-not [string]::IsNullOrWhiteSpace($StatusText)) {
             $refreshStatusText.Text = $StatusText
         }
@@ -811,6 +830,12 @@ try {
 
     function Show-QiehaoOperationResult {
         param([Parameter(Mandatory = $true)][object]$Result)
+        $script:guiLifecycleFinalCode = [string]$Result.ResultCode
+        Set-QiehaoLocalizedStatus -Key ('Operation.' + $Result.ResultCode) -Fallback $Result.Message
+        if ($Result.ResultCode -ceq 'DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED') {
+            $script:guiManualRecoveryRequired = $true
+            Update-QiehaoActionButtons
+        }
         if (-not [string]::IsNullOrWhiteSpace([string]$Result.Message)) {
             $message = Get-QiehaoGuiText `
                 -Key ('Operation.' + [string]$Result.ResultCode) `
@@ -890,7 +915,8 @@ try {
         param(
             [Parameter(Mandatory = $true)][string]$Title,
             [Parameter(Mandatory = $true)][string]$Prompt,
-            [string]$CurrentName = ''
+            [string]$CurrentName = '',
+            [hashtable]$LifecycleRegistry
         )
         $dialog = New-Object System.Windows.Window
         $dialog.Title = $Title
@@ -971,7 +997,25 @@ try {
         $buttons.Children.Add($cancelButton) | Out-Null
         $root.Children.Add($buttons) | Out-Null
         Set-QiehaoDialogContent -Dialog $dialog -Content $root
-        $result = $dialog.ShowDialog()
+        $cancelTimer = $null; $cancelTick = $null
+        if ($null -ne $LifecycleRegistry) {
+            # The modal name dialog must not outlive its managed-login worker.
+            $cancelTimer = New-Object Windows.Threading.DispatcherTimer
+            $cancelTimer.Interval = [TimeSpan]::FromMilliseconds(100)
+            $cancelTick = [EventHandler]({
+                if ($dialog.IsVisible -and ($LifecycleRegistry.CancelRequested -or
+                    ($LifecycleRegistry.ContainsKey('OperationFinished') -and $LifecycleRegistry.OperationFinished))) {
+                    $dialog.DialogResult = $false
+                }
+            }.GetNewClosure())
+            $cancelTimer.Add_Tick($cancelTick)
+        }
+        try {
+            if ($null -ne $cancelTimer) { $cancelTimer.Start() }
+            $result = $dialog.ShowDialog()
+        } finally {
+            if ($null -ne $cancelTimer) { $cancelTimer.Stop(); $cancelTimer.Remove_Tick($cancelTick) }
+        }
         if ($result -eq $true) { return [string]$dialog.Tag }
         return $null
     }
@@ -1249,7 +1293,16 @@ try {
     }
 
     function Set-QiehaoSnapshot {
-        param([Parameter(Mandatory = $true)][object]$Snapshot)
+        param([Parameter(Mandatory = $true)][object]$Snapshot,
+            [long]$Generation = $script:guiRefreshEpoch.Generation,
+            [long]$Sequence = $script:guiRefreshEpoch.Sequence)
+        if ($Generation -ne $script:guiRefreshEpoch.Generation -or $Sequence -ne $script:guiRefreshEpoch.Sequence) { return }
+        if (-not (Test-QiehaoSnapshotReady -Snapshot $Snapshot)) { return }
+        if ($script:guiManualRecoveryRequired) {
+            $Snapshot.ActiveProfile = ''
+            $Snapshot.ActiveProfileKnown = $false
+            foreach ($row in @($Snapshot.Profiles)) { $row.ActiveCode = 'Unknown' }
+        }
         $rows = @($Snapshot.Profiles)
         foreach ($row in $rows) {
             if ($script:guiVerificationStates.ContainsKey([string]$row.Name)) {
@@ -1274,7 +1327,7 @@ try {
             [string]$script:guiCurrentActiveProfile
         }
         else {
-            Get-QiehaoGuiText -Key 'Status.Active.Uninitialized' `
+            Get-QiehaoGuiText -Key $(if ($script:guiManualRecoveryRequired) { 'Status.Codex.Unknown' } else { 'Status.Active.Uninitialized' }) `
                 -Fallback '未初始化'
         }
         $identityStatusText.Text = Get-QiehaoGuiText `
@@ -1332,23 +1385,85 @@ try {
         Update-QiehaoProfileFilter
     }
 
+    function Sync-QiehaoCommittedActiveState {
+        # Dispatcher-only completion barrier: local list + committed state.
+        # No account/read, auth identity read, process scan, quota RPC or sleep.
+        $script:guiRefreshEpoch.Sequence++
+        $generation = $script:guiRefreshEpoch.Generation
+        $sequence = $script:guiRefreshEpoch.Sequence
+        $snapshot = Get-QiehaoCommittedProfileSnapshot `
+            -ListProvider { @(Get-CodexAccountSlot) } -ActiveProvider { Get-CodexActiveProfile } `
+            -ForceUnknown:$script:guiManualRecoveryRequired
+        if ($generation -ne $script:guiRefreshEpoch.Generation -or $sequence -ne $script:guiRefreshEpoch.Sequence) { return $false }
+        if (-not (Test-QiehaoSnapshotReady -Snapshot $snapshot)) {
+            # A failed reread is not evidence that profiles were deleted.
+            Set-QiehaoLocalizedStatus -Key 'Status.RefreshFailed' -Fallback '只读刷新失败'
+            return $false
+        }
+        $script:guiAllProfileRows = @($snapshot.Profiles)
+        $script:guiActiveProfileKnown = [bool]$snapshot.ActiveProfileKnown
+        $script:guiCurrentActiveProfile = if ($snapshot.ActiveProfileKnown) { [string]$snapshot.ActiveProfile } else { '' }
+        $activeProfileText.Text = if ($snapshot.ActiveProfileKnown) { [string]$snapshot.ActiveProfile } else {
+            Get-QiehaoGuiText -Key $(if ($snapshot.ReadOnlyErrors.Count -or $script:guiManualRecoveryRequired) { 'Status.Codex.Unknown' } else { 'Status.Active.Uninitialized' })
+        }
+        foreach ($row in $script:guiAllProfileRows) {
+            if ($script:guiVerificationStateCodes.ContainsKey($row.Name)) { $row.VerificationCode = $script:guiVerificationStateCodes[$row.Name] }
+        }
+        Update-QiehaoLocalizedProfileRows
+        Update-QiehaoQuotaRows
+        Update-QiehaoProfileFilter
+        return (@($snapshot.ReadOnlyErrors).Count -eq 0 -and -not $script:guiManualRecoveryRequired)
+    }
+
+    function Write-QiehaoRefreshResult {
+        param([string]$Code,[int]$PreviousCount,[long]$ElapsedMilliseconds,[long]$Generation)
+        Write-QiehaoDiagnosticEvent -Event REFRESH_RESULT -Result $Code -Data @{
+            ResultCode=$Code; PreviousProfileCount=$PreviousCount
+            NewProfileCount=@($script:guiAllProfileRows).Count
+            ActiveProfilePresent=[bool]$script:guiActiveProfileKnown
+            ElapsedMilliseconds=$ElapsedMilliseconds; Generation=$Generation
+        }
+    }
+
     function Invoke-QiehaoReadOnlyRefresh {
         param(
             [string]$ExpectedActiveProfile = '',
             [switch]$PassThru
         )
+        $refreshWatch = [Diagnostics.Stopwatch]::StartNew()
+        $previousCount = @($script:guiAllProfileRows).Count
+        Write-QiehaoDiagnosticEvent -Event REFRESH_START -Data @{
+            PreviousProfileCount=$previousCount; Generation=$script:guiRefreshEpoch.Generation
+        }
+        # Do not acquire a second full snapshot of a half-completed lifecycle.
+        if ($script:guiIsWriteOperationBusy -or $script:guiLifecycleWorkerRunning -or $script:guiManualRecoveryRequired) {
+            Write-QiehaoRefreshResult -Code REFRESH_BUSY -PreviousCount $previousCount -ElapsedMilliseconds $refreshWatch.ElapsedMilliseconds -Generation $script:guiRefreshEpoch.Generation
+            if ($PassThru) { return $false }
+            return
+        }
         $refreshSucceeded = $false
+        $script:guiRefreshEpoch.Sequence++
+        $generation = $script:guiRefreshEpoch.Generation
+        $sequence = $script:guiRefreshEpoch.Sequence
+        $refreshCode = 'REFRESH_READ_FAILED'
         try {
             $snapshot = Get-QiehaoGuiSnapshot `
                 -ListProvider { @(Get-CodexAccountSlot) } `
                 -ActiveProvider { Get-CodexActiveProfile } `
                 -ProcessProvider {
-                    Test-CodexProcessesStopped -OwnedProcessDescriptors (
-                        Get-QiehaoOwnedQuotaProcessDescriptors
-                    )
+                    Get-QiehaoGuiProcessState
                 } `
                 -ActiveIdentityProvider { Test-CodexActiveIdentity }
-            Set-QiehaoSnapshot -Snapshot $snapshot
+            if ($generation -ne $script:guiRefreshEpoch.Generation -or $sequence -ne $script:guiRefreshEpoch.Sequence) {
+                Write-QiehaoRefreshResult -Code REFRESH_STALE_DROPPED -PreviousCount $previousCount -ElapsedMilliseconds $refreshWatch.ElapsedMilliseconds -Generation $generation
+                if ($PassThru) { return $false }
+                return
+            }
+            if (-not (Test-QiehaoSnapshotReady -Snapshot $snapshot)) {
+                if (@($snapshot.ReadOnlyErrors) -ccontains 'OPERATION_BUSY') { $refreshCode = 'REFRESH_BUSY' }
+                throw 'GUI_REFRESH_SNAPSHOT_UNAVAILABLE'
+            }
+            Set-QiehaoSnapshot -Snapshot $snapshot -Generation $generation -Sequence $sequence
             $refreshSucceeded = (
                 @($snapshot.ReadOnlyErrors).Count -eq 0 -and
                 (
@@ -1359,8 +1474,14 @@ try {
                     )
                 )
             )
+            if ($refreshSucceeded) { $refreshCode = if (@($snapshot.Profiles).Count -eq 0) { 'REFRESH_EMPTY_CONFIRMED' } else { 'REFRESH_SUCCESS' } }
         }
         catch {
+            if ($generation -ne $script:guiRefreshEpoch.Generation -or $sequence -ne $script:guiRefreshEpoch.Sequence) {
+                Write-QiehaoRefreshResult -Code REFRESH_STALE_DROPPED -PreviousCount $previousCount -ElapsedMilliseconds $refreshWatch.ElapsedMilliseconds -Generation $generation
+                if ($PassThru) { return $false }
+                return
+            }
             Set-QiehaoLocalizedStatus -Key 'Status.RefreshFailed' `
                 -Fallback '只读刷新失败'
             $script:guiCurrentCodexStatus = '未知'
@@ -1372,6 +1493,7 @@ try {
                 -Key 'Status.Identity.Unavailable' -Fallback '无法确认'
             Update-QiehaoActionButtons
         }
+        Write-QiehaoRefreshResult -Code $refreshCode -PreviousCount $previousCount -ElapsedMilliseconds $refreshWatch.ElapsedMilliseconds -Generation $generation
         if ($PassThru) { return $refreshSucceeded }
     }
 
@@ -1449,7 +1571,24 @@ try {
             $script:guiQuotaSlowStatusShown = $false
             $script:guiQuotaCoordinator.QueryInProgress = $false
         }
+        if (-not (Confirm-QiehaoOwnedAppServerExit -Registry $script:guiQuotaOwnedProcessRegistry)) {
+            $script:guiManualRecoveryRequired = $true
+            if (-not $ForClosing) { throw 'DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED' }
+        }
         if (-not $ForClosing) { Update-QiehaoActionButtons }
+    }
+
+    function Stop-QiehaoQuotaForLifecycle {
+        try { Stop-QiehaoQuotaAsync; return $true }
+        catch {
+            # Cleanup uncertainty is a named safety result, not an unhandled
+            # WPF event exception or a false external-Codex-running message.
+            Set-QiehaoWriteBusy -Value $false
+            Show-QiehaoOperationResult -Result (
+                ConvertTo-QiehaoOperationResult -ResultCode 'DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED'
+            )
+            return $false
+        }
     }
 
     function Complete-QiehaoQuotaAsync {
@@ -1636,6 +1775,8 @@ try {
         )
         if (-not $script:guiQuotaModulesAvailable -or
             $script:guiIsClosing -or
+            $script:guiLifecycleWorkerRunning -or $script:guiLifecycleRegistry.IsActive -or
+            $script:guiManualRecoveryRequired -or
             [bool]$script:guiQuotaCoordinator.QueryInProgress) {
             return $false
         }
@@ -1972,6 +2113,7 @@ try {
             [ValidateSet(
                 'Idle', 'WaitingForCodexExit', 'Switching',
                 'SwitchSucceeded', 'SwitchSucceededUiRefreshFailed',
+                'SwitchUnverified',
                 'SwitchFailed', 'Cancelled', 'Unknown', 'TimedOut', 'Closing'
             )]
             [string]$State,
@@ -2004,6 +2146,9 @@ try {
             'SwitchFailed' {
                 Set-QiehaoLocalizedStatus -Key 'Switch.Status.Failed' `
                     -Fallback '账号切换未完成'
+            }
+            'SwitchUnverified' {
+                Set-QiehaoLocalizedStatus -Key 'Operation.SWITCH_AUTH_UNVERIFIED_TRANSIENT'
             }
             'Cancelled' {
                 Set-QiehaoLocalizedStatus -Key 'Switch.Status.Cancelled' `
@@ -2084,17 +2229,19 @@ try {
     function Get-QiehaoLiveCodexStatus {
         try {
             return ConvertTo-QiehaoCodexStatus -ProcessState (
-                Test-CodexProcessesStopped -OwnedProcessDescriptors (
-                    Get-QiehaoOwnedQuotaProcessDescriptors
-                )
+                Get-QiehaoGuiProcessState
             )
         }
-        catch { return '未知' }
+        catch {
+            if ($_.Exception.Message -ceq 'OWNED_APP_SERVER_SNAPSHOT_BUSY') { return '' }
+            return '未知'
+        }
     }
 
     function Update-QiehaoProcessOnlyStatus {
         if ($script:guiIsClosing) { return '未知' }
         $status = Get-QiehaoLiveCodexStatus
+        if ([string]::IsNullOrEmpty($status)) { return $script:guiCurrentCodexStatus }
         Set-QiehaoCodexStatusVisual -Status $status
         Update-QiehaoActionButtons
         return $status
@@ -2488,7 +2635,7 @@ try {
 
     function Invoke-QiehaoLaunchCodex {
         if ($script:guiIsWriteOperationBusy) { return }
-        Stop-QiehaoQuotaAsync
+        if (-not (Stop-QiehaoQuotaForLifecycle)) { return }
         $liveStatus = Get-QiehaoLiveCodexStatus
         Set-QiehaoCodexStatusVisual -Status $liveStatus
         if ($liveStatus -ceq '运行中') {
@@ -2595,21 +2742,9 @@ try {
             }
             $capturedTarget = $targetProfile
             $switchAction = [System.Action]({
-                try {
-                    $script:guiManualSwitchResult = Invoke-QiehaoSwitchCore `
-                        -TargetProfile $capturedTarget -DeferPresentation
-                }
-                catch {
-                    $script:guiManualSwitchResult =
-                        ConvertTo-QiehaoOperationResult -ResultCode 'SWITCH_FAILED'
-                }
-                $script:guiManualSwitchPresentation =
-                    Complete-QiehaoSwitchUiAfterBackend `
-                        -Result $script:guiManualSwitchResult `
-                        -TargetProfile $capturedTarget
-                $script:guiManualSwitchWaitOutcome =
-                    [string]$script:guiManualSwitchPresentation.State
-                Close-QiehaoManualSwitchWaitDialog
+                # Captured delegates have a dynamic module script scope. All
+                # GUI state writes must stay in the original GUI function scope.
+                Invoke-QiehaoDeferredSwitchCompletion -TargetProfile $capturedTarget
             }.GetNewClosure())
             try {
                 $null = $script:guiManualSwitchWaitDialog.Dispatcher.BeginInvoke(
@@ -2660,13 +2795,11 @@ try {
                 -IntervalMilliseconds 500 -TimeoutSeconds $TimeoutSeconds `
                 -ClosingProvider { [bool]$script:guiIsClosing } `
                 -ProbeProvider {
-                    $status = ConvertTo-QiehaoCodexStatus `
-                        -ProcessState (
-                            Test-CodexProcessesStopped `
-                                -OwnedProcessDescriptors (
-                                    Get-QiehaoOwnedQuotaProcessDescriptors
-                                )
-                        )
+                    try { $status = ConvertTo-QiehaoCodexStatus -ProcessState (Get-QiehaoGuiProcessState) }
+                    catch {
+                        if ($_.Exception.Message -ceq 'OWNED_APP_SERVER_SNAPSHOT_BUSY') { return 'Pending' }
+                        throw
+                    }
                     if ($status -ceq '已退出') { return 'Succeeded' }
                     if ($status -ceq '未知') { return 'Unknown' }
                     return 'Pending'
@@ -2896,6 +3029,9 @@ try {
                     -Presentation $switchPresentation `
                     -TargetProfile $TargetProfile
             }
+            'SwitchUnverified' {
+                Show-QiehaoOperationResult -Result $switchResult
+            }
             'TimedOut' {
                 Set-QiehaoCodexStatusVisual -Status '运行中'
                 Show-QiehaoSafeMessage `
@@ -2917,6 +3053,15 @@ try {
         Update-QiehaoActionButtons
     }
 
+    function Invoke-QiehaoDeferredSwitchCompletion {
+        param([string]$TargetProfile)
+        try { $script:guiManualSwitchResult = Invoke-QiehaoSwitchCore -TargetProfile $TargetProfile -DeferPresentation }
+        catch { $script:guiManualSwitchResult = ConvertTo-QiehaoOperationResult -ResultCode 'SWITCH_FAILED' }
+        $script:guiManualSwitchPresentation = Complete-QiehaoSwitchUiAfterBackend -Result $script:guiManualSwitchResult -TargetProfile $TargetProfile
+        $script:guiManualSwitchWaitOutcome = [string]$script:guiManualSwitchPresentation.State
+        Close-QiehaoManualSwitchWaitDialog
+    }
+
     function Complete-QiehaoSwitchUiAfterBackend {
         param(
             [Parameter(Mandatory = $true)][object]$Result,
@@ -2927,8 +3072,12 @@ try {
                 -TargetProfile $TargetProfile `
                 -RefreshProvider {
                     param($ExpectedProfile)
-                    return [bool](Invoke-QiehaoReadOnlyRefresh `
-                        -ExpectedActiveProfile $ExpectedProfile -PassThru)
+                    # Worker completion already reread committed local state.
+                    # Do not gate Current on another process/auth/network scan.
+                    $currentRows = @($script:guiAllProfileRows | Where-Object { $_.ActiveCode -ceq 'Yes' })
+                    return ($script:guiActiveProfileKnown -and $currentRows.Count -eq 1 -and
+                        $script:guiCurrentActiveProfile.Equals($ExpectedProfile,[StringComparison]::OrdinalIgnoreCase) -and
+                        $currentRows[0].Name.Equals($ExpectedProfile,[StringComparison]::OrdinalIgnoreCase))
                 } `
                 -BusyProvider {
                     param($IsBusy)
@@ -2941,12 +3090,13 @@ try {
                 }
         }
         catch {
-            $backendSucceeded = (
-                [bool]$Result.IsSuccess -and
-                [string]$Result.ResultCode -ceq 'SWITCH_SUCCESS'
-            )
+            $backendSucceeded = ([bool]$Result.IsSuccess -and
+                [string]$Result.ResultCode -in @('SWITCH_SUCCESS','SWITCH_VERIFIED_SUCCESS'))
             Set-QiehaoWriteBusy -Value $false
-            $fallbackState = if ($backendSucceeded) {
+            $fallbackState = if ($Result.ResultCode -ceq 'SWITCH_AUTH_UNVERIFIED_TRANSIENT') {
+                'SwitchUnverified'
+            }
+            elseif ($backendSucceeded) {
                 'SwitchSucceededUiRefreshFailed'
             }
             else {
@@ -3016,8 +3166,13 @@ try {
                 -Provider { Sync-CodexActiveProfile }
             Show-QiehaoOperationResult -Result $syncResult
             if ($syncResult.RefreshRequired) {
-                Invoke-QiehaoReadOnlyRefresh
+                $null = Sync-QiehaoCommittedActiveState
             }
+            return
+        }
+        if ([string]$Result.ResultCode -in @('SWITCH_AUTH_UNVERIFIED_TRANSIENT','SWITCH_REAUTH_REQUIRED','SWITCH_POST_VERIFY_IDENTITY_MISMATCH')) {
+            Set-QiehaoWriteBusy -Value $false
+            Show-QiehaoOperationResult -Result $Result
             return
         }
         $presentation = Complete-QiehaoSwitchUiAfterBackend `
@@ -3033,7 +3188,7 @@ try {
         )
         try {
             $result = Invoke-QiehaoOperationProvider -Operation 'SWITCH' `
-                -Provider { param($Name) Switch-CodexAccountProfile -Name $Name } `
+                -Provider { param($Name) Invoke-QiehaoResponsiveLifecycle -Action Switch -Name $Name } `
                 -ArgumentList @($TargetProfile)
             if ($DeferPresentation) { return $result }
             Show-QiehaoSwitchResult -Result $result -TargetProfile $TargetProfile
@@ -3065,7 +3220,7 @@ try {
             [StringComparison]::OrdinalIgnoreCase
         )
         # A user-requested Switch takes priority over an in-flight quota read.
-        Stop-QiehaoQuotaAsync
+        if (-not (Stop-QiehaoQuotaForLifecycle)) { return }
         $liveStatus = Get-QiehaoLiveCodexStatus
         if ($liveStatus -ceq '未知') {
             Show-QiehaoOperationResult -Result (
@@ -3125,7 +3280,7 @@ try {
             return
         }
         $selectedProfile = Get-QiehaoSelectedProfileName
-        Stop-QiehaoQuotaAsync
+        if (-not (Stop-QiehaoQuotaForLifecycle)) { return }
         Set-QiehaoWriteBusy -Value $true -StatusText (
             Get-QiehaoGuiText -Key 'Verify.Working' `
                 -Fallback '正在验证账号…'
@@ -3134,17 +3289,23 @@ try {
             $verifyResult = Invoke-QiehaoVerifyRequest `
                 -SelectedProfile $selectedProfile `
                 -CodexStatus (Get-QiehaoLiveCodexStatus) `
-                -VerifyProvider { param($ProfileName) Test-CodexProfile -Name $ProfileName }
+                -VerifyProvider { param($ProfileName) Invoke-QiehaoResponsiveLifecycle -Action Verify -Name $ProfileName }
             if ($verifyResult.CoreCalled -and
                 -not [string]::IsNullOrWhiteSpace($selectedProfile)) {
                 $script:guiVerificationStates[$selectedProfile] = `
                     [string]$verifyResult.VerificationStatus
-                $script:guiVerificationStateCodes[$selectedProfile] = if (
-                    [string]$verifyResult.ResultCode -ceq
-                        'PROFILE_VERIFY_SUCCESS'
-                ) { 'Verified' } else { 'Failed' }
+                $script:guiVerificationStateCodes[$selectedProfile] = switch ([string]$verifyResult.ResultCode) {
+                    'PROFILE_VERIFY_SUCCESS' { 'Verified' }
+                    'PROFILE_ACCOUNT_VERIFIED' { 'Verified' }
+                    'PROFILE_ACCOUNT_UNVERIFIED' { 'Unverified' }
+                    'PROFILE_INTEGRITY_ONLY_SUCCESS' { 'Unverified' }
+                    default { 'Failed' }
+                }
             }
             $message = [string]$verifyResult.Message
+            if ([string]$verifyResult.ResultCode -in @('PROFILE_ACCOUNT_VERIFIED','PROFILE_ACCOUNT_UNVERIFIED','PROFILE_ACCOUNT_REAUTH_REQUIRED','PROFILE_INTEGRITY_ONLY_SUCCESS')) {
+                $message = Get-QiehaoGuiText -Key ('Operation.' + $verifyResult.ResultCode)
+            }
             if ($verifyResult.ResultCode -ceq 'PROFILE_VERIFY_SUCCESS') {
                 $message = Format-QiehaoGuiText -Key 'Verify.SuccessDetailed' `
                     -Arguments @(
@@ -3178,7 +3339,7 @@ try {
                     -Fallback "账号：{0}`nProfile：完整`n工作区身份：旧版资料未知`n凭据来源：{1}`n结果：未完整验证"
             }
             Show-QiehaoSafeMessage -Message $message
-            if ($verifyResult.CoreCalled) { Invoke-QiehaoReadOnlyRefresh }
+            if ($verifyResult.CoreCalled) { Update-QiehaoLocalizedProfileRows; Update-QiehaoProfileFilter }
         }
         finally { Set-QiehaoWriteBusy -Value $false }
     }
@@ -3193,7 +3354,7 @@ try {
             -Prompt (Get-QiehaoGuiText -Key 'Dialog.Name.New' `
                 -Fallback '新名称：') -CurrentName $oldName
         if ([string]::IsNullOrWhiteSpace($newName)) { return }
-        Stop-QiehaoQuotaAsync
+        if (-not (Stop-QiehaoQuotaForLifecycle)) { return }
         Set-QiehaoWriteBusy -Value $true -StatusText (
             Get-QiehaoGuiText -Key 'Account.Renaming' `
                 -Fallback '正在重命名账号…'
@@ -3237,8 +3398,8 @@ try {
                         Get-QiehaoQuotaUiTextSafe -Key 'RenameCacheFailed'
                 }
             }
+            if ($result.RefreshRequired) { $null = Sync-QiehaoCommittedActiveState }
             Show-QiehaoOperationResult -Result $result
-            if ($result.RefreshRequired) { Invoke-QiehaoReadOnlyRefresh }
             if (-not [string]::IsNullOrWhiteSpace($quotaCacheWarning)) {
                 $refreshStatusText.Text = $quotaCacheWarning
             }
@@ -3250,7 +3411,7 @@ try {
         if ($script:guiIsWriteOperationBusy) { return }
         $profileName = Get-QiehaoSelectedProfileName
         if ([string]::IsNullOrWhiteSpace($profileName)) { return }
-        Stop-QiehaoQuotaAsync
+        if (-not (Stop-QiehaoQuotaForLifecycle)) { return }
         Set-QiehaoWriteBusy -Value $true -StatusText (
             Get-QiehaoGuiText -Key 'Account.Deleting' `
                 -Fallback '正在删除本地账号…'
@@ -3259,7 +3420,7 @@ try {
             $safety = Invoke-QiehaoOperationProvider -Operation 'DELETE' `
                 -Provider {
                     param($Name)
-                    Get-CodexProfileDeleteSafety -Name $Name
+                    Invoke-QiehaoResponsiveLifecycle -Action DeleteSafety -Name $Name
                 } -ArgumentList @($profileName)
             if ([string]$safety.ResultCode -ceq
                 'PROFILE_DELETE_ACTIVE_OUT_OF_SYNC') {
@@ -3282,12 +3443,12 @@ try {
                     Show-QiehaoOperationResult -Result $syncResult
                     return
                 }
-                Invoke-QiehaoReadOnlyRefresh
+                $null = Sync-QiehaoCommittedActiveState
                 $safety = Invoke-QiehaoOperationProvider `
                     -Operation 'DELETE' `
                     -Provider {
                         param($Name)
-                        Get-CodexProfileDeleteSafety -Name $Name
+                        Invoke-QiehaoResponsiveLifecycle -Action DeleteSafety -Name $Name
                     } -ArgumentList @($profileName)
             }
             if ([string]$safety.ResultCode -cne 'PROFILE_DELETE_SAFE') {
@@ -3308,7 +3469,7 @@ try {
 
             $quotaCacheWarning = $null
             $result = Invoke-QiehaoOperationProvider -Operation 'DELETE' `
-                -Provider { param($Name) Remove-CodexProfile -Name $Name -ConfirmDelete } `
+                -Provider { param($Name) Invoke-QiehaoResponsiveLifecycle -Action Delete -Name $Name } `
                 -ArgumentList @($profileName)
             if ($result.IsSuccess) {
                 $script:guiVerificationStates.Remove($profileName)
@@ -3328,7 +3489,7 @@ try {
                 }
             }
             Show-QiehaoOperationResult -Result $result
-            if ($result.RefreshRequired) { Invoke-QiehaoReadOnlyRefresh }
+            if ($result.RefreshRequired) { Update-QiehaoQuotaRows }
             if (-not [string]::IsNullOrWhiteSpace($quotaCacheWarning)) {
                 $refreshStatusText.Text = $quotaCacheWarning
             }
@@ -3384,17 +3545,16 @@ try {
                     -Fallback '本地名称：')
             if ([string]::IsNullOrWhiteSpace($profileName)) { return }
             $result = Invoke-QiehaoOperationProvider -Operation 'ADD' `
-                -Provider { param($Name) Add-CodexProfile -Name $Name } `
+                -Provider { param($Name) Invoke-QiehaoResponsiveLifecycle -Action ManualAdd -Name $Name } `
                 -ArgumentList @($profileName)
             Show-QiehaoOperationResult -Result $result
-            if ($result.RefreshRequired) { Invoke-QiehaoReadOnlyRefresh }
         }
         finally { Set-QiehaoWriteBusy -Value $false }
     }
 
     function Invoke-QiehaoAddAccount {
         if ($script:guiIsWriteOperationBusy) { return }
-        Stop-QiehaoQuotaAsync
+        if (-not (Stop-QiehaoQuotaForLifecycle)) { return }
         $liveStatus = Get-QiehaoLiveCodexStatus
         if ($liveStatus -ceq '未知') {
             Show-QiehaoSafeMessage -Message (Get-QiehaoGuiText `
@@ -3416,7 +3576,19 @@ try {
                 -Severity Warning
             return
         }
-        Start-QiehaoAddWizard
+        try {
+            $refreshStatusText.Text = Get-QiehaoGuiText -Key 'Account.LoginStarting'
+            $result = Invoke-QiehaoOperationProvider -Operation ADD -Provider {
+                Invoke-QiehaoResponsiveLifecycle -Action Login
+            }
+            if (-not $script:guiLifecycleClosingRequested) { Show-QiehaoOperationResult -Result $result }
+            if (-not $script:guiLifecycleClosingRequested -and $result.ResultCode -ceq 'ACCOUNT_LOGIN_MANUAL_FALLBACK_REQUIRED') {
+                # Explicit user confirmation in the original wizard; never
+                # silently capture the previous account after a protocol error.
+                Start-QiehaoAddWizard
+            }
+        }
+        finally { Set-QiehaoWriteBusy -Value $false }
     }
 
     function Get-QiehaoDataGridRowFromSource {
@@ -4214,7 +4386,30 @@ try {
         $script:guiThemePersistenceReady = $true
         $script:guiLanguagePersistenceReady = $true
     })
-    $window.Add_Closing({ Stop-QiehaoAllTimers })
+    $window.Add_PreviewKeyDown({
+        param($sender,$eventArgs)
+        if ($eventArgs.Key -eq [Windows.Input.Key]::Escape -and $script:guiLifecycleWorkerRunning) {
+            Request-QiehaoLifecycleCancellation -Reason Esc
+            $eventArgs.Handled = $true
+        }
+    })
+    $window.Add_Closing({
+        param($sender,$eventArgs)
+        if ($script:guiLifecycleWorkerRunning) {
+            Request-QiehaoLifecycleCancellation -Reason WindowClose
+            $eventArgs.Cancel = $true
+            return
+        }
+        if ($script:guiLifecycleRegistry.IsActive) {
+            # Cleanup could not prove owned-child exit: return control promptly,
+            # but never silently abandon that child or kill external processes.
+            $eventArgs.Cancel = $true
+            $script:guiManualRecoveryRequired = $true
+            Show-QiehaoSafeMessage -Message (Get-QiehaoGuiText -Key 'Operation.DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED') -Severity Critical
+            return
+        }
+        Stop-QiehaoAllTimers
+    })
     $window.Add_Closed({
         Stop-QiehaoAllTimers
     })

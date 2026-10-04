@@ -1,5 +1,6 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSScriptRoot 'AppServerOwnership.psm1') -ErrorAction Stop
 
 $script:QuotaProjectRoot = Split-Path -Parent $PSScriptRoot
 $script:QuotaParserPath = Join-Path -Path $PSScriptRoot -ChildPath 'QuotaParser.psm1'
@@ -474,28 +475,14 @@ function Invoke-QiehaoQuotaTransport {
         $process = New-Object Diagnostics.Process
         $process.StartInfo = $startInfo
         try {
-            $processStarted = [bool]$process.Start()
+            $processStarted = Start-QiehaoOwnedAppServer -Process $process -Registry $OwnedProcessRegistry -Purpose Quota
         }
         catch {
+            try { $processStarted = ($process.Id -gt 0) } catch { $processStarted = $false }
             throw 'QUOTA_APP_SERVER_START_FAILED'
         }
         if (-not $processStarted) { throw 'QUOTA_APP_SERVER_START_FAILED' }
         $appServerStarted = $true
-        if ($null -ne $OwnedProcessRegistry) {
-            try {
-                $OwnedProcessRegistry.ProcessId = [int]$process.Id
-                $OwnedProcessRegistry.ProcessStartTimeUtc =
-                    $process.StartTime.ToUniversalTime()
-                $OwnedProcessRegistry.ExecutablePath =
-                    [System.IO.Path]::GetFullPath([string]$executable.Path)
-                $OwnedProcessRegistry.Arguments = $processArguments
-                $OwnedProcessRegistry.ParentProcessId = [int]$PID
-                $OwnedProcessRegistry.IsActive = $true
-            }
-            catch {
-                throw 'QUOTA_APP_SERVER_OWNERSHIP_FAILED'
-            }
-        }
         $stderrTask = $process.StandardError.ReadToEndAsync()
         $deadlineUtc = if ($TestDeadlineMilliseconds -gt 0 -and
             -not [string]::IsNullOrWhiteSpace($TestExecutablePath)) {
@@ -514,10 +501,10 @@ function Invoke-QiehaoQuotaTransport {
                     clientInfo = [ordered]@{
                         name = 'qiehaoqu-quota-client'
                         title = 'Qiehaoqu Quota Client'
-                        version = '1.0.0'
+                        version = '1.1.0'
                     }
                     capabilities = [ordered]@{
-                        experimentalApi = $true
+                        experimentalApi = $false
                     }
                 }
             })
@@ -570,6 +557,28 @@ function Invoke-QiehaoQuotaTransport {
             }
             $rateLimitsWaitElapsedMilliseconds =
                 $rateLimitsWaitStopwatch.ElapsedMilliseconds
+        }
+        if ($quotaResponse.MatchingErrorReceived) {
+            $rpcError = Get-QiehaoQuotaPropertyValue -InputObject $quotaResponse.Response -Name 'error'
+            $rpcCode = Get-QiehaoQuotaPropertyValue -InputObject $rpcError -Name 'code'
+            if ($rpcCode -eq -32602) {
+                # Exactly one protocol-parameter compatibility fallback. Never
+                # retry a timeout/network/server failure, and retain deadline.
+                $quotaRequestId = 3
+                Write-QiehaoQuotaJsonLine -Writer $process.StandardInput -Message @{
+                    id = $quotaRequestId; method = 'account/rateLimits/read'; params = @{}
+                }
+                $fallbackClock = [Diagnostics.Stopwatch]::StartNew()
+                try {
+                    $quotaResponse = Wait-QiehaoQuotaMatchingResponse -Reader $process.StandardOutput `
+                        -RequestId $quotaRequestId -DeadlineUtc $deadlineUtc
+                } catch {
+                    if ($_.Exception.Message -ceq 'QUOTA_RESPONSE_TIMEOUT') { throw 'QUOTA_RATE_LIMITS_TIMEOUT' }
+                    throw 'QUOTA_RESPONSE_INVALID'
+                } finally {
+                    $rateLimitsWaitElapsedMilliseconds += $fallbackClock.ElapsedMilliseconds
+                }
+            }
         }
         if ($quotaResponse.MatchingErrorReceived) {
             throw 'QUOTA_RATE_LIMITS_RPC_ERROR'
@@ -675,7 +684,7 @@ function Invoke-QiehaoQuotaTransport {
                 $cleanupFailureCode = 'QUOTA_CHILD_CLEANUP_FAILED'
                 $childCleanup = 'GraceExpired'
             }
-            $process.Dispose()
+            if ($childHasExited) { $process.Dispose() }
             if ($cleanupStopwatch.IsRunning) {
                 $cleanupStopwatch.Stop()
             }
@@ -686,7 +695,9 @@ function Invoke-QiehaoQuotaTransport {
             $process.Dispose()
         }
         if ($null -ne $OwnedProcessRegistry) {
-            $OwnedProcessRegistry.IsActive = $false
+            if ($OwnedProcessRegistry.ContainsKey('OwnershipGeneration') -and [object]::ReferenceEquals($process,$OwnedProcessRegistry.ProcessHandle)) {
+                Complete-QiehaoOwnedAppServer -Registry $OwnedProcessRegistry -ExitObserved (-not $processStarted -or $childHasExited) -CleanupResult $childCleanup
+            }
         }
         $initializeResponse = $null
         if ($null -ne $quotaResponse) {

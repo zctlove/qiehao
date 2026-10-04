@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Normal', 'NeverExit', 'PrimaryTimeoutNeverExit')]
+    [ValidateSet('Normal', 'NeverExit', 'PrimaryTimeoutNeverExit','RejectNewParams','RejectAlways','ServerFailure')]
     [string]$Scenario,
 
     [ValidateRange(0, 10000)]
@@ -10,7 +10,8 @@ param(
     [ValidateRange(0, 10000)]
     [int]$ExitDelayMilliseconds = 0,
 
-    [AllowNull()][string]$PidFile
+    [AllowNull()][string]$PidFile,
+    [string]$TraceFile
 )
 
 Set-StrictMode -Version 2.0
@@ -58,6 +59,17 @@ while ($true) {
     if ($method -ceq 'initialized') { continue }
 
     if ($method -ceq 'account/rateLimits/read') {
+        if ($TraceFile) { [IO.File]::AppendAllText($TraceFile,'read'+[Environment]::NewLine) }
+        $hasNewParameter = $null -ne $message.PSObject.Properties['params'] -and
+            $null -ne $message.params.PSObject.Properties['excludeResetCreditDetails']
+        if ($Scenario -ceq 'RejectAlways' -or ($Scenario -ceq 'RejectNewParams' -and $hasNewParameter)) {
+            Write-FakeJsonLine -Value @{id=$message.id;error=@{code=-32602;message='Invalid params'}}
+            continue
+        }
+        if ($Scenario -ceq 'ServerFailure') {
+            Write-FakeJsonLine -Value @{id=$message.id;error=@{code=-32000;message='temporarily unavailable'}}
+            continue
+        }
         if ($Scenario -ceq 'PrimaryTimeoutNeverExit') {
             continue
         }

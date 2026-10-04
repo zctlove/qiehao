@@ -32,7 +32,7 @@ $ErrorActionPreference = 'Stop'
 
 $modulePath = Join-Path -Path $PSScriptRoot -ChildPath 'lib\CodexAuth.psm1'
 Import-Module -Name $modulePath -Force -ErrorAction Stop
-Write-QiehaoAppStartDiagnostic -Version '1.0.0-rc'
+Write-QiehaoAppStartDiagnostic -Version '1.1.0'
 
 $safeErrorCodes = @(
     'ATOMIC_WRITE_FAILED',

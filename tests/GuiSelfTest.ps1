@@ -1622,7 +1622,7 @@ Assert-GuiTest -Condition (
     $otherRunningActions.Delete -and
     $otherRunningActions.ContextDelete -and
     -not $otherRunningActions.LaunchCodex -and
-    $busyActions.Refresh -and
+    -not $busyActions.Refresh -and
     -not $busyActions.Switch -and -not $busyActions.Add -and
     -not $busyActions.Rename -and -not $busyActions.Delete -and
     -not $busyActions.LaunchCodex -and
@@ -2720,6 +2720,7 @@ $helperSource = [System.IO.File]::ReadAllText($helperModulePath)
 $localizationSource = [System.IO.File]::ReadAllText($localizationModulePath)
 $localizedGuiSource = $guiSource + [Environment]::NewLine +
     $localizationSource
+$workerSource = [IO.File]::ReadAllText((Join-Path $guiRoot 'LifecycleWorker.ps1'))
 $addWizardSection = [regex]::Match(
     $guiSource,
     '(?s)function Start-QiehaoAddWizard\s*\{.*?(?=\s+function Invoke-QiehaoAddAccount)'
@@ -2734,13 +2735,13 @@ $deleteSection = [regex]::Match(
 ).Value
 foreach ($requiredBackendCommand in @(
     'Switch-CodexAccountProfile',
-    'Add-CodexProfile',
+    'Add-CodexVerifiedLocalProfile',
     'Remove-CodexProfile',
     'Rename-CodexProfile',
     'Test-CodexActiveIdentity'
 )) {
     Assert-GuiTest -Condition (
-        $guiSource -match ('(?i)\b' + [regex]::Escape($requiredBackendCommand) + '\b')
+        ($guiSource + $workerSource) -match ('(?i)\b' + [regex]::Escape($requiredBackendCommand) + '\b')
     ) -Code ('GUI_BACKEND_WIRING_MISSING_' + $requiredBackendCommand)
 }
 Assert-GuiTest -Condition (
@@ -2767,7 +2768,7 @@ Assert-GuiTest -Condition (
         'Invoke-QiehaoSwitchSelectedProfile')).Count -ge 4 -and
     $guiSource -match 'DataGridRow' -and
     $guiSource -match 'OriginalSource' -and
-    $guiSource -match 'ConfirmDelete' -and
+    ($guiSource + $workerSource) -match 'ConfirmDelete' -and
     $localizedGuiSource -match '我已登录账号并退出' -and
     $localizedGuiSource -match '登录或切换到要添加的账号' -and
     $localizedGuiSource -match '不是注销当前登录账号' -and
@@ -2780,18 +2781,21 @@ Assert-GuiTest -Condition (
     $addWizardSection -match '\bTest-CodexActiveIdentity\b' -and
     $addWizardSection -match 'ACTIVE_IDENTITY_CONFIRMED' -and
     $addWizardSection -match 'Account.AddCurrentAlreadySaved' -and
-    $addWizardSection -match '\bAdd-CodexProfile\b'
+    $addWizardSection -match 'Invoke-QiehaoResponsiveLifecycle -Action ManualAdd' -and
+    $workerSource -match '\bAdd-CodexVerifiedLocalProfile\b'
 ) -Code 'GUI_ADD_STATE_MACHINE_IDENTITY_HANDLING_FAILED'
 Assert-GuiTest -Condition (
     -not [string]::IsNullOrWhiteSpace($addEntrySection) -and
-    $addEntrySection.IndexOf('Stop-QiehaoQuotaAsync') -ge 0 -and
-    $addEntrySection.IndexOf('Stop-QiehaoQuotaAsync') -lt
+    $addEntrySection.IndexOf('Stop-QiehaoQuotaForLifecycle') -ge 0 -and
+    $addEntrySection.IndexOf('Stop-QiehaoQuotaForLifecycle') -lt
         $addEntrySection.IndexOf('Get-QiehaoLiveCodexStatus') -and
     -not [string]::IsNullOrWhiteSpace($deleteSection) -and
-    $deleteSection -match '\bGet-CodexProfileDeleteSafety\b' -and
+    $deleteSection -match 'Invoke-QiehaoResponsiveLifecycle -Action DeleteSafety' -and
+    $workerSource -match '\bGet-CodexProfileDeleteSafety\b' -and
     $deleteSection -match 'PROFILE_DELETE_ACTIVE_OUT_OF_SYNC' -and
     $deleteSection -match '\bSync-CodexActiveProfile\b' -and
-    $deleteSection -match '\bRemove-CodexProfile\b' -and
+    $deleteSection -match 'Invoke-QiehaoResponsiveLifecycle -Action Delete' -and
+    $workerSource -match '\bRemove-CodexProfile\b' -and
     $deleteSection -notmatch '\bGet-QiehaoLiveCodexStatus\b' -and
     $deleteSection -notmatch
         '\b(?:Start-QiehaoAddWizard|Invoke-QiehaoAddAccount|Add-CodexProfile)\b' -and
@@ -2927,7 +2931,7 @@ Assert-GuiTest -Condition (
     $coreAndGuiSource -notmatch '(?i)Stop-Process\b|taskkill\b|TerminateProcess\b|\.Kill\s*\('
 ) -Code 'GUI_FORCE_TERMINATION_API_PRESENT'
 Assert-GuiTest -Condition (
-    $guiSource -match 'Test-CodexProfile' -and
+    ($guiSource + $workerSource) -match 'Test-CodexProfile' -and
     $guiSource -match 'Start-QiehaoManualSwitchWaitTimer' -and
     $guiSource -match 'Show-QiehaoManualSwitchWaitDialog' -and
     $guiSource -match 'Cancel-QiehaoManualSwitchWait' -and
@@ -3006,7 +3010,7 @@ Assert-GuiTest -Condition (
     $timerWaitAndCloseSection -match 'guiPendingTargetProfile = \$TargetProfile' -and
     $timerWaitAndCloseSection -match 'Stop-QiehaoProcessMonitor' -and
     $timerWaitAndCloseSection -match 'Start-QiehaoProcessMonitor' -and
-    $timerWaitAndCloseSection -match 'Add_Closing\(\{ Stop-QiehaoAllTimers \}\)' -and
+    $timerWaitAndCloseSection -match '(?s)\$window.Add_Closing\(\{.*?Request-QiehaoLifecycleCancellation -Reason WindowClose.*?Stop-QiehaoAllTimers' -and
     $timerWaitAndCloseSection -match 'Add_Closed\(' -and
     $timerWaitAndCloseSection -notmatch '\$startedAt' -and
     $helperSource -match 'Remove_Tick' -and
@@ -3033,9 +3037,11 @@ Assert-GuiTest -Condition (
     -not [string]::IsNullOrWhiteSpace($manualWaitSection) -and
     $manualWaitSection -match 'IntervalMilliseconds 500' -and
     $manualWaitSection -match 'TimeoutSeconds \$TimeoutSeconds' -and
-    $manualWaitSection -match 'Test-CodexProcessesStopped' -and
+    $manualWaitSection -match 'Get-QiehaoGuiProcessState' -and
+    $guiSource -match '(?s)function Get-QiehaoGuiProcessState.*?Invoke-QiehaoOwnedProcessInspection.*?Test-CodexProcessesStopped -OwnedProcessDescriptors \$Descriptors' -and
     $manualWaitSection -match 'Invoke-QiehaoSwitchCore' -and
-    $manualWaitSection -match 'TargetProfile \$capturedTarget -DeferPresentation' -and
+    $manualWaitSection -match 'Invoke-QiehaoDeferredSwitchCompletion -TargetProfile \$capturedTarget' -and
+    $manualWaitSection -match 'Invoke-QiehaoSwitchCore -TargetProfile \$TargetProfile -DeferPresentation' -and
     $manualWaitSection -match 'Stop-QiehaoManualSwitchWaitTimer' -and
     $manualWaitSection -notmatch 'Request-CodexDesktopNativeQuit|Request-CodexDesktopClose|CloseMainWindow' -and
     $manualWaitSection -notmatch '(?i)Get-CodexActiveProfile|Get-CodexAccountSlot|Test-CodexActiveIdentity|Save-CodexActiveProfile|Set-Content|Out-File|WriteAll|Invoke-WebRequest|Invoke-RestMethod'
@@ -3084,7 +3090,9 @@ Assert-GuiTest -Condition (
 Assert-GuiTest -Condition (
     $guiSource -match "-Key 'Switch.SuccessCurrent'" -and
     $guiSource -match 'Complete-QiehaoSwitchUiAfterBackend' -and
-    $guiSource -match 'ExpectedActiveProfile \$ExpectedProfile -PassThru' -and
+    $guiSource -match 'function Sync-QiehaoCommittedActiveState' -and
+    $guiSource -match '\$currentRows.Count -eq 1' -and
+    $guiSource -match 'Get-QiehaoCommittedProfileSnapshot' -and
     $guiSource -match "'SwitchSucceededUiRefreshFailed'" -and
     $guiSource -match "-Key 'Switch.RefreshFailed'" -and
     $localizationSource -match '账号切换已经成功，但界面状态刷新失败' -and
@@ -3110,8 +3118,8 @@ $launchSection = [regex]::Match(
 ).Value
 Assert-GuiTest -Condition (
     -not [string]::IsNullOrWhiteSpace($launchSection) -and
-    $launchSection.IndexOf('Stop-QiehaoQuotaAsync') -ge 0 -and
-    $launchSection.IndexOf('Stop-QiehaoQuotaAsync') -lt
+    $launchSection.IndexOf('Stop-QiehaoQuotaForLifecycle') -ge 0 -and
+    $launchSection.IndexOf('Stop-QiehaoQuotaForLifecycle') -lt
         $launchSection.IndexOf('Get-QiehaoLiveCodexStatus') -and
     $launchSection -match 'Start-Process' -and
     $launchSection -match 'shell:AppsFolder' -and

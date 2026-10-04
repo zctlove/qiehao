@@ -538,7 +538,9 @@ try {
     ) 'QUOTA_GUI_RPC_ENCAPSULATION_FAILED'
     $clientSource = [System.IO.File]::ReadAllText($clientPath)
     Assert-QuotaTest (
-        [regex]::Matches($clientSource, 'account/rateLimits/read').Count -eq 1 -and
+        [regex]::Matches($clientSource, 'account/rateLimits/read').Count -eq 2 -and
+        $clientSource -match '\$rpcCode -eq -32602' -and
+        $clientSource -match 'experimentalApi = \$false' -and
         $clientSource -match '\[int\]\$TimeoutSeconds = 30' -and
         $clientSource -match '\[int\]\$CleanupGraceMilliseconds = 4000' -and
         $clientSource -notmatch 'remainingCleanupMilliseconds' -and

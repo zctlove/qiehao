@@ -14,6 +14,8 @@ $script:MaximumIdentityBytes = 2048
 $script:MaximumMetadataFileBytes = 64KB
 $script:CodexProcessExitWaitMilliseconds = 8000
 $script:CodexProcessRecheckIntervalMilliseconds = 500
+$script:ProcessInspectionElapsedMilliseconds = 0L
+$script:ProcessInspectionSource = 'Unknown'
 $script:WriteMutexName = 'Local\Qiehaoqu.CodexAccountSwitcher.WriteOperation.v1'
 $script:ProfileDeleteTrashDirectoryName = '.trash'
 $script:ProfileDeleteCommitMarkerSuffix = '.committed'
@@ -1199,16 +1201,18 @@ function Test-NativeCodexChatGptPath {
 }
 
 function Get-ProcessInspectionSnapshot {
+    $inspectionClock = [Diagnostics.Stopwatch]::StartNew()
     try {
         $cimProcesses = @(Get-CimInstance -ClassName Win32_Process -Property @(
             'Name',
             'ProcessId',
             'ParentProcessId',
             'ExecutablePath',
-            'CreationDate'
+            'CreationDate',
+            'SessionId'
         ) -ErrorAction Stop)
 
-        foreach ($process in $cimProcesses) {
+        $snapshot = @(foreach ($process in $cimProcesses) {
             $processPath = [string]$process.ExecutablePath
             $startTimeUtc = $null
             $startTimeStatus = 'Unavailable'
@@ -1224,6 +1228,7 @@ function Get-ProcessInspectionSnapshot {
                 Id = [int]$process.ProcessId
                 ParentProcessId = [int]$process.ParentProcessId
                 ParentReadStatus = 'Readable'
+                SessionId = $process.SessionId
                 ExecutablePath = $processPath
                 ProcessStartTimeUtc = $startTimeUtc
                 StartTimeReadStatus = $startTimeStatus
@@ -1234,7 +1239,10 @@ function Get-ProcessInspectionSnapshot {
                     'Readable'
                 }
             }
-        }
+        })
+        Add-CodexSandboxServiceEvidence -Snapshot $snapshot
+        $script:ProcessInspectionSource = 'CIM'
+        $script:ProcessInspectionElapsedMilliseconds = $inspectionClock.ElapsedMilliseconds
         return
     }
     catch {
@@ -1243,7 +1251,7 @@ function Get-ProcessInspectionSnapshot {
     }
 
     $processes = @(Get-Process -ErrorAction Stop)
-    foreach ($process in $processes) {
+    $snapshot = @(foreach ($process in $processes) {
         $processPath = $null
         $pathReadStatus = 'Unavailable'
         $startTimeUtc = $null
@@ -1262,21 +1270,121 @@ function Get-ProcessInspectionSnapshot {
             $startTimeStatus = 'Readable'
         }
         catch { }
+        $sessionId = $null
+        try { $sessionId = $process.SessionId } catch { }
 
         [pscustomobject]@{
             ProcessName = $process.ProcessName
             Id = $process.Id
             ParentProcessId = $null
             ParentReadStatus = 'Unavailable'
+            SessionId = $sessionId
             ExecutablePath = $processPath
             PathReadStatus = $pathReadStatus
             ProcessStartTimeUtc = $startTimeUtc
             StartTimeReadStatus = $startTimeStatus
         }
-    }
+    })
+    Add-CodexSandboxServiceEvidence -Snapshot $snapshot
+    $script:ProcessInspectionSource = 'GetProcessFallback'
+    $script:ProcessInspectionElapsedMilliseconds = $inspectionClock.ElapsedMilliseconds
 }
 
-function Test-QiehaoOwnedQuotaProcess {
+function Add-CodexSandboxServiceEvidence {
+    param(
+        [AllowEmptyCollection()][object[]]$Snapshot = @(),
+        [AllowNull()][scriptblock]$ServiceProvider
+    )
+
+    # Query SCM metadata once per fresh snapshot, only when the exact service
+    # executable is present. Never enumerate credentials or control a service.
+    $candidates = @($Snapshot | Where-Object {
+        $null -ne $_ -and
+        $null -ne $_.PSObject.Properties['ProcessName'] -and
+        (Get-NormalizedProcessName -Name ([string]$_.ProcessName)) -ieq
+            'codex-windows-sandbox-service'
+    })
+    if ($candidates.Count -eq 0) { return $Snapshot }
+    $services = @()
+    $inspectionStatus = 'Unavailable'
+    try {
+        $services = if ($null -ne $ServiceProvider) {
+            @(& $ServiceProvider)
+        }
+        else {
+            @(Get-CimInstance -ClassName Win32_Service -Filter `
+                "Name = 'CodexSandboxService.OpenAI.Codex'" -Property @(
+                    'Name', 'ProcessId', 'PathName', 'StartName', 'State'
+                ) -ErrorAction Stop)
+        }
+        $inspectionStatus = 'Readable'
+    }
+    catch { } # Unavailable service evidence must never grant an exemption.
+    foreach ($candidate in $candidates) {
+        $candidate | Add-Member -NotePropertyName SandboxServiceInspectionStatus `
+            -NotePropertyValue $inspectionStatus -Force
+        $candidate | Add-Member -NotePropertyName SandboxServiceEvidence `
+            -NotePropertyValue @($services) -Force
+    }
+    return $Snapshot
+}
+
+function Test-CodexPersistentWindowsSandboxService {
+    param([Parameter(Mandatory = $true)][object]$Process)
+
+    try {
+    $name = $Process.PSObject.Properties['ProcessName']
+    $id = $Process.PSObject.Properties['Id']
+    $status = $Process.PSObject.Properties['SandboxServiceInspectionStatus']
+    $evidence = $Process.PSObject.Properties['SandboxServiceEvidence']
+    if ($null -eq $name -or
+        (Get-NormalizedProcessName -Name ([string]$name.Value)) -ine
+            'codex-windows-sandbox-service' -or
+        $null -eq $id -or [int]$id.Value -le 0 -or
+        $null -eq $status -or [string]$status.Value -cne 'Readable' -or
+        $null -eq $evidence) { return $false }
+    $services = @($evidence.Value)
+    if ($services.Count -ne 1 -or $null -eq $services[0]) { return $false }
+    $service = $services[0]
+    foreach ($required in @('Name', 'ProcessId', 'PathName', 'State')) {
+        if ($null -eq $service.PSObject.Properties[$required]) { return $false }
+    }
+    if ([string]$service.Name -ine 'CodexSandboxService.OpenAI.Codex' -or
+        [int]$service.ProcessId -ne [int]$id.Value -or
+        [string]$service.State -ine 'Running') { return $false }
+    $startName = $service.PSObject.Properties['StartName']
+    if ($null -ne $startName -and
+        -not [string]::IsNullOrWhiteSpace([string]$startName.Value) -and
+        [string]$startName.Value -notmatch '^(?i:LocalSystem|NT AUTHORITY\\SYSTEM)$') {
+        return $false
+    }
+    $session = $Process.PSObject.Properties['SessionId']
+    if ($null -ne $session -and $null -ne $session.Value -and
+        [int]$session.Value -ne 0) { return $false }
+
+    # SCM's configured executable supplies path evidence even when a normal
+    # user cannot inspect a LocalSystem process's executable path directly.
+    $command = ([string]$service.PathName).Trim()
+    if ($command -notmatch '^(?:"(?<exe>[^"\r\n]+\.exe)"|(?<exe>[^"\r\n]+?\.exe))(?:\s.*)?$') {
+        return $false
+    }
+    $servicePath = $Matches['exe'].Replace('/', '\')
+    $packagePattern = '^(?i:[A-Z]:\\Program Files\\WindowsApps\\OpenAI\.Codex_[A-Za-z0-9._-]+\\app\\resources\\codex-windows-sandbox-service\.exe)$'
+    if ($servicePath -notmatch $packagePattern) { return $false }
+    $path = $Process.PSObject.Properties['ExecutablePath']
+    if ($null -ne $path -and
+        -not [string]::IsNullOrWhiteSpace([string]$path.Value)) {
+        $processPath = ([string]$path.Value).Replace('/', '\')
+        if ($processPath -notmatch $packagePattern -or
+            -not $processPath.Equals($servicePath,
+                [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    }
+    return $true
+    }
+    catch { return $false }
+}
+
+function Test-QiehaoOwnedAppServer {
     param(
         [Parameter(Mandatory = $true)][object]$Process,
         [AllowEmptyCollection()][object[]]$OwnedProcessDescriptors
@@ -1302,6 +1410,8 @@ function Test-QiehaoOwnedQuotaProcess {
 
     foreach ($descriptor in @($OwnedProcessDescriptors)) {
         if ($null -eq $descriptor) { continue }
+        $purpose = $descriptor.PSObject.Properties['Purpose']
+        if ($null -ne $purpose -and [string]$purpose.Value -cnotin @('Quota', 'AccountVerify', 'AccountLogin')) { continue }
         $active = $descriptor.PSObject.Properties['IsActive']
         $pidProperty = $descriptor.PSObject.Properties['ProcessId']
         $ownedStart = $descriptor.PSObject.Properties['ProcessStartTimeUtc']
@@ -1445,6 +1555,7 @@ function Test-CodexProcessesStopped {
     $uncertain = @()
     $browserExtensionHosts = @()
     $ownedQuotaProcesses = @()
+    $persistentSandboxServices = @()
     $processById = @{}
     foreach ($snapshotItem in $snapshot) {
         if ($null -eq $snapshotItem) {
@@ -1486,11 +1597,31 @@ function Test-CodexProcessesStopped {
             Classification = 'CODEX_PROCESS'
         }
 
-        if (Test-QiehaoOwnedQuotaProcess -Process $item -OwnedProcessDescriptors $OwnedProcessDescriptors) {
+        # A claimed sandbox service must pass SCM/PID/package verification;
+        # neither broad Codex names nor quota ownership can bypass this check.
+        if ($normalizedProcessName -ieq 'codex-windows-sandbox-service') {
+            if (Test-CodexPersistentWindowsSandboxService -Process $item) {
+                $safeDescriptor.Classification = 'CODEX_PERSISTENT_SANDBOX_SERVICE'
+                $persistentSandboxServices += $safeDescriptor
+            }
+            else {
+                $safeDescriptor.Classification = 'UNVERIFIED_CODEX_SANDBOX_SERVICE'
+                $blocking += $safeDescriptor
+            }
+            continue
+        }
+
+        if (Test-QiehaoOwnedAppServer -Process $item -OwnedProcessDescriptors $OwnedProcessDescriptors) {
+            $purposeName = 'Quota'
+            foreach ($owned in @($OwnedProcessDescriptors)) {
+                if ($null -ne $owned -and $null -ne $owned.PSObject.Properties['Purpose'] -and
+                    [int]$owned.ProcessId -eq $processId) { $purposeName = [string]$owned.Purpose; break }
+            }
             $ownedQuotaProcesses += [pscustomobject]@{
                 ProcessName = $processName
                 PID = $processId
-                Classification = 'QIEHAO_QUOTA_APP_SERVER'
+                Classification = 'QIEHAO_OWNED_APP_SERVER'
+                Purpose = $purposeName
             }
             continue
         }
@@ -1555,6 +1686,7 @@ function Test-CodexProcessesStopped {
             UncertainProcesses = @($uncertain)
             BrowserExtensionHosts = @($browserExtensionHosts)
             OwnedQuotaProcesses = @($ownedQuotaProcesses)
+            PersistentSandboxServices = @($persistentSandboxServices)
             ReasonCode = 'CODEX_PROCESS_RUNNING'
         }
     }
@@ -1565,6 +1697,7 @@ function Test-CodexProcessesStopped {
             UncertainProcesses = @($uncertain)
             BrowserExtensionHosts = @($browserExtensionHosts)
             OwnedQuotaProcesses = @($ownedQuotaProcesses)
+            PersistentSandboxServices = @($persistentSandboxServices)
             ReasonCode = 'CODEX_PROCESS_STATE_UNKNOWN'
         }
     }
@@ -1575,6 +1708,7 @@ function Test-CodexProcessesStopped {
         UncertainProcesses = @()
         BrowserExtensionHosts = @($browserExtensionHosts)
         OwnedQuotaProcesses = @($ownedQuotaProcesses)
+        PersistentSandboxServices = @($persistentSandboxServices)
         ReasonCode = 'CODEX_PROCESSES_STOPPED'
     }
 }
@@ -2251,6 +2385,22 @@ function Get-QiehaoProcessDiagnosticRecords {
     )
 
     $blockingIds = @{}
+    $classifications = @{}
+    $purposes = @{}
+    if ($null -ne $ProcessState) {
+        foreach ($group in @('BlockingProcesses', 'UncertainProcesses',
+            'BrowserExtensionHosts', 'OwnedQuotaProcesses',
+            'PersistentSandboxServices')) {
+            $property = $ProcessState.PSObject.Properties[$group]
+            if ($null -eq $property) { continue }
+            foreach ($descriptor in @($property.Value)) {
+                if ($null -ne $descriptor) {
+                    $classifications[[string][int]$descriptor.PID] =
+                        [string]$descriptor.Classification
+                }
+            }
+        }
+    }
     if ($null -ne $ProcessState -and
         $null -ne $ProcessState.PSObject.Properties['BlockingProcesses']) {
         foreach ($blockingProcess in @($ProcessState.BlockingProcesses)) {
@@ -2291,14 +2441,39 @@ function Get-QiehaoProcessDiagnosticRecords {
                 catch { '' }
             }
         $processId = [int]$idProperty.Value
+        $ownedAppServer = Test-QiehaoOwnedAppServer -Process $process -OwnedProcessDescriptors $OwnedProcessDescriptors
+        $ownedPurpose = ''
+        if ($ownedAppServer) {
+            $ownedPurpose = 'Quota'
+            foreach ($owner in @($OwnedProcessDescriptors)) {
+                if ($null -ne $owner.PSObject.Properties['Purpose'] -and [int]$owner.ProcessId -eq $processId) {
+                    $ownedPurpose = [string]$owner.Purpose; break
+                }
+            }
+        }
         $records += [pscustomobject]@{
             PID = $processId
             ProcessName = $processName
             ProcessPath = $processPath
             ProcessStartTime = $startTime
-            IsQiehaoQuotaChild = [bool](Test-QiehaoOwnedQuotaProcess `
-                -Process $process `
-                -OwnedProcessDescriptors $OwnedProcessDescriptors)
+            Classification = if ($classifications.ContainsKey([string]$processId)) {
+                $classifications[[string]$processId]
+            } else { 'NON_BLOCKING_PROCESS' }
+            SessionId = if ($null -ne $process.PSObject.Properties['SessionId']) {
+                $process.SessionId
+            } else { $null }
+            ServiceStartName = if (
+                $null -ne $process.PSObject.Properties['SandboxServiceEvidence'] -and
+                @($process.SandboxServiceEvidence).Count -eq 1 -and
+                $null -ne $process.SandboxServiceEvidence[0].PSObject.Properties['StartName']
+            ) {
+                if ([string]$process.SandboxServiceEvidence[0].StartName -match
+                    '^(?i:LocalSystem|NT AUTHORITY\\SYSTEM)$') { 'LocalSystem' }
+                else { 'Other' }
+            } else { '' }
+            IsQiehaoQuotaChild = $ownedAppServer -and $ownedPurpose -ceq 'Quota'
+            IsQiehaoOwnedAppServer = $ownedAppServer
+            Purpose = $ownedPurpose
             IsBlockingProcess = [bool]$blockingIds.ContainsKey(
                 [string]$processId
             )
@@ -2369,6 +2544,8 @@ function Assert-CodexNotRunning {
                 ProcessCount = @($diagnosticProcesses).Count
                 Processes = @($diagnosticProcesses)
                 SafeToSave = [bool]$processState.SafeToSave
+                ProcessInspectionElapsedMilliseconds = $script:ProcessInspectionElapsedMilliseconds
+                ProcessInspectionSource = $script:ProcessInspectionSource
                 ReasonCode = [string]$processState.ReasonCode
                 BlockingCount = @($processState.BlockingProcesses).Count
                 UncertainCount = @($processState.UncertainProcesses).Count
@@ -3342,6 +3519,7 @@ function ConvertTo-QiehaoDiagnosticSafeValue {
         'CredentialSource', 'WorkspaceType', 'IdentityHash', 'ParseResult',
         'ProcessCount', 'Processes', 'PID', 'ProcessName', 'ProcessPath',
         'ProcessStartTime', 'IsQiehaoQuotaChild', 'IsBlockingProcess',
+        'Classification', 'SessionId', 'ServiceStartName',
         'SafeToSave',
         'ReasonCode', 'BlockingCount', 'UncertainCount', 'ResultCode',
         'ProfileIntegrity', 'CurrentWorkspaceType', 'SavedWorkspaceType',
@@ -3349,7 +3527,11 @@ function ConvertTo-QiehaoDiagnosticSafeValue {
         'CodexHomeExists', 'ProfileCount', 'WaitMilliseconds',
         'RecheckIntervalMilliseconds', 'RecheckCount',
         'ElapsedMilliseconds', 'saved_workspace_type',
-        'current_workspace_type'
+        'current_workspace_type', 'VerificationState', 'Purpose', 'QiehaoVersion',
+        'ProcessInspectionElapsedMilliseconds', 'ProcessInspectionSource', 'IsQiehaoOwnedAppServer',
+        'OperationId', 'FinalState', 'AppServerSpawnMs', 'InitializeMs', 'LoginStartRpcMs', 'BrowserLaunchMs',
+        'LocalCommitted', 'PreviousProfileCount', 'NewProfileCount', 'ActiveProfilePresent',
+        'Generation', 'OwnershipGeneration', 'ExitObserved', 'CleanupResult'
     )
     if (-not [string]::IsNullOrWhiteSpace($FieldName) -and
         $allowedFields -cnotcontains $FieldName) {
@@ -3471,7 +3653,15 @@ function Write-QiehaoDiagnosticEvent {
     param(
         [Parameter(Mandatory = $true)]
         [ValidateSet(
-            'APP_START',
+            'APP_START', 'SWITCH_LOCAL_COMMITTED', 'SWITCH_UNVERIFIED',
+            'REFRESH_START', 'REFRESH_RESULT', 'OWNED_APP_SERVER_START', 'OWNED_APP_SERVER_FINISH',
+            'ACCOUNT_VERIFY_START', 'ACCOUNT_VERIFY_RESULT',
+            'ACCOUNT_REFRESH_START', 'ACCOUNT_REFRESH_RESULT',
+            'AUTH_REFRESH_DETECTED', 'ACTIVE_PROFILE_AUTH_REFRESHED',
+            'ACCOUNT_LOGIN_START', 'ACCOUNT_LOGIN_URL_READY',
+            'ACCOUNT_LOGIN_COMPLETED', 'ACCOUNT_LOGIN_CANCELLED', 'ACCOUNT_LOGIN_FAILED',
+            'ACCOUNT_LOGIN_SUCCEEDED', 'ACCOUNT_LOGIN_TIMEOUT',
+            'ACCOUNT_LOGIN_MANUAL_RECOVERY_REQUIRED', 'ACCOUNT_LOGIN_FINISH',
             'ADD_START', 'ADD_AUTH_FOUND', 'ADD_IDENTITY_PARSE',
             'ADD_SUCCESS', 'ADD_FAILED',
             'SWITCH_START', 'PROCESS_CHECK_START', 'PROCESS_CHECK_RESULT',
@@ -3559,7 +3749,7 @@ function Write-SafeLog {
 
 function Write-QiehaoAppStartDiagnostic {
     [CmdletBinding()]
-    param([string]$Version = '1.0.0-rc')
+    param([string]$Version = '1.1.0')
 
     $codexHomeExists = $false
     $credentialSource = 'Unknown'
@@ -3585,6 +3775,7 @@ function Write-QiehaoAppStartDiagnostic {
     Write-QiehaoDiagnosticEvent -Event 'APP_START' -Result 'STARTED' `
         -Data @{
             Version = $Version
+            QiehaoVersion = $Version
             PowerShellVersion = [string]$PSVersionTable.PSVersion
             WindowsVersion = [Environment]::OSVersion.VersionString
             CodexHomeExists = $codexHomeExists
@@ -4078,8 +4269,8 @@ function Invoke-CodexAccountSwitch {
         # This is deliberately the final durable state change.
         Write-ActiveProfileState -Name $targetName -StateDirectory $StateDirectory
         $stateWasCommitted = $true
-        Write-QiehaoDiagnosticEvent -Event 'SWITCH_SUCCESS' `
-            -Result 'SWITCH_SUCCESS' -Data @{
+        Write-QiehaoDiagnosticEvent -Event 'SWITCH_LOCAL_COMMITTED' `
+            -Result 'SWITCH_LOCAL_COMMITTED' -Data @{
                 ActiveProfile = $activeName
                 TargetProfile = $targetName
                 WorkspaceType = [string]$targetContext.WorkspaceClass
@@ -4287,17 +4478,14 @@ function Sync-CodexActiveProfile {
 
 function Switch-CodexAccountProfile {
     [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true, Position = 0)]
-        [string]$Name
-    )
-
+    param([Parameter(Mandatory = $true, Position = 0)][string]$Name,
+        [hashtable]$OwnedProcessRegistry)
     return Invoke-WithCodexWriteLock -Operation {
-        param($LockedName)
-        $codexHome = Get-CodexHome
-        Invoke-CodexAccountSwitch -Name $LockedName -CodexHome $codexHome `
-            -ProfilesDirectory $script:ProfilesDirectory -StateDirectory $script:StateDirectory
-    } -ArgumentList @($Name)
+        param($LockedName, $Registry)
+        Invoke-QiehaoVerifiedSwitch -Name $LockedName -CodexHome (Get-CodexHome) `
+            -ProfilesDirectory $script:ProfilesDirectory -StateDirectory $script:StateDirectory `
+            -OwnedProcessRegistry $Registry
+    } -ArgumentList @($Name, $OwnedProcessRegistry)
 }
 
 function Remove-NewProfileArtifactsBestEffort {
@@ -5750,18 +5938,14 @@ function Invoke-VerifyCodexProfile {
 
 function Test-CodexProfile {
     [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true, Position = 0)]
-        [string]$Name
-    )
-
+    param([Parameter(Mandatory = $true, Position = 0)][string]$Name,
+        [hashtable]$OwnedProcessRegistry)
     return Invoke-WithCodexWriteLock -Operation {
-        param($LockedName)
-        $codexHome = Get-CodexHome
-        Invoke-VerifyCodexProfile -Name $LockedName `
-            -ProfilesDirectory $script:ProfilesDirectory `
-            -CodexHome $codexHome
-    } -ArgumentList @($Name)
+        param($LockedName, $Registry)
+        Invoke-QiehaoLayeredVerify -Name $LockedName -CodexHome (Get-CodexHome) `
+            -ProfilesDirectory $script:ProfilesDirectory -StateDirectory $script:StateDirectory `
+            -OwnedProcessRegistry $Registry
+    } -ArgumentList @($Name, $OwnedProcessRegistry)
 }
 
 function Get-CodexAccountSlotState {
@@ -5897,9 +6081,14 @@ function Get-CodexAccountSlot {
     }
 }
 
+. (Join-Path $PSScriptRoot 'AccountLifecycle.ps1')
+
 Export-ModuleMember -Function @(
+    'Add-CodexManagedProfile',
+    'Add-CodexVerifiedLocalProfile',
     'Initialize-QiehaoRuntimeDirectories',
     'Write-QiehaoAppStartDiagnostic',
+    'Write-QiehaoDiagnosticEvent',
     'Get-CodexHome',
     'Get-CodexCredentialSourceInfo',
     'Test-CodexAuthFile',

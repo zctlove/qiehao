@@ -245,7 +245,12 @@ try {
         [bool]$never.Diagnostics.SnapshotParsed -and
         [bool]$never.Diagnostics.StdinCloseSucceeded -and
         -not [bool]$never.Diagnostics.ChildHasExited -and
-        $neverStopwatch.ElapsedMilliseconds -lt 2500
+        # The request has its own 3-second deadline. Bound cleanup separately
+        # instead of charging variable PowerShell child startup to that phase.
+        [long]$never.Diagnostics.CleanupElapsedMilliseconds -lt 1500 -and
+        $neverStopwatch.ElapsedMilliseconds -lt (
+            [long]$never.Diagnostics.PrimaryElapsedMilliseconds + 1500
+        )
     ) 'FAKE_NEVER_EXIT_CHILD_NOT_BOUNDED'
 
     $double = Invoke-FakeCleanupTransport `

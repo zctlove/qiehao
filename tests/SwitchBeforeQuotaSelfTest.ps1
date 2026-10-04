@@ -66,7 +66,7 @@ $deleteEntry = [regex]::Match(
 Assert-SwitchQuotaContract (
     -not [string]::IsNullOrWhiteSpace($switchEntry) -and
     $switchEntry -match
-        '(?s)Stop-QiehaoQuotaAsync.*?Get-QiehaoLiveCodexStatus' -and
+        '(?s)Stop-QiehaoQuotaForLifecycle.*?Get-QiehaoLiveCodexStatus' -and
     $switchEntry -notmatch 'Start-QiehaoQuotaAsync -Reason SwitchBefore' -and
     $switchEntry -notmatch 'SwitchAfterQuota' -and
     $switchEntry -match
@@ -77,7 +77,8 @@ Assert-SwitchQuotaContract (
     -not [string]::IsNullOrWhiteSpace($switchCore) -and
     $switchCore -notmatch
         'Invoke-QiehaoQuotaBeforeSwitch|Start-QiehaoQuotaAsync|SwitchBefore' -and
-    $switchCore -match 'Switch-CodexAccountProfile'
+    $switchCore -match 'Invoke-QiehaoResponsiveLifecycle -Action Switch' -and
+    [IO.File]::ReadAllText((Join-Path $projectRoot 'gui\LifecycleWorker.ps1')) -match 'Switch-CodexAccountProfile'
 ) 'SWITCH_CORE_CONTAINS_QUOTA_PREREQUISITE'
 
 Assert-SwitchQuotaContract (
@@ -95,9 +96,9 @@ Assert-SwitchQuotaContract (
 
 Assert-SwitchQuotaContract (
     $addEntry -match
-        '(?s)Stop-QiehaoQuotaAsync.*?Get-QiehaoLiveCodexStatus' -and
+        '(?s)Stop-QiehaoQuotaForLifecycle.*?Get-QiehaoLiveCodexStatus' -and
     $deleteEntry -match
-        '(?s)Stop-QiehaoQuotaAsync.*?Get-CodexProfileDeleteSafety'
+        '(?s)Stop-QiehaoQuotaForLifecycle.*?Invoke-QiehaoResponsiveLifecycle -Action DeleteSafety'
 ) 'LIFECYCLE_DOES_NOT_CANCEL_INFLIGHT_QUOTA'
 
 Add-Type -AssemblyName WindowsBase -ErrorAction Stop
