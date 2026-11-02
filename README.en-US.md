@@ -7,6 +7,9 @@ Qiehao is a local multi-account manager for Codex Desktop on Windows. Your local
 > [!IMPORTANT]
 > Qiehao is an unofficial community tool. It is not an official OpenAI product. It manages only local Codex Desktop authentication state and does not modify ChatGPT Web, browser, or PWA sessions.
 
+> [!WARNING]
+> **The source branch and the downloadable release are not the same build (as of this documentation update):** the latest published GitHub Release is still `v1.1.0`. The `main` branch contains post-release maintenance fixes from source checkpoint `18d4e3b`, but this work pushed source only: no new tag, Release, ZIP, or EXE was published. The OAuth recovery, identity-check, and quota-ownership guidance added here describes the current `main` source; an already downloaded v1.1.0 Release package may not contain those later fixes. Regular users should download only a published ZIP from Releases. GitHub's `Code → Download ZIP` is a source snapshot, not a runnable release package. Do not overwrite an installed program directory with unreleased `main` source; wait for a later published Release before upgrading.
+
 ## Product Preview
 
 ![Qiehao Arctic Sea Glass theme preview](docs/screenshots/qiehao-preview-arctic-sea-glass.jpg)
@@ -169,9 +172,11 @@ PowerShell 7 is used only for compatibility and development testing. Regular use
 
 ## Download
 
-Current recommended version:
+Latest published release:
 
 **[Qiehao v1.1.0](https://github.com/zctlove/qiehao/releases/tag/v1.1.0)**
+
+Note: this is the currently published application package. Later source fixes on GitHub `main` have not been packaged as a new Release. Do not treat the repository source ZIP as an installer.
 
 [Download Windows ZIP](https://github.com/zctlove/qiehao/releases/download/v1.1.0/Qiehao-v1.1.0-Windows.zip) · [SHA256 checksum file](https://github.com/zctlove/qiehao/releases/download/v1.1.0/Qiehao-v1.1.0-SHA256.txt)
 
@@ -210,13 +215,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File ".\gui\QiehaoGui.ps
 
 ## Usage
 
-> ⚠ **Team workspace account first add:**
+> ⚠ **First-time Team / Workspace account addition:**
 >
-> Please complete one login flow for this account while Qiehao is running, otherwise it may be identified as a Personal account.
+> Start the official OAuth flow from Qiehao's Add Account action, and confirm that the intended Team workspace is selected on the official sign-in page.
 >
-> Codex current identity information must be collected through a complete sign-in flow.
->
-> If a workspace account is signed in before Qiehao is running and Qiehao only reads it afterward, some environments may not provide enough context to distinguish the Team workspace identity from Personal.
+> Do not infer workspace identity from an email address, display name, or a Plus / Team plan label alone. If the Team / Personal context cannot be verified reliably, Qiehao will not save it as a verified account; follow the UI guidance and sign in again through the official flow.
 
 For both first and subsequent account additions in v1.1.0, prefer the official browser flow:
 
@@ -225,6 +228,8 @@ For both first and subsequent account additions in v1.1.0, prefer the official b
 3. Qiehao requests ChatGPT OAuth through the official Codex app-server. Your default browser opens the official sign-in page.
 4. Complete sign-in for the target account in the browser. Press Esc to cancel while waiting.
 5. After identity verification, enter a local name. Addition completes only after the credentials are securely saved.
+
+Official sign-in and identity reads may take time. The current main-source login budget is up to about 180 seconds, depending on network and service response. Do not repeatedly click Add Account or run multiple Qiehao instances in parallel. If it times out, follow the OAuth recovery guidance below; do not assume the authorization remained unchanged.
 
 You generally do not need to start Codex Desktop to sign in first. Repeat this flow for subsequent accounts and select the intended account in the browser. New credentials are never written into the previous Active Profile.
 
@@ -235,6 +240,41 @@ Team / Workspace accounts can be saved and used normally when direct OAuth addit
 “Exit Codex” means closing the Codex client, including any process still running in the system tray. It does not mean signing out of the account. Each account only needs to be added once; later switching between saved accounts does not require repeating OAuth sign-in.
 
 Closing the main Codex window is not necessarily the same as exiting it; Codex may still be running in the system tray. Qiehao does not treat force-killing Codex in Task Manager as the normal workflow.
+
+## Account identity and recovery (important)
+
+Qiehao checks three separate things: **the saved local account profile**, **Qiehao's active-profile record**, and **the identity actually loaded by Codex**. They are not interchangeable. A display name, email address, or old quota number is not sufficient proof that they match. When a mismatch is detected, the application should stop the affected write or quota query rather than guess, overwrite a profile, or rotate accounts automatically.
+
+### Official OAuth reports failure, but the sign-in state may have changed
+
+A rejected OAuth completion notification, timeout, or read failure **does not necessarily mean the current Codex authorization remained unchanged**. If the current build offers “Check identity after sign-in failure,” follow this sequence:
+
+1. Exit Codex Desktop normally and confirm that it has fully exited. Do not merely close the main window or force-kill the process.
+2. Only if Qiehao explicitly offers it, select “Check current identity (read-only).” This checks the actual current identity; it does not immediately create a profile or write the current credentials into an existing profile.
+3. If the identity is reliably verified and is not already saved, Qiehao will ask for a local name and a separate confirmation to “Save new profile.” This creates a separate profile and does not overwrite existing profiles. If the identity is already saved, no duplicate is created.
+4. If the identity cannot be verified, authorization changes after inspection, or the check expires, Qiehao will not save a new profile. Follow the UI guidance to sign in again through the official flow. Do not manually edit or copy auth.json, and do not delete profiles/ or state/.
+
+This fallback path does not require you to force-sync Qiehao's active-profile record before adding a new account; **it does not bypass identity verification**. A successful browser page does not mean Qiehao saved the account. Trust Qiehao's final result and profile list.
+
+### Current Codex identity differs from the active profile: the Plus / Team recovery case
+
+If Qiehao confirms that the current Codex sign-in is Personal Plus while the active profile is a valid, identity-verified Team profile, it may offer “Restore saved Team sign-in.” This is a **narrowly scoped recovery from confirmed Personal Plus to a saved Team profile**, not a general identity-repair button.
+
+- Read the confirmation carefully: confirming replaces the current Codex Plus sign-in with the saved Team credentials. It does not delete or rewrite the saved Team profile.
+- If the current Plus sign-in has not been saved as a separate profile, you may need to sign in to Plus again through official OAuth afterward. If you need to keep the current Plus sign-in, cancel; do not confirm the replacement.
+- If the current identity, Team workspace, target-profile integrity, or Codex exit state does not meet the required conditions, recovery stops. Do not try to bypass the prompt.
+- If the result says the local Team switch was committed but official identity remains unverified, that means the local credentials and active record were committed; **it does not mean official sign-in verification succeeded**. Recheck the actual identity and do not repeat the switch rapidly.
+- If the message explicitly says “Do not start Codex” or “manual inspection required,” follow it: do not launch Codex, repeat add/switch/recovery, or edit authentication files manually.
+
+### Quota shows old data or reports an identity mismatch
+
+Quota is an identity-bound snapshot, not proof of account identity and not real-time monitoring:
+
+- “The current sign-in differs from the active profile. Quota queries are paused.” means identity verification did not pass and quota requests were paused. Resolve the identity mismatch first; do not treat an old number as the current account's quota.
+- “Legacy quota cache ownership unverified” or “Historical cache” means an older cache lacks sufficient identity-binding evidence. It may be retained for historical reference, but it cannot establish the current account's plan or remaining quota. Qiehao will not silently reassign an old cache to another account.
+- “The service responded, but returned no displayable quota” does not mean the remaining quota is zero. The official interface may not have returned a displayable quota window.
+
+After the identity is reconciled and verified, manually refresh quota for the current account. A quota issue does not mean an account profile was overwritten and is not a reason to switch accounts repeatedly.
 
 ## FAQ
 
@@ -257,6 +297,20 @@ Newer Codex Windows versions may keep `codex-windows-sandbox-service.exe` runnin
 ### What does a locally switched but unverified account mean?
 
 After committing the local Profile switch, Qiehao attempts official sign-in verification through `account/read`. It reports switch success only after verification succeeds. A temporary network or official-interface timeout shows "Local account switched; sign-in status could not be verified yet." This does not mean the local switch failed. You may start Codex normally to check, or select Verify later. A genuine identity mismatch still follows the safe rollback policy.
+
+### What if Codex Desktop shows signed out after reopening?
+
+This remains a known limitation to monitor: Codex Desktop may occasionally show signed out after reopening, and the official OAuth completion notification may still be rejected. The current source fixes improve read-only identity inspection and explicit saving after a reported failure, but **they do not guarantee that all Codex Desktop sign-in issues are eliminated or that the official service will accept every sign-in state**.
+
+Check Qiehao's final result first. A saved local profile, a committed local switch, and verified official identity are different states. If the client still shows signed out, do not repeatedly add or switch accounts, and do not delete saved profiles or authentication files. Exit normally and use the Verify entry if the UI provides it. If the issue persists, record the safe Qiehao message and error code and report it through GitHub Issues. Never attach real credentials.
+
+### What if Qiehao closes unexpectedly during add or switch?
+
+The window disappearing does not prove that the operation succeeded or failed. Reopen Qiehao and first inspect the profile list, active-profile record, and UI status. Do not repeat add or switch operations rapidly before the state is clear. If you previously saw “Do not start Codex / manual inspection required,” do not launch Codex. Preserve local profiles/, state/, logs/, and backup/; they may contain data needed for recovery, but must not be uploaded to a public issue.
+
+### When must I stop and wait for manual inspection?
+
+If Qiehao explicitly says “Do not start Codex; manual inspection required,” do not launch Codex or repeat add, switch, recovery, or delete operations. Do not replace auth.json manually, and do not delete or rename files under profiles/ or state/. Preserve the current state and share only redacted message text and safe error codes through a private, secure channel. Never publicly upload real tokens, email addresses, account IDs, cookies, authentication files, or complete logs.
 
 ## Updating
 

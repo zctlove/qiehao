@@ -2,6 +2,25 @@
 
 本文件记录面向用户的重要变化，不展开内部提交历史。
 
+## Unreleased — main 分支（v1.1.0 发布后的维护修复）
+
+**源码检查点：** `18d4e3b9454dc984d9d92cf23815ad2d2af3298a`。本节记录已推送到 `main` 的源码变化，不代表新版本发布。
+
+**发布状态：** 当前最新正式发布仍为 v1.1.0。本轮没有创建新 tag、GitHub Release，也没有更新 ZIP / EXE。
+
+### Added / Improved（新增／改善）
+
+- Added a read-only identity inspection path after an OAuth completion failure when the current authorization may already have changed; save a new profile only after reliable verification and a separate user confirmation（OAuth 完成失败但当前授权可能已改变时，增加只读身份核对；只有身份可靠验证并经用户再次确认后才保存新档案）.
+- Removed the active-profile synchronization prerequisite from this verified fallback-add path; existing profiles are not overwritten and already-saved identities are not duplicated（此异常恢复新增路径不再要求先同步活动档案；不覆盖已有档案，不重复保存已存在身份）.
+- Added narrowly scoped, explicitly confirmed recovery for a verified Personal Plus current sign-in versus a saved Team active profile（增加严格限定且需要明确确认的 Personal Plus 当前登录与已保存 Team 活动档案恢复路径）.
+- Bound quota snapshots to stable profile identity; legacy cache ownership remains unverified, and identity mismatch blocks quota queries or cache writes（额度快照绑定稳定档案身份；旧缓存归属保持未验证，身份不一致时阻止额度查询或缓存写入）.
+- Updated Chinese and English user guidance for OAuth rejection, identity mismatch, Team recovery, historical quota cache, and manual-stop conditions（更新中英文用户说明，覆盖 OAuth 被拒绝、身份错位、Team 恢复、历史额度缓存及必须人工停止的情况）.
+
+### Known limitations（已知限制，尚未宣称解决）
+
+- Codex Desktop may occasionally display signed out after reopening; official OAuth completion can still be rejected. These changes improve safe diagnosis and recovery but do not guarantee desktop sign-in or server-side acceptance（Codex Desktop 重新打开后偶尔仍可能显示未登录；官方 OAuth 完成通知仍可能被拒绝。本轮改善安全诊断和恢复流程，但不保证桌面端登录或服务端接受）.
+- This is an unreleased source update. The published v1.1.0 ZIP / EXE does not acquire these source changes automatically（这是未发布的源码更新；已发布的 v1.1.0 ZIP / EXE 不会自动获得这些源码修复）.
+
 ## v1.1.0 — 2026-10-04
 
 ### Added / Improved（新增／改善）
@@ -28,9 +47,9 @@
 
 Profile format, DPAPI CurrentUser, identity checks, and account transaction safeguards remain intact（档案格式、当前用户加密、身份校验与账号事务安全边界保持不变）. Historical releases remain available; quota/network failures do not imply a failed local switch（保留历史版本，额度／网络失败不等于本地切换失败）.
 
-## v1.1.0 test5 — Unreleased（测试中，尚未正式发布）
+## Historical development candidate: v1.1.0 test5 — Unreleased（历史测试候选，未单独发布）
 
-The current official recommended release remains v1.0.3（当前正式推荐版本仍为 v1.0.3）. Test5 packages the real-user-accepted test4 core; no tag or GitHub Release is created in this round（test5 保留真人通过的 test4 核心，本轮不创建标签或正式发布）.
+This section is retained for development history only. Test5 was not a separate public release; the later published v1.1.0 release is listed above.（本节仅保留开发历史。test5 不是单独的公开发布版本；后续正式发布的 v1.1.0 已列于上方。）
 
 ### Added / Improved（新增／改善）
 
@@ -55,7 +74,7 @@ The current official recommended release remains v1.0.3（当前正式推荐版�
 
 These fixes were implemented in test2-test4. Test5 only adds launcher/package/documentation and version-literal changes; it does not redesign account transactions, DPAPI, profile format, OAuth, or Quota（上述修复来自 test2–test4，test5 仅收口启动器、包装、文档及版本字面量，不重做核心）.
 
-## v1.0.4 test3 — Unreleased（尚未正式发布）
+## Historical development candidate: v1.0.4 test3 — Unreleased（历史测试候选，未发布）
 
 - Preserve verified Windows Sandbox Service compatibility（保留经严格证明的 Windows 沙箱服务兼容）。
 - Separate local switch commit from bounded official account verification（区分本地切换提交与有界官方账号验证）。
