@@ -2,11 +2,15 @@
 
 本文件记录面向用户的重要变化，不展开内部提交历史。
 
-## Unreleased — main 分支（v1.1.0 发布后的维护修复）
+## v1.1.1 — 2026-11-02
 
-**源码检查点：** `18d4e3b9454dc984d9d92cf23815ad2d2af3298a`。本节记录已推送到 `main` 的源码变化，不代表新版本发布。
+**Release scope（发布范围）：** 收口已通过用户真实手工验收的多账号维护修复，更新双语说明，并从正式源码重新编译 v1.1.1 Windows 启动器（ships the manually accepted multi-account maintenance fixes, updated bilingual guidance, and a rebuilt v1.1.1 Windows launcher）.
 
-**发布状态：** 当前最新正式发布仍为 v1.1.0。本轮没有创建新 tag、GitHub Release，也没有更新 ZIP / EXE。
+Profile 格式、DPAPI CurrentUser 加密和既有账号事务保持兼容（Profile format, DPAPI CurrentUser protection, and existing account transactions remain compatible）.
+
+Documentation（使用说明）：明确三个及以上 Plus / Team 本地档案管理的适用场景，以及同机同路径的项目文件连续使用；这不包含官方聊天记录、项目元数据或 Memory 的账号间同步。补充保存确认、运行期间删除保护、历史额度归属和客户端初始化提醒（clarifies three-or-more Plus / Team profiles and local file continuity on the same computer and paths, without cross-account chat, project metadata, or Memory synchronization; adds saving, deletion-protection, cache-ownership, and client-initialization guidance）.
+
+Validation disclosure（验证披露）：发布记录保留实际 PASS、FAIL、NOT RUN 数量。PS5.1 完整 GUI 自测的后台 Job 结果接收存在测试基础设施问题；没有把该用例或未执行项目标成 PASS，也不宣称全部自动测试通过（release records disclose actual PASS, FAIL, and NOT RUN counts; a PS5.1 background-job result-receive issue remains documented as test infrastructure, without claiming that test or the full matrix passed）.
 
 ### Added / Improved（新增／改善）
 
@@ -15,11 +19,13 @@
 - Added narrowly scoped, explicitly confirmed recovery for a verified Personal Plus current sign-in versus a saved Team active profile（增加严格限定且需要明确确认的 Personal Plus 当前登录与已保存 Team 活动档案恢复路径）.
 - Bound quota snapshots to stable profile identity; legacy cache ownership remains unverified, and identity mismatch blocks quota queries or cache writes（额度快照绑定稳定档案身份；旧缓存归属保持未验证，身份不一致时阻止额度查询或缓存写入）.
 - Updated Chinese and English user guidance for OAuth rejection, identity mismatch, Team recovery, historical quota cache, and manual-stop conditions（更新中英文用户说明，覆盖 OAuth 被拒绝、身份错位、Team 恢复、历史额度缓存及必须人工停止的情况）.
+- Increased the bounded post-switch official verification budget to 8 seconds, with up to 4 seconds for the first account read; refresh uses only the remaining total budget, with no automatic retry（切号后官方验证整体预算增至 8 秒，首次读取最多 4 秒；刷新后读取只使用整体剩余时间，不增加自动重试）.
+- Retained local-switch commit facts on transient verification timeouts and improved quota feedback and dialog placement（暂时性验证超时保留本地切换提交事实，改善额度反馈与弹窗位置）.
 
 ### Known limitations（已知限制，尚未宣称解决）
 
 - Codex Desktop may occasionally display signed out after reopening; official OAuth completion can still be rejected. These changes improve safe diagnosis and recovery but do not guarantee desktop sign-in or server-side acceptance（Codex Desktop 重新打开后偶尔仍可能显示未登录；官方 OAuth 完成通知仍可能被拒绝。本轮改善安全诊断和恢复流程，但不保证桌面端登录或服务端接受）.
-- This is an unreleased source update. The published v1.1.0 ZIP / EXE does not acquire these source changes automatically（这是未发布的源码更新；已发布的 v1.1.0 ZIP / EXE 不会自动获得这些源码修复）.
+- Quota caches remain auxiliary snapshots, not identity evidence. Stop when manual inspection is required; v1.1.0 packages require an explicit program update to receive these fixes（额度缓存仍是辅助快照，不是身份依据；人工检查提示必须停止操作，v1.1.0 程序包需主动更新才能获得这些修复）.
 
 ## v1.1.0 — 2026-10-04
 
@@ -84,7 +90,7 @@ These fixes were implemented in test2-test4. Test5 only adds launcher/package/do
 - Same-user in-place upgrade guidance and synthetic compatibility tests（同用户原目录升级说明与合成数据兼容测试）。
 - Immediately refresh committed Active Profile on the GUI dispatcher, preserve recovery uncertainty, and reject stale refreshes（GUI 主线程立即刷新已提交当前账号，保留人工恢复的不确定状态，丢弃过期刷新）。
 
-At the time this historical candidate was recorded, v1.0.3 was the recommended release; v1.0.4 test3 was not published（记录该历史候选时，正式推荐版本为 v1.0.3；v1.0.4 test3 未公开发布）。 The current latest published release is v1.1.0（当前最新正式发布版本为 v1.1.0，见上文）。
+At the time this historical candidate was recorded, v1.0.3 was the recommended release; v1.0.4 test3 was not published（记录该历史候选时，正式推荐版本为 v1.0.3；v1.0.4 test3 未公开发布）。 The current latest published release is v1.1.1（当前最新正式发布版本为 v1.1.1，见上文）。
 
 ## v1
 

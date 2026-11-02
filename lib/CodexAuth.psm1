@@ -3752,7 +3752,7 @@ function Write-SafeLog {
 
 function Write-QiehaoAppStartDiagnostic {
     [CmdletBinding()]
-    param([string]$Version = '1.1.0')
+    param([string]$Version = '1.1.1')
 
     $codexHomeExists = $false
     $credentialSource = 'Unknown'

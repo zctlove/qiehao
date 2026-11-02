@@ -70,7 +70,7 @@ catch {
     return
 }
 if (-not $SelfTest) {
-    Write-QiehaoAppStartDiagnostic -Version '1.1.0'
+    Write-QiehaoAppStartDiagnostic -Version '1.1.1'
 }
 Import-Module -Name $helperModulePath -Force -ErrorAction Stop
 Import-Module (Join-Path $projectRoot 'tools\AppServerOwnership.psm1') -ErrorAction Stop
@@ -1893,7 +1893,8 @@ try {
                     $Scenario,
                     $TimeoutSeconds,
                     $OwnedProcessRegistry,
-                    $ExpectedProfileName
+                    $ExpectedProfileName,
+                    $SelfTestIdentityProof
                 )
                 $ErrorActionPreference = 'Stop'
                 $clientModule = @(Import-Module -Name $ClientModulePath `
@@ -1912,10 +1913,11 @@ try {
                     }
                     $fakeProvider = {
                         param($IgnoredTimeoutSeconds, $ProviderScenario)
-                        switch ([string]$ProviderScenario) {
+                        switch ([string]$ProviderScenario.Scenario) {
                         'Success' {
                             return [pscustomobject]@{
                                 Succeeded = $true
+                                IdentityProof = $ProviderScenario.IdentityProof
                                 FailureCode = $null
                                 Snapshot = [pscustomobject]@{
                                     Plan = 'team'
@@ -2021,7 +2023,10 @@ try {
                     Invoke-QiehaoQuotaBackgroundWorker `
                         -TimeoutSeconds $TimeoutSeconds `
                         -QuotaProvider $fakeProvider `
-                        -QuotaProviderArgument $Scenario `
+                        -QuotaProviderArgument ([pscustomobject]@{
+                            Scenario = $Scenario
+                            IdentityProof = $SelfTestIdentityProof
+                        }) `
                         -OwnedProcessRegistry $OwnedProcessRegistry
                     return
                 }
@@ -2040,6 +2045,11 @@ try {
                 AddArgument($quotaTimeoutSeconds).
                 AddArgument($script:guiQuotaOwnedProcessRegistry).
                 AddArgument($activeProfile)
+            if ($SelfTest -and $workerScenario -ceq 'Success') {
+                $null = $powerShell.AddArgument(
+                    $script:guiQuotaSelfTestIdentityProof
+                )
+            }
             $script:guiQuotaAsyncPowerShell = $powerShell
             $script:guiQuotaAsyncResult = $powerShell.BeginInvoke()
             if ($SelfTest -and -not [string]::IsNullOrWhiteSpace(
@@ -4098,6 +4108,15 @@ try {
                 $quotaAsyncTestDirectory
             ) | Out-Null
             $originalStateDirectory = $stateDirectory
+            $quotaSelfTestCore = Get-Module CodexAuth
+            $quotaSelfTestDirectories = & $quotaSelfTestCore {
+                @($script:ProfilesDirectory, $script:StateDirectory,
+                    $script:LogsDirectory, $script:BackupDirectory)
+            }
+            $quotaSelfTestHome = [Environment]::GetEnvironmentVariable(
+                'CODEX_HOME', 'Process'
+            )
+            $quotaSelfTestDefaults = $PSDefaultParameterValues.Clone()
 
             function Wait-QiehaoQuotaSelfTestUntilIdle {
                 param([int]$TimeoutMilliseconds = 4000)
@@ -4156,6 +4175,58 @@ try {
 
             try {
                 $stateDirectory = $quotaAsyncTestDirectory
+                # The success fixture must satisfy the real identity/cache guard.
+                # All credential bytes and DPAPI profiles here are synthetic.
+                $fakeCodexHome = Join-Path $quotaAsyncTestDirectory 'codex'
+                [IO.Directory]::CreateDirectory($fakeCodexHome) | Out-Null
+                $env:CODEX_HOME = $fakeCodexHome
+                & $quotaSelfTestCore {
+                    param($root, $codexHome)
+                    $script:ProfilesDirectory = Join-Path $root 'profiles'
+                    $script:StateDirectory = Join-Path $root 'state'
+                    $script:LogsDirectory = Join-Path $root 'logs'
+                    $script:BackupDirectory = Join-Path $root 'backup'
+                    foreach ($directory in @($script:ProfilesDirectory,
+                        $script:StateDirectory, $script:LogsDirectory,
+                        $script:BackupDirectory)) {
+                        [IO.Directory]::CreateDirectory($directory) | Out-Null
+                    }
+                    $claims = @{'https://api.openai.com/auth' = @{
+                        chatgpt_account_id = 'fake-quota-async-team'
+                        chatgpt_user_id = 'fake-quota-async-user'
+                        chatgpt_plan_type = 'team'
+                    }}
+                    $payload = [Convert]::ToBase64String(
+                        [Text.Encoding]::UTF8.GetBytes(
+                            ($claims | ConvertTo-Json -Depth 5 -Compress)
+                        )
+                    ).TrimEnd('=').Replace('+','-').Replace('/','_')
+                    $bytes = [Text.Encoding]::UTF8.GetBytes((@{
+                        auth_mode = 'chatgpt'; OPENAI_API_KEY = $null
+                        tokens = @{
+                            account_id = 'fake-quota-async-team'
+                            access_token = 'fake-quota-async-access'
+                            refresh_token = 'fake-quota-async-refresh'
+                            id_token = 'e30.' + $payload + '.fake'
+                        }
+                    } | ConvertTo-Json -Depth 5))
+                    try {
+                        [IO.File]::WriteAllBytes(
+                            (Join-Path $codexHome 'auth.json'), $bytes
+                        )
+                        $null = Invoke-AddCodexProfile -Name Team `
+                            -CodexHome $codexHome `
+                            -ProfilesDirectory $script:ProfilesDirectory `
+                            -StateDirectory $script:StateDirectory `
+                            -ProcessData @() -UseProvidedProcessData
+                    }
+                    finally { [Array]::Clear($bytes, 0, $bytes.Length) }
+                } $quotaAsyncTestDirectory $fakeCodexHome
+                $PSDefaultParameterValues[
+                    'Update-QiehaoQuotaProfileRows:ProfilesDirectory'
+                ] = Join-Path $quotaAsyncTestDirectory 'profiles'
+                $script:guiQuotaSelfTestIdentityProof =
+                    Get-QiehaoQuotaIdentityProof -ProfileName Team
 
                 Reset-QiehaoQuotaSelfTestScenario -Scenario 'Success'
                 $successStarted = Start-QiehaoQuotaAsync -Reason Open
@@ -4251,7 +4322,7 @@ try {
                 $failureTeamRow = @($script:guiAllProfileRows |
                     Where-Object { $_.Name -ceq 'Team' })[0]
                 $failureBaseText =
-                    Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry'
+                    Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedNoCache'
                 $startupFailureClearsBusy = (
                     $failureStarted -and $failureIdle -and
                     -not [bool]$script:guiQuotaCoordinator.QueryInProgress -and
@@ -4283,7 +4354,7 @@ try {
                 $cleanupFailureIdle =
                     Wait-QiehaoQuotaSelfTestUntilIdle
                 $cleanupFailureBaseText =
-                    Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedRetry'
+                    Get-QiehaoQuotaUiTextSafe -Key 'UpdateFailedNoCache'
                 $cleanupFailureClearsBusy = (
                     $cleanupFailureStarted -and
                     $cleanupFailureIdle -and
@@ -4441,6 +4512,18 @@ try {
                 $script:guiQuotaSelfTestScenario = $null
                 $script:guiQuotaSelfTestHardCeilingMilliseconds = 0
                 $stateDirectory = $originalStateDirectory
+                $script:guiQuotaSelfTestIdentityProof = $null
+                & $quotaSelfTestCore {
+                    param($directories)
+                    $script:ProfilesDirectory = $directories[0]
+                    $script:StateDirectory = $directories[1]
+                    $script:LogsDirectory = $directories[2]
+                    $script:BackupDirectory = $directories[3]
+                } $quotaSelfTestDirectories
+                [Environment]::SetEnvironmentVariable(
+                    'CODEX_HOME', $quotaSelfTestHome, 'Process'
+                )
+                $PSDefaultParameterValues = $quotaSelfTestDefaults
                 if ([System.IO.Directory]::Exists(
                     $quotaAsyncTestDirectory
                 )) {

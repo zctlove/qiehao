@@ -23,7 +23,7 @@ $compilerArgs = @('/nologo', '/target:winexe', '/platform:anycpu', '/optimize+',
 & $compiler @compilerArgs
 if ($LASTEXITCODE -ne 0 -or -not [IO.File]::Exists($output)) { throw 'LAUNCHER_BUILD_FAILED' }
 $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($output)
-if ($info.FileVersion -ne '1.1.0.0' -or $info.ProductVersion -ne '1.1.0') {
+if ($info.FileVersion -ne '1.1.1.0' -or $info.ProductVersion -ne '1.1.1') {
     throw 'LAUNCHER_BUILD_VERSION_INVALID'
 }
 Write-Output ('LauncherBytes=' + ([IO.FileInfo]$output).Length)

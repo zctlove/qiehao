@@ -165,7 +165,7 @@ function Close-AccountSession {
 function Initialize-AccountSession {
     param($Session, [DateTime]$Deadline)
     $null = Invoke-AccountRpc $Session 'initialize' @{
-        clientInfo = @{ name = 'qiehao-account-client'; version = '1.1.0' }
+        clientInfo = @{ name = 'qiehao-account-client'; version = '1.1.1' }
         capabilities = @{ experimentalApi = $false }
     } $Deadline
     Send-AccountMessage $Session @{ method = 'initialized'; params = @{} }

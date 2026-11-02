@@ -4,11 +4,26 @@
 
 Qiehao 是面向 Windows Codex Desktop 的本地多账号管理工具。切换账号后，原有本地项目文件仍可继续使用；管理三个及以上账号时，减少反复登录和切换操作的优势更明显。账号切换由用户手动触发，并须等待 Codex 完全退出。
 
+支持 Plus、Team 等账号的本地档案管理与切换。如果你使用的官方账号切换方式只提供两个账号位置，Qiehao 更适合保存和管理三个及以上账号，并在同一电脑、同一路径继续使用原有项目文件；这里不把“两个账号”视为所有官方客户端版本的永久限制。
+
+**本地项目连续使用仅指磁盘上的项目文件仍在原路径可用。** Qiehao 不提供官方聊天记录、项目元数据或 Memory（记忆）的账号间同步，也不合并不同账号的云端数据。
+
 > [!IMPORTANT]
 > Qiehao 是非官方社区工具，不是 OpenAI 官方产品。它只管理 Codex Desktop 的本地认证状态，不修改 ChatGPT Web、浏览器或 PWA（渐进式网页应用）的登录状态。
 
-> [!WARNING]
-> **源码主分支与正式下载包不是同一版本（截至本次文档更新）：** GitHub Releases 最新正式发布仍为 `v1.1.0`。`main` 分支已包含 `18d4e3b` 源码检查点中的后续维护修复，但本轮只推送了源码，没有创建新标签、Release 或更新 ZIP/EXE。本文新增的 OAuth 异常恢复、账号身份核对和额度归属提醒描述的是当前 `main` 源码；已下载的 v1.1.0 发布包不一定包含这些后续修复。普通用户只从 Releases 下载正式 ZIP；仓库页面的 `Code → Download ZIP` 是源码快照，不是可直接运行的发布包。不要把未发布的 `main` 源码覆盖到正在使用的程序目录，等待后续正式 Release 再升级。
+> [!NOTE]
+> **最新正式版本：Qiehao v1.1.1（2026-11-02）。** 本版包含 OAuth 异常后的只读身份核对、明确确认保存新档案、受控 Team 恢复及额度缓存身份绑定。请从 GitHub Releases 下载正式 Windows ZIP 并核对 SHA-256；`Code → Download ZIP` 是源码快照，不是正式程序包。Codex Desktop 偶发未登录及官方 OAuth 完成通知被拒绝仍属于已知限制。
+
+## 使用提醒
+
+1. 切换账号前正常退出 Codex Desktop，确认后台客户端进程也已退出。
+2. Codex 运行期间，账号删除受到保护；不要通过强制结束进程绕过提示。
+3. OAuth（开放授权）成功不等于本地档案保存成功，请以 Qiehao 最终结果及账号列表为准。
+4. “检查当前登录身份（只读）”不会自动保存账号；新增档案需要身份验证和另行确认。
+5. 额度查询失败不能当作刷新成功，保留的历史数字也不是本次查询结果。
+6. 历史缓存“归属未验证”表示无法确认其属于哪个已保存档案，不等于从未获取过额度。
+7. 旧缓存需对当前账号成功刷新并建立新的身份绑定后，才能作为可信额度快照。
+8. Codex 启动后暂时显示未登录时，先等待客户端初始化；持续异常再完全退出并重新打开，必要时检查脱敏日志。不要连续重复切号或手工复制 `auth.json`。如出现“请勿启动 Codex／需要人工检查”，优先遵守该停止提示。
 
 ## 产品预览 / Product Preview
 
@@ -92,7 +107,7 @@ Qiehao 能做的，只是尽量不要自己主动增加那些没必要的高频�
 
 ## 工作方式
 
-v1.1.0 添加账号时，Qiehao 委托官方 Codex app-server（应用服务进程）发起 ChatGPT 浏览器 OAuth（开放授权）；用户在官方登录页完成登录。Qiehao 验证身份后，将原始认证状态保存为由 Windows DPAPI CurrentUser（数据保护 API，当前用户作用域）保护的加密快照。不支持该协议时，界面明确提示使用原来的手动导入流程。
+v1.1.1 添加账号时，Qiehao 委托官方 Codex app-server（应用服务进程）发起 ChatGPT 浏览器 OAuth（开放授权）；用户在官方登录页完成登录。Qiehao 验证身份后，将原始认证状态保存为由 Windows DPAPI CurrentUser（数据保护 API，当前用户作用域）保护的加密快照。不支持该协议时，界面明确提示使用原来的手动导入流程。
 
 后续切换时，Qiehao 要求 Codex Desktop 完全退出，然后安全回存当前账号、验证目标账号、原子替换 Codex 本地认证文件、读回校验，最后更新本地 Active Profile（当前活动档案）状态，并分别报告本地切换与官方验证结果。Qiehao 不自动填写登录信息、不实现自己的 OAuth 登录接口、不强制终止 Codex，也不接触浏览器登录态。
 
@@ -177,11 +192,11 @@ PowerShell 7 只用于兼容性测试和开发测试，普通用户不需要为�
 
 当前最新正式发布版本（Latest published release）：
 
-**[Qiehao v1.1.0](https://github.com/zctlove/qiehao/releases/tag/v1.1.0)**
+**[Qiehao v1.1.1](https://github.com/zctlove/qiehao/releases/tag/v1.1.1)**
 
-注意：这是当前已发布的安装包版本。GitHub `main` 分支上的后续源码修复尚未打包为新 Release；请勿把仓库源码 ZIP 当作安装包。
+正式 Windows ZIP 包含本版程序及运行依赖，不包含用户账号档案或运行数据；请勿把仓库源码 ZIP 当作正式程序包。
 
-[下载 Windows ZIP](https://github.com/zctlove/qiehao/releases/download/v1.1.0/Qiehao-v1.1.0-Windows.zip) · [SHA256 校验文件](https://github.com/zctlove/qiehao/releases/download/v1.1.0/Qiehao-v1.1.0-SHA256.txt)
+[下载 Windows ZIP](https://github.com/zctlove/qiehao/releases/download/v1.1.1/Qiehao-v1.1.1-Windows.zip) · [SHA256 校验文件](https://github.com/zctlove/qiehao/releases/download/v1.1.1/Qiehao-v1.1.1-SHA256.txt)
 
 新用户请优先下载最新版本。
 
@@ -224,7 +239,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File ".\gui\QiehaoGui.ps
 >
 > 不要只凭邮箱、显示名称或 Plus / Team 套餐字样推断工作区身份。Team / Personal（个人）上下文无法可靠确认时，Qiehao 不会把该身份当作已验证账号保存；请按界面提示重新通过官方流程登录。
 
-v1.1.0 首次添加与后续添加账号均优先使用官方浏览器流程：
+v1.1.1 首次添加与后续添加账号均优先使用官方浏览器流程：
 
 1. 完全退出 Codex Desktop。
 2. 打开 Qiehao，点击“添加账号”。
@@ -232,7 +247,7 @@ v1.1.0 首次添加与后续添加账号均优先使用官方浏览器流程：
 4. 在浏览器完成目标账号登录；等待时可按 Esc 取消。
 5. Qiehao 完成身份验证后，请输入本地名称；凭据安全保存后才完成添加。
 
-官方登录和身份读取可能需要等待；当前 main 源码的登录等待预算最长约 180 秒（实际耗时取决于网络和官方响应），请勿连续点击“添加账号”或并行启动多个 Qiehao。若超时，按下方 OAuth 异常恢复说明处理，不要假定授权状态完全没有变化。
+官方登录和身份读取可能需要等待；v1.1.1 的登录等待预算最长约 180 秒（实际耗时取决于网络和官方响应），请勿连续点击“添加账号”或并行启动多个 Qiehao。若超时，按下方 OAuth 异常恢复说明处理，不要假定授权状态完全没有变化。
 
 一般无需先启动 Codex Desktop 登录。添加第二个或后续账号重复上述流程，浏览器中请选择目标账号；新账号凭据不会回存到先前的 Active Profile（当前活动档案）。
 
@@ -295,7 +310,7 @@ Qiehao 会分别核对**已保存的本地账号档案**、**Qiehao 记录的当
 
 ### Windows Sandbox Service（沙箱服务）一直存在怎么办？
 
-新版 Codex Windows 可能常驻 `codex-windows-sandbox-service.exe`。v1.1.0 严格验证官方持久沙箱服务；经确认可信的服务本身不会阻塞账号操作。通常不需要手动结束它、禁用服务或修改 Windows 服务设置。真正的 Codex Desktop／外部 Codex 执行进程仍会安全阻止账号操作；无法可靠分类时继续安全拒绝。
+新版 Codex Windows 可能常驻 `codex-windows-sandbox-service.exe`。v1.1.1 严格验证官方持久沙箱服务；经确认可信的服务本身不会阻塞账号操作。通常不需要手动结束它、禁用服务或修改 Windows 服务设置。真正的 Codex Desktop／外部 Codex 执行进程仍会安全阻止账号操作；无法可靠分类时继续安全拒绝。
 
 ### 本地切换完成，但登录状态暂未验证是什么意思？
 
@@ -305,7 +320,7 @@ Qiehao 会分别核对**已保存的本地账号档案**、**Qiehao 记录的当
 
 这是当前仍需观察的已知限制：Codex Desktop 偶尔可能在重新打开后显示未登录；官方 OAuth 的完成通知也仍可能被拒绝。本次源码修复改善了失败后的身份只读核对和明确保存流程，但**没有承诺消除 Codex Desktop 的所有登录异常，也不能保证官方服务端一定接受某次登录状态**。
 
-先看 Qiehao 的最终结果：本地档案已保存、切换已提交、官方身份已验证，是不同状态。若客户端仍显示未登录，不要连续重复添加／切换，不要删除旧档案或认证文件；正常退出后按界面提供的“验证”入口检查。问题持续时，记录 Qiehao 显示的安全提示和错误代码，再通过 GitHub Issues 反馈，切勿附带真实凭据。
+先看 Qiehao 的最终结果：本地档案已保存、切换已提交、官方身份已验证，是不同状态。先等待客户端初始化；若持续显示未登录，再正常完全退出并重新打开。不要连续重复添加／切换，不要删除旧档案或认证文件，也不要手工复制 auth.json。必要时完全退出后按界面提供的“验证”入口检查，并仅查看或提供已脱敏的日志、提示及错误代码；切勿附带真实凭据。若出现“请勿启动 Codex／需要人工检查”，优先遵守停止提示。
 
 ### Qiehao 在添加或切换过程中意外关闭怎么办？
 
@@ -317,21 +332,21 @@ Qiehao 会分别核对**已保存的本地账号档案**、**Qiehao 记录的当
 
 ## 更新
 
-普通用户推荐使用 GitHub Releases 提供的新版 Release ZIP 更新。以下适用于从 v1.0.3 升级到 v1.1.0：
+普通用户推荐使用 GitHub Releases 提供的新版 Release ZIP 更新。以下适用于从 v1.0.3 或 v1.1.0 升级到 v1.1.1：
 
 1. 完全退出 Qiehao 和 Codex Desktop。
-2. 下载 v1.1.0 Release ZIP，并核对 SHA256。
+2. 下载 v1.1.1 Release ZIP，并核对 SHA256。
 3. 将新版 ZIP 的内容完整解压覆盖到原 Qiehao 目录；如系统询问，只覆盖同名程序文件。
 4. 保留原目录中的 `profiles/`、`state/`、`logs/` 和 `backup/`，不要为了升级删除整个旧目录。
-5. v1.1.0 新增 `Qiehao.exe`，覆盖后可直接双击；`Start-Qiehao.cmd` 仍是备用入口。正常覆盖程序文件不需要重新添加已保存账号。
+5. v1.1.1 包含重新编译的 `Qiehao.exe`，覆盖后可直接双击；`Start-Qiehao.cmd` 仍是备用入口。正常覆盖程序文件不需要重新添加已保存账号。
 
 如果选择解压到全新的目录，需要手动复制旧目录的 `profiles/` 和 `state/`，才能继续看到原有账号。仅限同一台 Windows 电脑、同一个 Windows 用户和本机 DPAPI CurrentUser 保护环境；`logs/` 和 `backup/` 不是恢复账号列表所必需。不要把这些私有目录上传到公开位置。
 
 发布 ZIP 不包含 `profiles/`、`state/`、`logs/` 或 `backup/`；正常覆盖程序文件不会删除这些私人运行数据。不要跨电脑或跨 Windows 用户直接迁移 DPAPI 档案。
 
-### v1.1.0 可靠性与回滚说明
+### v1.1.1 可靠性与回滚说明
 
-v1.1.0 保持 Profile 格式与 DPAPI CurrentUser 兼容，包含已通过真人验收的账号流程修复和薄 EXE 启动器。
+v1.1.1 保持 Profile 格式与 DPAPI CurrentUser 兼容，包含已通过真人验收的账号流程修复和薄 EXE 启动器。
 
 该版本系列修复账号操作结束后的界面同步：“当前账号”直接读取已经提交的本地 Active Profile，无需启动 Codex Desktop 来刷新；官方验证状态与当前账号标记分开显示，过期刷新结果不能覆盖较新的状态。连续添加失败／取消能够安全收尾；常驻 Windows Sandbox Service（沙箱服务）与真实 Desktop 进程分开判断。
 
@@ -339,7 +354,7 @@ v1.1.0 保持 Profile 格式与 DPAPI CurrentUser 兼容，包含已通过真人
 
 保留现有空间账号首次添加警告，Team 工作区的长期真人验证数据仍不够多。额度只作辅助，不阻塞添加、切换、删除和验证；失败可手动刷新，显示最后成功快照，不进行后台高频轮询。验证 Token 刷新后仅在严格身份一致时安全回存原始认证字节，Profile 格式与 DPAPI CurrentUser 不变。
 
-如需回退软件版本，优先保留当前最新的 `profiles/` 和 `state/`，只回退程序文件。认证令牌可能已被 Codex 刷新，不应优先恢复陈旧认证备份。v1.1.0 的 Profile 格式与 v1.0.3 兼容；未来若改变格式，必须另行设计迁移和回滚。
+如需回退软件版本，优先保留当前最新的 `profiles/` 和 `state/`，只回退程序文件。认证令牌可能已被 Codex 刷新，不应优先恢复陈旧认证备份。v1.1.1 的 Profile 格式与 v1.0.3 兼容；未来若改变格式，必须另行设计迁移和回滚。
 
 不要直接在 ZIP 压缩包内运行，也不要为了更新而删除包含本机运行数据的旧目录。`profiles/`、`state/`、`logs/` 和 `backup/` 可能包含当前 Windows 用户在本机产生的私有运行数据；确认新版正常工作并妥善处理这些数据前，不要删除旧目录。
 
@@ -418,9 +433,10 @@ git pull --ff-only
 
 ## 发布状态与版本历史
 
-当前推荐下载版本是 **[Qiehao v1.1.0（Latest，最新版本）](https://github.com/zctlove/qiehao/releases/tag/v1.1.0)**。
+当前推荐下载版本是 **[Qiehao v1.1.1（Latest，最新版本）](https://github.com/zctlove/qiehao/releases/tag/v1.1.1)**。
 
-- v1.1.0 — Latest（最新版本）
+- v1.1.1 — Latest（最新版本）
+- v1.1.0 — 历史正式版本
 - v1.0.3
 - v1.0.2
 - v1.0.1
@@ -428,7 +444,7 @@ git pull --ff-only
 
 v1.0.0、v1.0.1 和 v1.0.2 会继续保留，用于版本追溯和问题排查；不建议新用户使用旧版本。
 
-v1.1.0 提供薄 Windows EXE 启动器，不提供安装器；PowerShell 源码和模块仍独立保留，便于检查。
+v1.1.1 提供薄 Windows EXE 启动器，不提供安装器；PowerShell 源码和模块仍独立保留，便于检查。
 
 ## Community（社区）
 

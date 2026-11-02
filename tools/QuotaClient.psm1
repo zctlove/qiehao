@@ -591,7 +591,7 @@ function Invoke-QiehaoQuotaTransport {
                     clientInfo = [ordered]@{
                         name = 'qiehaoqu-quota-client'
                         title = 'Qiehaoqu Quota Client'
-                        version = '1.1.0'
+                        version = '1.1.1'
                     }
                     capabilities = [ordered]@{
                         experimentalApi = $false

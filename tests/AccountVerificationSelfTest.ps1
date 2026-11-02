@@ -1,5 +1,8 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+# Bind the current engine's native module; a PS7 parent can pass its module path to PS5.1.
+Import-Module -Name ([IO.Path]::Combine($PSHOME, 'Modules',
+    'Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Utility.psd1')) -ErrorAction Stop
 $project = Split-Path -Parent $PSScriptRoot
 $module = Import-Module (Join-Path $project 'lib\CodexAuth.psm1') -Force -PassThru
 $client = Import-Module (Join-Path $project 'tools\AccountClient.psm1') -PassThru
@@ -125,9 +128,9 @@ try {
     Assert-Account ($watch.ElapsedMilliseconds -lt 10000) 'AccountVerifyHasBoundedDeadline'
     [IO.File]::WriteAllBytes($replacement,(New-FakeAuth 'fake-X'))
     Set-FakeAuth (New-FakeAuth 'fake-A' $true)
-    $stamp = (Get-FileHash (Join-Path $profiles 'A.auth.dpapi')).Hash
+    $stamp = (Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 (Join-Path $profiles 'A.auth.dpapi')).Hash
     $r = Verify-Fake 'A' 'Success'
-    Assert-Account ($r.VerificationState -ceq 'IdentityMismatch' -and $stamp -ceq (Get-FileHash (Join-Path $profiles 'A.auth.dpapi')).Hash) 'RefreshDifferentIdentityNeverUpdatesProfile'
+    Assert-Account ($r.VerificationState -ceq 'IdentityMismatch' -and $stamp -ceq (Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 (Join-Path $profiles 'A.auth.dpapi')).Hash) 'RefreshDifferentIdentityNeverUpdatesProfile'
     Set-FakeAuth $a
     # Force target refresh, then fake refresh changes it to X: rollback to A.
     & $module {param($p,$b) Save-QiehaoRefreshedProfileBytes -Name B -AuthBytes $b -ProfilesDirectory $p} $profiles $expired
@@ -178,7 +181,7 @@ try {
         } $fakeCodexHome $profiles $state $Consent $shellPath (Fake-Arguments $Scenario team) $(if($Scenario -ceq 'Timeout'){700}else{4800})
     }
     function Fake-ProfileStamp {
-        (@(Get-ChildItem -LiteralPath $profiles -File | Sort-Object Name | ForEach-Object{(Get-FileHash -LiteralPath $_.FullName).Hash}) -join '|')
+        (@(Get-ChildItem -LiteralPath $profiles -File | Sort-Object Name | ForEach-Object{(Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash}) -join '|')
     }
     $profileStamp = Fake-ProfileStamp
     $consent = Recovery-Consent
@@ -192,10 +195,10 @@ try {
     function Format-QiehaoGuiText {param($Key,$Arguments) $Key}
     function Show-QiehaoChoiceDialog {param($Title,$Message,$ConfirmText,$ConfirmStyle) $false}
     function Invoke-QiehaoResponsiveLifecycle {throw 'CANCEL_MUST_NOT_CALL_SWITCH'}
-    $authStamp=(Get-FileHash (Join-Path $fakeCodexHome 'auth.json')).Hash
-    $stateStamp=(Get-FileHash (Join-Path $state 'active-profile.json')).Hash
+    $authStamp=(Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 (Join-Path $fakeCodexHome 'auth.json')).Hash
+    $stateStamp=(Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 (Join-Path $state 'active-profile.json')).Hash
     Show-QiehaoSwitchResult -Result ([pscustomobject]@{ResultCode='ACTIVE_PROFILE_OUT_OF_SYNC'}) -TargetProfile Team8
-    Assert-Account ((Get-FileHash (Join-Path $fakeCodexHome 'auth.json')).Hash -ceq $authStamp -and (Get-FileHash (Join-Path $state 'active-profile.json')).Hash -ceq $stateStamp -and (Fake-ProfileStamp) -ceq $profileStamp) 'GuiCancelChangesNoCredentialsOrState'
+    Assert-Account ((Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 (Join-Path $fakeCodexHome 'auth.json')).Hash -ceq $authStamp -and (Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 (Join-Path $state 'active-profile.json')).Hash -ceq $stateStamp -and (Fake-ProfileStamp) -ceq $profileStamp) 'GuiCancelChangesNoCredentialsOrState'
     Set-FakeAuth (New-FakeAuth 'fake-A' $false plus changed)
     $caught='';try {$null=Recovery-Switch $consent} catch {$caught=$_.Exception.Message}
     Assert-Account ($caught -ceq 'IDENTITY_RECOVERY_STATE_CHANGED') 'ChangedAuthorizationRequiresFreshConsent'
@@ -220,7 +223,7 @@ try {
     try {
         [IO.File]::WriteAllBytes($teamMarkerPath,[byte[]]@(1,2,3))
         $caught='';try {$null=Recovery-Switch $consent} catch {$caught=$_.Exception.Message}
-        Assert-Account ($caught -ceq 'PROFILE_IDENTITY_MARKER_INVALID' -and (Get-FileHash (Join-Path $fakeCodexHome 'auth.json')).Hash -ceq $authStamp) 'CorruptTeamCannotEnterRecovery'
+        Assert-Account ($caught -ceq 'PROFILE_IDENTITY_MARKER_INVALID' -and (Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 (Join-Path $fakeCodexHome 'auth.json')).Hash -ceq $authStamp) 'CorruptTeamCannotEnterRecovery'
     } finally {[IO.File]::WriteAllBytes($teamMarkerPath,$teamMarker);[Array]::Clear($teamMarker,0,$teamMarker.Length)}
     Set-FakeAuth $a
     $consent=Recovery-Consent
@@ -274,11 +277,11 @@ try {
     $r=Get-QiehaoCurrentQuotaSnapshot -ExpectedProfileName Team8
     Assert-Account $r.Succeeded 'SameIdentityOfficialRefreshCanStillReturnQuota'
     & $qm {$script:FakeQuotaMutation=$null}
-    $cacheStamp=(Get-FileHash (Join-Path $state 'quota-cache.json')).Hash
+    $cacheStamp=(Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 (Join-Path $state 'quota-cache.json')).Hash
     $oldTime=$saved.Cache.profiles.Team8.queried_at
     Set-FakeAuth $a
     $blocked=Save-QiehaoQuotaSnapshot -StateDirectory $state -Cache $saved.Cache -ProfileName Team8 -Snapshot $r.Snapshot -IdentityProof $r.IdentityProof
-    Assert-Account (-not $blocked.Succeeded -and $blocked.FailureCode -ceq 'QUOTA_ACCOUNT_IDENTITY_MISMATCH' -and (Get-FileHash (Join-Path $state 'quota-cache.json')).Hash -ceq $cacheStamp -and $blocked.Cache.profiles.Team8.queried_at -ceq $oldTime) 'IdentityChangedBeforeCommitKeepsCacheAndTime'
+    Assert-Account (-not $blocked.Succeeded -and $blocked.FailureCode -ceq 'QUOTA_ACCOUNT_IDENTITY_MISMATCH' -and (Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 (Join-Path $state 'quota-cache.json')).Hash -ceq $cacheStamp -and $blocked.Cache.profiles.Team8.queried_at -ceq $oldTime) 'IdentityChangedBeforeCommitKeepsCacheAndTime'
     Set-FakeAuth $team
     $mutate={[IO.File]::WriteAllBytes((Join-Path $fakeCodexHome 'auth.json'),$a)}.GetNewClosure()
     & $qm {param($m)$script:FakeQuotaMutation=$m} $mutate
@@ -290,9 +293,9 @@ try {
     Assert-Account ($row.QuotaSummary -ceq (Get-QiehaoQuotaUiText -Key IdentityUnverified) -and $row.QuotaFreshness.StartsWith((Get-QiehaoQuotaUiText -Key CachedPrefix)) -and $row.QuotaToolTip -notmatch '99%') 'LegacyPersonalQuotaNeverDisplayedAsTrustedTeam'
     # A normal switch re-encrypts the departing profile without changing identity.
     Set-FakeAuth $team
-    $markerBeforeSwitch=(Get-FileHash (Join-Path $profiles 'Team8.identity.dpapi')).Hash
+    $markerBeforeSwitch=(Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 (Join-Path $profiles 'Team8.identity.dpapi')).Hash
     $null=& $module {param($c,$p,$s) Invoke-CodexAccountSwitch -Name A -CodexHome $c -ProfilesDirectory $p -StateDirectory $s -ProcessData @() -UseProvidedProcessData} $fakeCodexHome $profiles $state
-    Assert-Account ($markerBeforeSwitch -cne (Get-FileHash (Join-Path $profiles 'Team8.identity.dpapi')).Hash) 'NormalSwitchReencryptsDepartingMarker'
+    Assert-Account ($markerBeforeSwitch -cne (Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 (Join-Path $profiles 'Team8.identity.dpapi')).Hash) 'NormalSwitchReencryptsDepartingMarker'
     $row=@(Update-QiehaoQuotaProfileRows -Rows @([pscustomobject]@{Name='Team8'}) -Cache $saved.Cache -ActiveProfile A -ProfilesDirectory $profiles)[0]
     Assert-Account ($row.QuotaSummary.StartsWith('5h 61%') -and $row.QuotaSummary.Contains('Week 42%')) 'DepartingTrustedSnapshotRemainsVisibleAfterNormalSwitch'
     # Three accounts, including two Team workspaces for the same fake user.
@@ -314,7 +317,7 @@ try {
     $bindings=@($threeCache.profiles.Values | ForEach-Object {$_.identity_binding} | Select-Object -Unique)
     Assert-Account ($bindings.Count -eq 3 -and $threeCache.profiles.Count -eq 3) 'ThreeDifferentIdentitiesHaveSeparatePersistentBindings'
     $threeJson=$threeCache | ConvertTo-Json -Depth 12 -Compress
-    $cacheStamp=(Get-FileHash (Join-Path $state 'quota-cache.json')).Hash
+    $cacheStamp=(Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 (Join-Path $state 'quota-cache.json')).Hash
     $callsBefore=& $qm {$script:FakeQuotaCalls}
     # Make accidental current-auth reads fail. Local switch receives an explicit fake path.
     & $qm {& $script:QuotaAuthModule {function script:Get-CodexHome {throw 'OFFLINE_MUST_NOT_READ_CURRENT_AUTH'}}}
@@ -323,7 +326,7 @@ try {
         $beforeDisplay=Fake-ProfileStamp
         $rows=@(Update-QiehaoQuotaProfileRows -Rows @([pscustomobject]@{Name='A'},[pscustomobject]@{Name='Team8'},[pscustomobject]@{Name='TeamB'}) -Cache $threeCache -ActiveProfile $target -ProfilesDirectory $profiles)
         Assert-Account ($rows[0].QuotaSummary.StartsWith('5h 84%') -and $rows[1].QuotaSummary.StartsWith('5h 61%') -and $rows[2].QuotaSummary.StartsWith('5h 37%') -and @($rows | Where-Object {-not $_.QuotaSummary.Contains('Week 42%')}).Count -eq 0) ('AllSnapshotsOfflineAfterSwitch'+$target)
-        Assert-Account ((Fake-ProfileStamp) -ceq $beforeDisplay -and (Get-FileHash (Join-Path $state 'quota-cache.json')).Hash -ceq $cacheStamp) ('OfflineDisplayDoesNotWrite'+$target)
+        Assert-Account ((Fake-ProfileStamp) -ceq $beforeDisplay -and (Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 (Join-Path $state 'quota-cache.json')).Hash -ceq $cacheStamp) ('OfflineDisplayDoesNotWrite'+$target)
     }
     Assert-Account ((& $qm {$script:FakeQuotaCalls}) -eq $callsBefore) 'OfflineDisplayStartsNoQuotaTransport'
     # Clear module memory and read the persisted file as on a fresh GUI start.
@@ -337,7 +340,7 @@ try {
     Assert-Account (-not $r.Succeeded -and $r.FailureCode -ceq 'QUOTA_ACCOUNT_IDENTITY_MISMATCH' -and (& $qm {$script:FakeQuotaCalls}) -eq $callsBefore) 'InactiveProfileQueryRejectedBeforeTransport'
     & $qm {$script:FakeQuotaFail=$true}
     $r=Invoke-QiehaoQuotaCacheRefresh -Reason Manual -ActiveProfile A -SelectedProfile A -StateDirectory $state -Cache $threeCache -Coordinator (New-QiehaoQuotaCoordinatorState) -QuotaProvider {param($p) Get-QiehaoCurrentQuotaSnapshot -ExpectedProfileName $p}
-    Assert-Account (-not $r.Succeeded -and (Get-FileHash (Join-Path $state 'quota-cache.json')).Hash -ceq $cacheStamp -and ($r.Cache | ConvertTo-Json -Depth 12 -Compress) -ceq $threeJson) 'OneAccountQueryFailureKeepsAllSnapshotsAndTimes'
+    Assert-Account (-not $r.Succeeded -and (Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 (Join-Path $state 'quota-cache.json')).Hash -ceq $cacheStamp -and ($r.Cache | ConvertTo-Json -Depth 12 -Compress) -ceq $threeJson) 'OneAccountQueryFailureKeepsAllSnapshotsAndTimes'
     $freshA=New-FakeAuth 'fake-A' $false plus 'q05-refreshed'
     Set-FakeAuth $freshA
     & $module {param($p,$b) Save-QiehaoRefreshedProfileBytes -Name A -AuthBytes $b -ProfilesDirectory $p} $profiles $freshA
@@ -352,7 +355,7 @@ try {
     $tampered.profiles.Team8.identity_binding=$threeCache.profiles.TeamB.identity_binding
     $row=@(Update-QiehaoQuotaProfileRows -Rows @([pscustomobject]@{Name='Team8'}) -Cache $tampered -ActiveProfile RenamedPlus -ProfilesDirectory $profiles)[0]
     Assert-Account ($row.QuotaSummary -ceq (Get-QiehaoQuotaUiText -Key IdentityUnverified) -and $row.QuotaToolTip -notmatch '%') 'OtherTeamBindingCannotAuthorizeThisTeamsCache'
-    $legacy.profiles.Team8 | Add-Member -NotePropertyName identity_binding -NotePropertyValue (Get-FileHash (Join-Path $profiles 'Team8.identity.dpapi')).Hash
+    $legacy.profiles.Team8 | Add-Member -NotePropertyName identity_binding -NotePropertyValue (Microsoft.PowerShell.Utility\Get-FileHash -Algorithm SHA256 (Join-Path $profiles 'Team8.identity.dpapi')).Hash
     $row=@(Update-QiehaoQuotaProfileRows -Rows @([pscustomobject]@{Name='Team8'}) -Cache $legacy -ActiveProfile RenamedPlus -ProfilesDirectory $profiles)[0]
     Assert-Account ($row.QuotaSummary -ceq (Get-QiehaoQuotaUiText -Key IdentityUnverified)) 'LegacyCiphertextHashNotSilentlyPromotedToStableIdentity'
     Set-FakeAuth $team

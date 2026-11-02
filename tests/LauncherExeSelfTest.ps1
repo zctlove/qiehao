@@ -15,7 +15,7 @@ $bytes = [IO.File]::ReadAllBytes($exe)
 $pe = [BitConverter]::ToInt32($bytes,60)
 Assert-ExeTest ([BitConverter]::ToUInt16($bytes,$pe+92) -eq 2) 'EXE_NOT_GUI_SUBSYSTEM'
 $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
-Assert-ExeTest ($version.FileVersion -eq '1.1.0.0' -and $version.ProductVersion -eq '1.1.0') 'EXE_VERSION'
+Assert-ExeTest ($version.FileVersion -eq '1.1.1.0' -and $version.ProductVersion -eq '1.1.1') 'EXE_VERSION'
 Assert-ExeTest ($version.ProductName -eq 'Qiehao' -and $version.CompanyName -ne 'OpenAI') 'EXE_PRODUCT'
 $source = [IO.File]::ReadAllText((Join-Path $projectRoot 'launcher\QiehaoLauncher.cs'))
 Assert-ExeTest ($source -notmatch '(?i)cmd\.exe|Start-Qiehao\.cmd\s*\)|auth\.json|DPAPI|app-server|HttpClient|WebRequest|GetProcesses|CredentialManager|Mutex|refresh_token|access_token') 'FORBIDDEN_LAUNCHER_LOGIC'

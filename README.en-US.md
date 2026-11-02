@@ -4,11 +4,26 @@
 
 Qiehao is a local multi-account manager for Codex Desktop on Windows. Your local project files remain available as you switch accounts, and the convenience is clearer when managing three or more accounts. Every switch is initiated by the user, and authentication state changes only after Codex has completely exited.
 
+It supports local profiles and switching for accounts such as Plus and Team. If the official account-switching option you use provides only two account slots, Qiehao is useful for keeping three or more saved profiles while continuing to use project files on the same computer at the same paths. This comparison does not describe two accounts as a permanent limit of every official client version.
+
+**Local project continuity means that files on disk remain available at their existing paths.** Qiehao does not synchronize official chat histories, project metadata, or Memory between accounts, and does not merge their cloud data.
+
 > [!IMPORTANT]
 > Qiehao is an unofficial community tool. It is not an official OpenAI product. It manages only local Codex Desktop authentication state and does not modify ChatGPT Web, browser, or PWA sessions.
 
-> [!WARNING]
-> **The source branch and the downloadable release are not the same build (as of this documentation update):** the latest published GitHub Release is still `v1.1.0`. The `main` branch contains post-release maintenance fixes from source checkpoint `18d4e3b`, but this work pushed source only: no new tag, Release, ZIP, or EXE was published. The OAuth recovery, identity-check, and quota-ownership guidance added here describes the current `main` source; an already downloaded v1.1.0 Release package may not contain those later fixes. Regular users should download only a published ZIP from Releases. GitHub's `Code → Download ZIP` is a source snapshot, not a runnable release package. Do not overwrite an installed program directory with unreleased `main` source; wait for a later published Release before upgrading.
+> [!NOTE]
+> **Latest official release: Qiehao v1.1.1 (2026-11-02).** This version includes read-only identity inspection after OAuth failure, explicit confirmation before saving a new profile, controlled Team recovery, and identity-bound quota caches. Download the official Windows ZIP from GitHub Releases and verify SHA-256; `Code → Download ZIP` is a source snapshot, not the official application package. Occasional Codex Desktop signed-out states and rejected official OAuth completion notifications remain known limitations.
+
+## Usage reminders
+
+1. Exit Codex Desktop normally before switching accounts, including its background client processes.
+2. Profile deletion is protected while Codex is running. Do not force-kill processes to bypass a warning.
+3. Successful OAuth does not prove that a local profile was saved. Check Qiehao's final result and account list.
+4. Read-only identity inspection does not save an account automatically. A new profile requires identity verification and a separate confirmation.
+5. A failed quota query is not a successful refresh. Retained historical numbers are not the result of that failed query.
+6. Historical cache ownership marked unverified means that its saved-profile owner cannot be confirmed, not that quota has never been retrieved.
+7. A legacy cache becomes a trusted snapshot only after a successful refresh for the current account establishes a new identity binding.
+8. If Codex temporarily shows signed out at startup, wait for initialization. If it persists, fully exit and reopen the client, then inspect redacted logs if needed. Do not switch repeatedly or manually copy `auth.json`. An explicit “Do not start Codex / manual inspection required” warning takes priority.
 
 ## Product Preview
 
@@ -89,7 +104,7 @@ What Qiehao can do is avoid adding unnecessary high-frequency polling, automatic
 
 ## How it works
 
-In v1.1.0, Qiehao delegates account addition to the official Codex app-server ChatGPT browser OAuth flow. The user completes sign-in on the official page. After identity verification, Qiehao stores the original authentication bytes in an encrypted snapshot protected by Windows DPAPI CurrentUser. Unsupported protocols explicitly offer the original manual-import workflow.
+In v1.1.1, Qiehao delegates account addition to the official Codex app-server ChatGPT browser OAuth flow. The user completes sign-in on the official page. After identity verification, Qiehao stores the original authentication bytes in an encrypted snapshot protected by Windows DPAPI CurrentUser. Unsupported protocols explicitly offer the original manual-import workflow.
 
 For a later switch, Qiehao requires Codex Desktop to exit completely. It then safely snapshots the current account, verifies the target account, atomically replaces the local Codex authentication file, rereads and verifies the written data, and updates the local Active Profile state. Local switching and official verification are reported separately. Qiehao does not fill in sign-in credentials, implement its own OAuth login API, forcibly terminate Codex, or touch browser login state.
 
@@ -174,11 +189,11 @@ PowerShell 7 is used only for compatibility and development testing. Regular use
 
 Latest published release:
 
-**[Qiehao v1.1.0](https://github.com/zctlove/qiehao/releases/tag/v1.1.0)**
+**[Qiehao v1.1.1](https://github.com/zctlove/qiehao/releases/tag/v1.1.1)**
 
-Note: this is the currently published application package. Later source fixes on GitHub `main` have not been packaged as a new Release. Do not treat the repository source ZIP as an installer.
+The official Windows ZIP contains this version's program and runtime dependencies, with no user account profiles or runtime data. Do not treat the repository source ZIP as the official application package.
 
-[Download Windows ZIP](https://github.com/zctlove/qiehao/releases/download/v1.1.0/Qiehao-v1.1.0-Windows.zip) · [SHA256 checksum file](https://github.com/zctlove/qiehao/releases/download/v1.1.0/Qiehao-v1.1.0-SHA256.txt)
+[Download Windows ZIP](https://github.com/zctlove/qiehao/releases/download/v1.1.1/Qiehao-v1.1.1-Windows.zip) · [SHA256 checksum file](https://github.com/zctlove/qiehao/releases/download/v1.1.1/Qiehao-v1.1.1-SHA256.txt)
 
 New users should download the latest version.
 
@@ -221,7 +236,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File ".\gui\QiehaoGui.ps
 >
 > Do not infer workspace identity from an email address, display name, or a Plus / Team plan label alone. If the Team / Personal context cannot be verified reliably, Qiehao will not save it as a verified account; follow the UI guidance and sign in again through the official flow.
 
-For both first and subsequent account additions in v1.1.0, prefer the official browser flow:
+For both first and subsequent account additions in v1.1.1, prefer the official browser flow:
 
 1. Completely exit Codex Desktop.
 2. Open Qiehao and click Add Account.
@@ -229,7 +244,7 @@ For both first and subsequent account additions in v1.1.0, prefer the official b
 4. Complete sign-in for the target account in the browser. Press Esc to cancel while waiting.
 5. After identity verification, enter a local name. Addition completes only after the credentials are securely saved.
 
-Official sign-in and identity reads may take time. The current main-source login budget is up to about 180 seconds, depending on network and service response. Do not repeatedly click Add Account or run multiple Qiehao instances in parallel. If it times out, follow the OAuth recovery guidance below; do not assume the authorization remained unchanged.
+Official sign-in and identity reads may take time. The v1.1.1 login budget is up to about 180 seconds, depending on network and service response. Do not repeatedly click Add Account or run multiple Qiehao instances in parallel. If it times out, follow the OAuth recovery guidance below; do not assume the authorization remained unchanged.
 
 You generally do not need to start Codex Desktop to sign in first. Repeat this flow for subsequent accounts and select the intended account in the browser. New credentials are never written into the previous Active Profile.
 
@@ -292,7 +307,7 @@ Wait until the current switch is complete and the client state is stable before 
 
 ### What if Windows Sandbox Service keeps running?
 
-Newer Codex Windows versions may keep `codex-windows-sandbox-service.exe` running. v1.1.0 strictly validates official persistent Sandbox Services; a confirmed trusted service alone does not block account operations. You normally do not need to terminate it, disable it, or change Windows service settings. Actual Codex Desktop or external Codex execution processes still safely block account operations. Uncertain classification continues to fail closed.
+Newer Codex Windows versions may keep `codex-windows-sandbox-service.exe` running. v1.1.1 strictly validates official persistent Sandbox Services; a confirmed trusted service alone does not block account operations. You normally do not need to terminate it, disable it, or change Windows service settings. Actual Codex Desktop or external Codex execution processes still safely block account operations. Uncertain classification continues to fail closed.
 
 ### What does a locally switched but unverified account mean?
 
@@ -302,7 +317,7 @@ After committing the local Profile switch, Qiehao attempts official sign-in veri
 
 This remains a known limitation to monitor: Codex Desktop may occasionally show signed out after reopening, and the official OAuth completion notification may still be rejected. The current source fixes improve read-only identity inspection and explicit saving after a reported failure, but **they do not guarantee that all Codex Desktop sign-in issues are eliminated or that the official service will accept every sign-in state**.
 
-Check Qiehao's final result first. A saved local profile, a committed local switch, and verified official identity are different states. If the client still shows signed out, do not repeatedly add or switch accounts, and do not delete saved profiles or authentication files. Exit normally and use the Verify entry if the UI provides it. If the issue persists, record the safe Qiehao message and error code and report it through GitHub Issues. Never attach real credentials.
+Check Qiehao's final result first. A saved local profile, a committed local switch, and verified official identity are different states. Wait for client initialization; if it continues to show signed out, fully exit normally and reopen it. Do not repeatedly add or switch accounts, delete saved profiles or authentication files, or manually copy auth.json. If needed, fully exit and use the Verify entry when offered, and inspect or share only redacted logs, safe messages, and error codes. Never attach real credentials. An explicit “Do not start Codex / manual inspection required” warning takes priority.
 
 ### What if Qiehao closes unexpectedly during add or switch?
 
@@ -314,21 +329,21 @@ If Qiehao explicitly says “Do not start Codex; manual inspection required,” 
 
 ## Updating
 
-Regular users should update with the latest GitHub Releases ZIP. These steps cover upgrading from v1.0.3 to v1.1.0:
+Regular users should update with the latest GitHub Releases ZIP. These steps cover upgrading from v1.0.3 or v1.1.0 to v1.1.1:
 
 1. Completely exit both Qiehao and Codex Desktop.
-2. Download the v1.1.0 Release ZIP and verify its SHA256.
+2. Download the v1.1.1 Release ZIP and verify its SHA256.
 3. Fully extract its contents over the existing Qiehao directory, replacing only program files with the same names. Do not delete the whole old directory.
 4. Preserve `profiles/`, `state/`, `logs/`, and `backup/` in the existing directory.
-5. v1.1.0 adds `Qiehao.exe`; double-click it after extracting. `Start-Qiehao.cmd` remains a backup. Replacing program files does not require adding saved accounts again.
+5. v1.1.1 includes a rebuilt `Qiehao.exe`; double-click it after extracting. `Start-Qiehao.cmd` remains a backup. Replacing program files does not require adding saved accounts again.
 
 If you extract into a new directory, manually copy the old `profiles/` and `state/` to continue using your saved accounts. This is only supported on the same Windows computer, under the same Windows user and DPAPI CurrentUser protection environment. `logs/` and `backup/` are not required to restore the account list. Never upload these private directories publicly.
 
 The Release ZIP does not contain `profiles/`, `state/`, `logs/`, or `backup/`. Replacing program files normally does not remove private runtime data. Do not directly migrate DPAPI profiles across computers or Windows users.
 
-### v1.1.0 reliability and rollback
+### v1.1.1 reliability and rollback
 
-v1.1.0 preserves Profile format and DPAPI CurrentUser compatibility and includes real-user-accepted account-flow fixes and the thin EXE launcher.
+v1.1.1 preserves Profile format and DPAPI CurrentUser compatibility and includes real-user-accepted account-flow fixes and the thin EXE launcher.
 
 This version series refreshes the GUI immediately after account operations. Current Account is read from the committed local Active Profile without starting Codex Desktop; official verification is a separate status, and older refresh results cannot overwrite newer state. Sequential failed/cancelled additions clean up safely. Persistent Windows Sandbox Service processes are distinguished from actual Desktop processes.
 
@@ -336,7 +351,7 @@ Local switching and official sign-in verification have separate outcomes. A veri
 
 The existing Team first-add warning remains because long-term real-user coverage is still limited. Quota is an auxiliary feature and never blocks add, switch, delete, or verify. Failed queries can be refreshed manually, preserve the last successful snapshot, and do not trigger high-frequency background polling. Refreshed authentication is saved as original bytes only after strict identity matching. Profile format and DPAPI CurrentUser remain unchanged.
 
-When rolling back the software, prefer keeping the latest `profiles/` and `state/` and replacing only program files. Codex may have refreshed authentication tokens; do not prioritize restoring stale authentication backups. v1.1.0 uses a Profile format compatible with v1.0.3. Any future format change requires a separate migration and rollback design.
+When rolling back the software, prefer keeping the latest `profiles/` and `state/` and replacing only program files. Codex may have refreshed authentication tokens; do not prioritize restoring stale authentication backups. v1.1.1 uses a Profile format compatible with v1.0.3. Any future format change requires a separate migration and rollback design.
 
 Advanced Git users should first run `git status --short`. If there are no local source changes, run `git pull --ff-only`. The `--ff-only` option prevents Git from creating an automatic merge commit when histories have diverged.
 
@@ -401,9 +416,10 @@ All automated tests use fake-only data or hidden/offscreen WPF. Development and 
 
 ## Release status and version history
 
-The current recommended download is **[Qiehao v1.1.0 (Latest)](https://github.com/zctlove/qiehao/releases/tag/v1.1.0)**.
+The current recommended download is **[Qiehao v1.1.1 (Latest)](https://github.com/zctlove/qiehao/releases/tag/v1.1.1)**.
 
-- v1.1.0 — Latest
+- v1.1.1 — Latest
+- v1.1.0 — Previous official release
 - v1.0.3
 - v1.0.2
 - v1.0.1
@@ -411,7 +427,7 @@ The current recommended download is **[Qiehao v1.1.0 (Latest)](https://github.co
 
 v1.0.0, v1.0.1, and v1.0.2 remain available for version history and troubleshooting. New users should use the latest release.
 
-v1.1.0 includes a thin Windows EXE launcher, not an installer. PowerShell source and modules remain separate for inspection.
+v1.1.1 includes a thin Windows EXE launcher, not an installer. PowerShell source and modules remain separate for inspection.
 
 ## Community
 
