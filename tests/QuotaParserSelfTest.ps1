@@ -143,8 +143,16 @@ $clamped = ConvertTo-QiehaoQuotaSnapshot -Result (
         -Primary (New-FakeWindow -UsedPercent 125 -DurationMinutes 60 -ResetsAt $null) `
         -Secondary (New-FakeWindow -UsedPercent -20 -DurationMinutes 90 -ResetsAt $null)
 )
-Assert-Equal $clamped.Windows[0].RemainingPercent 0 'CLAMP_LOW'
-Assert-Equal $clamped.Windows[1].RemainingPercent 100 'CLAMP_HIGH'
+Assert-Equal $clamped.Windows[0].RemainingPercent $null 'OUT_OF_RANGE_HIGH_UNAVAILABLE'
+Assert-Equal $clamped.Windows[1].RemainingPercent $null 'OUT_OF_RANGE_LOW_UNAVAILABLE'
+foreach ($invalid in @($null,'unknown','25',$true,[double]::NaN,[double]::PositiveInfinity,[double]::NegativeInfinity)) {
+    $parsed = ConvertTo-QiehaoQuotaSnapshot -Result (New-FakeResult `
+        -Primary ([pscustomobject]@{usedPercent=$invalid;windowDurationMins=300}) -Secondary $null)
+    Assert-Equal $parsed.Windows[0].RemainingPercent $null 'INVALID_PERCENT_UNAVAILABLE'
+}
+$missingUsed = ConvertTo-QiehaoQuotaSnapshot -Result (New-FakeResult `
+    -Primary ([pscustomobject]@{windowDurationMins=300}) -Secondary $null)
+Assert-Equal $missingUsed.Windows[0].RemainingPercent $null 'MISSING_PERCENT_UNAVAILABLE'
 
 $empty = ConvertTo-QiehaoQuotaSnapshot -Result (
     New-FakeResult -Primary $null -Secondary $null

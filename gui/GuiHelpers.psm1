@@ -415,6 +415,7 @@ function Get-QiehaoSafeResultCode {
             'SWITCH_SUCCESS',
             'ALREADY_ACTIVE',
             'ACTIVE_PROFILE_OUT_OF_SYNC',
+            'IDENTITY_RECOVERY_STATE_CHANGED', 'IDENTITY_RECOVERY_NOT_APPLICABLE',
             'ACTIVE_PROFILE_SYNCED',
             'ACTIVE_PROFILE_SYNC_FAILED',
             'ACTIVE_PROFILE_IDENTITY_MISMATCH',
@@ -447,6 +448,9 @@ function Get-QiehaoSafeResultCode {
             'PROFILE_ADD_SUCCESS',
             'PROFILE_NAME_ALREADY_EXISTS',
             'PROFILE_IDENTITY_ALREADY_EXISTS',
+            'ACCOUNT_FALLBACK_CHECK_EXPIRED',
+            'ACCOUNT_FALLBACK_STATE_CHANGED',
+            'ACCOUNT_FALLBACK_IDENTITY_UNVERIFIED',
             'PROFILE_IDENTITY_SCAN_INCOMPLETE',
             'PROFILE_ADD_VERIFICATION_FAILED',
             'PROFILE_ADD_ROLLBACK_FAILED',
@@ -497,10 +501,17 @@ function ConvertTo-QiehaoOperationResult {
             $message = '切换成功。'; $success = $true; $refresh = $true
         }
         'SWITCH_AUTH_UNVERIFIED_TRANSIENT' { $message = '本地账号已切换，登录状态暂未验证。可以启动 Codex 使用；稍后可点击“验证”。'; $refresh = $true; $severity = 'Information' }
+        'SWITCH_RECOVERY_LOCAL_COMMITTED_UNVERIFIED' { $message = '本地 Team 已切换，但官方身份尚未验证；未自动回滚。'; $refresh = $true }
+        'SWITCH_RECOVERY_LOCAL_COMMITTED_MANUAL_CHECK_REQUIRED' { $message = '本地 Team 已切换，但官方验证异常退出，需要人工检查。请勿启动 Codex。'; $refresh = $true; $severity = 'Critical' }
+        'IDENTITY_RECOVERY_STATE_CHANGED' { $message = '确认后授权文件、目标档案或活动记录已变化，已停止恢复。' }
+        'IDENTITY_RECOVERY_NOT_APPLICABLE' { $message = '当前状态不符合受控恢复条件，未替换授权。' }
         'SWITCH_REAUTH_REQUIRED' { $message = '目标账号的本地登录状态已失效，需要重新登录该账号。'; $refresh = $true }
         'SWITCH_POST_VERIFY_IDENTITY_MISMATCH' { $message = '账号身份验证不一致，已停止切换。'; $refresh = $true }
         'DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED' { $message = '安全恢复未完成，请勿启动 Codex，需要人工检查。'; $severity = 'Critical'; $refresh = $true }
         'ADD_VERIFIED_SUCCESS' { $message = '已识别当前 Codex 登录账号，凭据已安全保存，账号添加成功。'; $success = $true; $refresh = $true }
+        'ACCOUNT_FALLBACK_CHECK_EXPIRED' { $message = '身份检查结果已过期，请重新只读检查当前身份。' }
+        'ACCOUNT_FALLBACK_STATE_CHANGED' { $message = '检查后当前授权已改变，未保存档案。请重新检查身份。' }
+        'ACCOUNT_FALLBACK_IDENTITY_UNVERIFIED' { $message = '当前身份无法可靠确认，未保存档案。' }
         'ADD_SUCCESS_UNVERIFIED' { $message = '本地账号已安全保存，登录状态暂未验证。'; $success = $true; $refresh = $true }
         'ADD_REAUTH_REQUIRED' { $message = '登录状态已失效，请通过官方流程重新登录。' }
         'ACCOUNT_LOGIN_MANUAL_FALLBACK_REQUIRED' { $message = '当前 Codex 版本暂不支持直接登录，请先在 Codex 中完成登录并退出，然后确认手动添加。' }
@@ -655,7 +666,7 @@ function ConvertTo-QiehaoOperationResult {
         Severity = $severity
         IsSuccess = $success
         RefreshRequired = $refresh
-        LocalCommitted = ($ResultCode -in @('SWITCH_VERIFIED_SUCCESS','SWITCH_AUTH_UNVERIFIED_TRANSIENT','SWITCH_REAUTH_REQUIRED'))
+        LocalCommitted = ($ResultCode -in @('SWITCH_VERIFIED_SUCCESS','SWITCH_AUTH_UNVERIFIED_TRANSIENT','SWITCH_REAUTH_REQUIRED','SWITCH_RECOVERY_LOCAL_COMMITTED_UNVERIFIED','SWITCH_RECOVERY_LOCAL_COMMITTED_MANUAL_CHECK_REQUIRED'))
         VerificationState = $(switch ($ResultCode) { 'SWITCH_VERIFIED_SUCCESS' {'Verified'} 'SWITCH_AUTH_UNVERIFIED_TRANSIENT' {'Unverified'} default {''} })
     }
 }

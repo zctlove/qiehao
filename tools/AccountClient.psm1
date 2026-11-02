@@ -181,7 +181,8 @@ function Invoke-QiehaoAccountTransport {
     param([Parameter(Mandatory = $true)][string]$CodexHome,
         [bool]$NeedsRefresh = $true, [hashtable]$OwnedProcessRegistry,
         [string]$TestExecutablePath, [string]$TestProcessArguments,
-        [ValidateRange(100, 5000)][int]$PrimaryBudgetMilliseconds = 4800)
+        [ValidateRange(100, 8000)][int]$PrimaryBudgetMilliseconds = 8000,
+        [switch]$NoRefresh)
     $registry = $OwnedProcessRegistry
     if ($null -eq $registry) { $registry = @{ CancelRequested = $false } }
     if (-not $registry.ContainsKey('CancelRequested')) { $registry.CancelRequested = $false }
@@ -189,16 +190,21 @@ function Invoke-QiehaoAccountTransport {
     $refreshed = $false; $clean = $true
     $clock = [Diagnostics.Stopwatch]::StartNew()
     try {
+        if ($NoRefresh -and $NeedsRefresh) { throw 'ACCOUNT_READ_ONLY_UNVERIFIED' }
         $deadline = [DateTime]::UtcNow.AddMilliseconds($PrimaryBudgetMilliseconds)
         $session = New-AccountSession $CodexHome 'AccountVerify' $registry $TestExecutablePath $TestProcessArguments
         Initialize-AccountSession $session $deadline
-        $readDeadline = [DateTime]::UtcNow.AddMilliseconds(2200)
+        $readDeadline = [DateTime]::UtcNow.AddMilliseconds(4000)
         if ($readDeadline -gt $deadline) { $readDeadline = $deadline }
-        $result = Invoke-AccountRpc $session 'account/read' @{} $readDeadline
+        $readParameters = if ($NoRefresh) { @{ refreshToken = $false } } else { @{} }
+        $result = Invoke-AccountRpc $session 'account/read' $readParameters $readDeadline
         $loaded = Get-AccountResultState $result
-        if ($loaded -eq 'NeedsRefresh') { $NeedsRefresh = $true }
-        if ($loaded -in @('Unsupported','CredentialStoreMismatch')) { $state = $loaded }
+        if ($NoRefresh -and $loaded -eq 'NeedsRefresh') {
+            $state = 'TransientFailure'; $failure = 'ACCOUNT_READ_ONLY_UNVERIFIED'
+        }
+        elseif ($loaded -in @('Unsupported','CredentialStoreMismatch')) { $state = $loaded }
         else {
+            if ($loaded -eq 'NeedsRefresh') { $NeedsRefresh = $true }
             if ($NeedsRefresh) {
                 $registry.Stage = 'ACCOUNT_REFRESH_START'
                 $refreshed = $true
@@ -247,6 +253,7 @@ function Invoke-QiehaoManagedLoginTransport {
     if ($null -eq $registry) { $registry = @{ CancelRequested = $false } }
     if (-not $registry.ContainsKey('CancelRequested')) { $registry.CancelRequested = $false }
     $session = $null; $loginId = $null; $complete = $false
+    $loginPhase = 'Spawn'; $staleCompletions = 0; $accountUpdates = 0; $otherNotifications = 0; $completionRejected = $false
     $state = 'Failed'; $failure = ''; $plan = 'Unknown'; $cancelSent = $false; $clean = $true
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $timings = @{ AppServerSpawnMs = 0L; InitializeMs = 0L; LoginStartRpcMs = 0L; BrowserLaunchMs = 0L }
@@ -256,9 +263,11 @@ function Invoke-QiehaoManagedLoginTransport {
         $session = New-AccountSession $CodexHome 'AccountLogin' $registry $TestExecutablePath $TestProcessArguments
         $timings.AppServerSpawnMs = $phase.ElapsedMilliseconds
         $phase.Restart()
+        $loginPhase = 'Initialize'
         try { Initialize-AccountSession $session ([DateTime]::UtcNow.AddMilliseconds($InitializeBudgetMilliseconds)) }
         finally { $timings.InitializeMs = $phase.ElapsedMilliseconds }
         $phase.Restart()
+        $loginPhase = 'LoginStart'
         try { $started = Invoke-AccountRpc $session 'account/login/start' @{ type = 'chatgpt' } ([DateTime]::UtcNow.AddMilliseconds($LoginStartBudgetMilliseconds)) }
         finally { $timings.LoginStartRpcMs = $phase.ElapsedMilliseconds }
         if ([string](Get-AccountField $started 'type') -cne 'chatgpt') { throw 'ACCOUNT_PROTOCOL_UNSUPPORTED' }
@@ -269,6 +278,7 @@ function Invoke-QiehaoManagedLoginTransport {
         $registry.Stage = 'ACCOUNT_LOGIN_URL_READY'
         if ($null -ne $EventProvider) { $null = & $EventProvider 'ACCOUNT_LOGIN_URL_READY' $timings }
         $phase.Restart()
+        $loginPhase = 'BrowserLaunch'
         try {
           if ($null -ne $BrowserProvider) { $null = & $BrowserProvider $url }
           else {
@@ -284,6 +294,7 @@ function Invoke-QiehaoManagedLoginTransport {
         $url = $null; $started = $null
         # Only the browser ceremony receives the long interaction budget.
         $deadline = [DateTime]::UtcNow.AddMilliseconds($LoginBudgetMilliseconds)
+        $loginPhase = 'WaitCompletion'
         while (-not $complete) {
             if ($registry.CancelRequested) { throw 'ACCOUNT_CANCELLED' }
             if ([DateTime]::UtcNow -ge $deadline) { throw 'ACCOUNT_TIMEOUT' }
@@ -291,16 +302,22 @@ function Invoke-QiehaoManagedLoginTransport {
             if ($session.Notifications.Count -gt 0) {
                 $message = $session.Notifications[0]; $session.Notifications.RemoveAt(0)
             } else { $message = Read-AccountMessage $session $deadline }
-            if ([string](Get-AccountField $message 'method') -cne 'account/login/completed') { continue }
+            if ([string](Get-AccountField $message 'method') -cne 'account/login/completed') {
+                if ([string](Get-AccountField $message 'method') -ceq 'account/updated') { $accountUpdates++ }
+                else { $otherNotifications++ }
+                continue
+            }
             $parameters = Get-AccountField $message 'params'
-            if ([string](Get-AccountField $parameters 'loginId') -cne $loginId) { continue }
+            if ([string](Get-AccountField $parameters 'loginId') -cne $loginId) { $staleCompletions++; continue }
             $success = Get-AccountField $parameters 'success'
-            if ($success -isnot [bool] -or -not $success) { throw 'ACCOUNT_LOGIN_FAILED' }
+            if ($success -isnot [bool]) { throw 'ACCOUNT_LOGIN_COMPLETION_INVALID' }
+            if (-not $success) { $completionRejected = $true; throw 'ACCOUNT_LOGIN_REJECTED' }
             $complete = $true
         }
         $registry.Stage = 'ACCOUNT_LOGIN_COMPLETED'
         if ($null -ne $EventProvider) { $null = & $EventProvider 'ACCOUNT_LOGIN_COMPLETED' $timings }
         $readDeadline = [DateTime]::UtcNow.AddMilliseconds($ReadBudgetMilliseconds)
+        $loginPhase = 'ReadAccount'
         $account = Invoke-AccountRpc $session 'account/read' @{ refreshToken = $false } $readDeadline
         if ((Get-AccountResultState $account) -cne 'Loaded') { throw 'ACCOUNT_LOGIN_VERIFY_FAILED' }
         $plan = Get-AccountSafePlan $account
@@ -314,6 +331,19 @@ function Invoke-QiehaoManagedLoginTransport {
             default { 'Failed' }
         }
         if ($failure -notmatch '^ACCOUNT_[A-Z_]+$') { $failure = 'ACCOUNT_LOGIN_FAILED' }
+        if ($failure -ceq 'ACCOUNT_PROTOCOL_CLOSED') {
+            $exited = $false
+            try { $exited = $session.Process.HasExited } catch { }
+            $failure = if ($exited) { 'ACCOUNT_LOGIN_PROCESS_EXITED' } else { 'ACCOUNT_LOGIN_CONNECTION_CLOSED' }
+        }
+        elseif ($failure -ceq 'ACCOUNT_TIMEOUT') {
+            $failure = switch ($loginPhase) {
+                'Initialize' { 'ACCOUNT_LOGIN_INITIALIZE_TIMEOUT' }
+                'LoginStart' { 'ACCOUNT_LOGIN_START_TIMEOUT' }
+                'ReadAccount' { 'ACCOUNT_LOGIN_READ_TIMEOUT' }
+                default { if ($staleCompletions -gt 0) { 'ACCOUNT_LOGIN_COMPLETION_ID_MISMATCH' } else { 'ACCOUNT_LOGIN_TIMEOUT' } }
+            }
+        }
     } finally {
         if ($null -ne $session -and $null -ne $loginId -and $state -ne 'Verified') {
             try {
@@ -332,6 +362,11 @@ function Invoke-QiehaoManagedLoginTransport {
         $loginId = $null; $url = $null; $started = $null; $message = $null; $account = $null
         $clock.Stop()
         $registry.LoginTimings = $timings
+        $registry.LoginDiagnostics = @{
+            LoginPhase = $loginPhase; FailureCode = $failure
+            MismatchedCompletionCount = $staleCompletions; AccountUpdateCount = $accountUpdates
+            OtherNotificationCount = $otherNotifications; CompletionRejected = $completionRejected
+        }
     }
     return [pscustomobject]@{
         VerificationState = $state; FailureCode = $failure; PlanType = $plan

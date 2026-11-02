@@ -25,6 +25,13 @@ try {
     }
     if ($r.Result -cne 'SWITCH_VERIFIED_SUCCESS' -or $pulse.Count -lt 2 -or $script:guiLifecycleWorkerRunning) { throw 'DISPATCHER_BLOCKED_BY_LIFECYCLE' }
     if ($refreshStatusText.Text -cne 'Account.VerifyingOfficial') { throw 'LIFECYCLE_STATUS_NOT_DISPATCHED' }
+    $r=Invoke-QiehaoResponsiveLifecycle -Action Switch -Name Fake -IdentityRecoveryConsent ([pscustomobject]@{Stamp='FAKE-CONSENT'}) -TestWorker {
+        param($module,$action,$name,$registry,$consent)
+        if ($consent.Stamp -cne 'FAKE-CONSENT') {throw 'RECOVERY_CONSENT_NOT_FORWARDED'}
+        [pscustomobject]@{Result='SWITCH_RECOVERY_LOCAL_COMMITTED_MANUAL_CHECK_REQUIRED'}
+    }
+    if (-not $script:guiManualRecoveryRequired -or $r.Result -cne 'SWITCH_RECOVERY_LOCAL_COMMITTED_MANUAL_CHECK_REQUIRED') {throw 'RECOVERY_MANUAL_CHECK_GATE_NOT_RETAINED'}
+    $script:guiManualRecoveryRequired=$false
     $r = Invoke-QiehaoResponsiveLifecycle -Action Login -TestWorker {
         param($module,$action,$name,$registry)
         $registry.Stage='ACCOUNT_LOGIN_NAME_REQUIRED'

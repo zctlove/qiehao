@@ -63,11 +63,56 @@ function Save-QiehaoRefreshedProfileBytes {
     }
 }
 
+function Get-QiehaoRecoveryConsent {
+    param([string]$Name,[string]$CodexHome,[string]$ProfilesDirectory,[string]$StateDirectory)
+    $current = $null; $saved = $null; $payload = $null
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $null = Assert-CodexFileCredentialSource -CodexHome $CodexHome
+        $active = Read-ActiveProfileState -StateDirectory $StateDirectory
+        if ($active.ActiveProfile -cne $Name) { throw 'IDENTITY_RECOVERY_NOT_APPLICABLE' }
+        $paths = Get-StrictProfileArtifactPaths -Name $Name -ProfilesDirectory $ProfilesDirectory
+        if (-not (Get-ProfileMetadataState -Name $Name -ProfilesDirectory $ProfilesDirectory).IsValid) { throw 'PROFILE_METADATA_INVALID' }
+        $saved = Read-CodexAccountSlotBytes -Name $Name -ProfilesDirectory $ProfilesDirectory
+        $self = Assert-CodexAuthMatchesProfileIdentity -Name $Name -AuthBytes $saved -ProfilesDirectory $ProfilesDirectory -MismatchCode PROFILE_IDENTITY_MISMATCH
+        if ($self.WorkspaceContextStatus -cne 'Confirmed' -or $self.SavedWorkspaceClass -cne 'Team') { throw 'IDENTITY_RECOVERY_NOT_APPLICABLE' }
+        $current = Read-SensitiveFileBytes -Path (Join-Path $CodexHome 'auth.json')
+        $null = Test-CodexAuthBytes -Bytes $current
+        $comparison = Compare-CodexAuthToProfileIdentity -Name $Name -AuthBytes $current -ProfilesDirectory $ProfilesDirectory
+        if ($comparison.Matches -or $comparison.WorkspaceContextStatus -cne 'Confirmed' -or $comparison.CurrentWorkspaceClass -cne 'Personal') { throw 'IDENTITY_RECOVERY_NOT_APPLICABLE' }
+        # This exception is restricted to the confirmed Plus -> saved Team case.
+        $auth = (New-Object Text.UTF8Encoding($false,$true)).GetString($current) | ConvertFrom-Json
+        $payload = ConvertFrom-CodexBase64Url -Value (([string]$auth.tokens.id_token).Split('.')[1])
+        $claims = (New-Object Text.UTF8Encoding($false,$true)).GetString($payload) | ConvertFrom-Json
+        if ([string]$claims.'https://api.openai.com/auth'.chatgpt_plan_type -cne 'plus') { throw 'IDENTITY_RECOVERY_NOT_APPLICABLE' }
+        $stamps = @([Convert]::ToBase64String($sha.ComputeHash($current)))
+        foreach ($path in @($paths.EncryptedPath,$paths.IdentityMarkerPath,$paths.MetadataPath,(Join-Path $StateDirectory 'active-profile.json'))) {
+            $bytes = Read-SensitiveFileBytes -Path $path
+            try { $stamps += [Convert]::ToBase64String($sha.ComputeHash($bytes)) }
+            finally { [Array]::Clear($bytes,0,$bytes.Length) }
+        }
+        return [pscustomobject]@{ Profile = $Name; Stamp = ($stamps -join '.'); CurrentWorkspace = 'Plus'; SavedWorkspace = 'Team' }
+    } finally {
+        foreach ($b in @($current,$saved,$payload)) { if ($null -ne $b) { [Array]::Clear($b,0,$b.Length) } }
+        $auth = $null; $claims = $null; $sha.Dispose()
+    }
+}
+
+function Get-CodexIdentityRecoveryConsent {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Name)
+    return Invoke-WithCodexWriteLock -Operation {
+        param($n)
+        Assert-CodexNotRunning
+        Get-QiehaoRecoveryConsent -Name $n -CodexHome (Get-CodexHome) -ProfilesDirectory $script:ProfilesDirectory -StateDirectory $script:StateDirectory
+    } -ArgumentList @($Name)
+}
+
 function Invoke-QiehaoAccountVerification {
     param([string]$Name,[string]$CodexHome,[string]$ProfilesDirectory,
         [hashtable]$OwnedProcessRegistry,[object[]]$ProcessData,[switch]$UseProvidedProcessData,
         [string]$TestExecutablePath,[string]$TestProcessArguments,
-        [int]$PrimaryBudgetMilliseconds = 4800)
+        [int]$PrimaryBudgetMilliseconds = 8000,[switch]$PreserveSavedProfile)
     $before = $null; $after = $null; $context = $null
     $state = 'TransientFailure'; $transport = $null; $failure = ''
     Write-QiehaoDiagnosticEvent -Event 'ACCOUNT_VERIFY_START' -Result 'STARTED' -Data @{ Profile = $Name }
@@ -109,7 +154,7 @@ function Invoke-QiehaoAccountVerification {
                 $comparison.WorkspaceContextStatus -cne 'Confirmed') { $state = 'Unsupported' }
             else {
                 Assert-CodexNotRunning -ProcessData $ProcessData -UseProvidedProcessData:$UseProvidedProcessData
-                if (-not (Test-ByteArraysEqual $before $after)) {
+                if (-not $PreserveSavedProfile -and -not (Test-ByteArraysEqual $before $after)) {
                     Write-QiehaoDiagnosticEvent -Event 'AUTH_REFRESH_DETECTED' -Result 'DETECTED' -Data @{ Profile = $Name }
                     Save-QiehaoRefreshedProfileBytes -Name $Name -AuthBytes $after -ProfilesDirectory $ProfilesDirectory
                 }
@@ -161,15 +206,27 @@ function Restore-QiehaoSwitchAfterIdentityMismatch {
 function Invoke-QiehaoVerifiedSwitch {
     param([string]$Name,[string]$CodexHome,[string]$ProfilesDirectory,[string]$StateDirectory,
         [hashtable]$OwnedProcessRegistry,[object[]]$ProcessData,[switch]$UseProvidedProcessData,
-        [string]$TestExecutablePath,[string]$TestProcessArguments,[int]$PrimaryBudgetMilliseconds = 4800)
+        [string]$TestExecutablePath,[string]$TestProcessArguments,[int]$PrimaryBudgetMilliseconds = 8000,
+        [object]$IdentityRecoveryConsent)
     $local = Invoke-CodexAccountSwitch -Name $Name -CodexHome $CodexHome `
         -ProfilesDirectory $ProfilesDirectory -StateDirectory $StateDirectory `
-        -ProcessData $ProcessData -UseProvidedProcessData:$UseProvidedProcessData
+        -ProcessData $ProcessData -UseProvidedProcessData:$UseProvidedProcessData -IdentityRecoveryConsent $IdentityRecoveryConsent
+    try {
     $verification = Invoke-QiehaoAccountVerification -Name $Name -CodexHome $CodexHome `
         -ProfilesDirectory $ProfilesDirectory -OwnedProcessRegistry $OwnedProcessRegistry `
         -ProcessData $ProcessData -UseProvidedProcessData:$UseProvidedProcessData `
         -TestExecutablePath $TestExecutablePath -TestProcessArguments $TestProcessArguments `
-        -PrimaryBudgetMilliseconds $PrimaryBudgetMilliseconds
+        -PrimaryBudgetMilliseconds $PrimaryBudgetMilliseconds -PreserveSavedProfile:($null -ne $IdentityRecoveryConsent)
+    } catch {
+        if ($null -eq $IdentityRecoveryConsent) { throw }
+        Write-QiehaoDiagnosticEvent -Event 'SWITCH_UNVERIFIED' -Result 'SWITCH_RECOVERY_LOCAL_COMMITTED_MANUAL_CHECK_REQUIRED' -Data @{ LocalCommitted = $true }
+        return [pscustomobject]@{ Result = 'SWITCH_RECOVERY_LOCAL_COMMITTED_MANUAL_CHECK_REQUIRED'; From = $local.From; To = $Name; LocalCommitted = $true; VerificationState = 'Unverified' }
+    }
+    if ($null -ne $IdentityRecoveryConsent -and $verification.VerificationState -cne 'Verified') {
+        Write-QiehaoDiagnosticEvent -Event 'SWITCH_UNVERIFIED' -Result 'SWITCH_RECOVERY_LOCAL_COMMITTED_UNVERIFIED' `
+            -Data @{ LocalCommitted = $true; VerificationState = $verification.VerificationState }
+        return [pscustomobject]@{ Result = 'SWITCH_RECOVERY_LOCAL_COMMITTED_UNVERIFIED'; From = $local.From; To = $Name; LocalCommitted = $true; VerificationState = $verification.VerificationState }
+    }
     $code = switch ($verification.VerificationState) {
         'Verified' { 'SWITCH_VERIFIED_SUCCESS' }
         'ReauthRequired' { 'SWITCH_REAUTH_REQUIRED' }
@@ -209,12 +266,16 @@ function Invoke-QiehaoManagedAdd {
         [object[]]$ProcessData,[switch]$UseProvidedProcessData,
         [string]$TestExecutablePath,[string]$TestProcessArguments,[int]$LoginBudgetMilliseconds = 180000)
     $original = $null; $candidate = $null; $context = $null; $active = ''; $loginStarted = $false; $saved = $false
+    $originalContext = $null; $activeBytes = $null; $activeContext = $null
+    $refreshPaths = $null; $oldEncrypted = $null; $oldMetadata = $null; $refreshed = $false
     $operation = @{ Id = [Guid]::NewGuid().ToString('N'); Finished = $false; FinalState = 'FAILED'; Code = 'ACCOUNT_LOGIN_FAILED' }
     if ($null -ne $OwnedProcessRegistry) {
         $OwnedProcessRegistry.OperationId = $operation.Id
         $OwnedProcessRegistry.OperationFinished = $false
         $OwnedProcessRegistry.LoginTimings = @{}
         $OwnedProcessRegistry.NewProfileCommitted = $false
+        $OwnedProcessRegistry.AddIdentityWarning = ''
+        $OwnedProcessRegistry.LoginStateMayHaveChanged = $false
     }
     Write-QiehaoDiagnosticEvent -Event 'ACCOUNT_LOGIN_START' -Result 'STARTED' -Data @{ OperationId = $operation.Id }
     try {
@@ -224,10 +285,33 @@ function Invoke-QiehaoManagedAdd {
         try { $active = [string](Read-ActiveProfileState -StateDirectory $StateDirectory).ActiveProfile } catch {
             if ($_.Exception.Message -cne 'ACTIVE_PROFILE_NOT_INITIALIZED') { throw }
         }
-        if ([IO.File]::Exists($authPath)) { $original = Read-SensitiveFileBytes -Path $authPath }
+        if ([IO.File]::Exists($authPath) -or -not [string]::IsNullOrWhiteSpace($active)) {
+            $original = Read-SensitiveFileBytes -Path $authPath
+            $null = Test-CodexAuthBytes -Bytes $original
+            $originalContext = Get-CodexAuthIdentityContext -Bytes $original
+            if ($originalContext.WorkspaceClaimStatus -cne 'Confirmed') { throw 'ACCOUNT_LOGIN_IDENTITY_MISMATCH' }
+        }
         if (-not [string]::IsNullOrWhiteSpace($active)) {
-            $null = Assert-CodexAuthMatchesProfileIdentity -Name $active -AuthBytes $original -ProfilesDirectory $ProfilesDirectory
-            Save-QiehaoRefreshedProfileBytes -Name $active -AuthBytes $original -ProfilesDirectory $ProfilesDirectory
+            # Validate the saved profile independently: corrupt markers/credentials
+            # must never be mistaken for a valid, different Desktop login.
+            $activeBytes = Read-CodexAccountSlotBytes -Name $active -ProfilesDirectory $ProfilesDirectory
+            $null = Assert-CodexAuthMatchesProfileIdentity -Name $active -AuthBytes $activeBytes -ProfilesDirectory $ProfilesDirectory
+            $activeContext = Get-CodexAuthIdentityContext -Bytes $activeBytes
+            $comparison = Compare-CodexAuthToProfileIdentity -Name $active -AuthBytes $original -ProfilesDirectory $ProfilesDirectory
+            if ($comparison.Matches) {
+                if (-not (Test-ByteArraysEqual $original $activeBytes)) {
+                    $refreshPaths = Get-StrictProfileArtifactPaths -Name $active -ProfilesDirectory $ProfilesDirectory
+                    $oldEncrypted = Read-SensitiveFileBytes -Path $refreshPaths.EncryptedPath
+                    $oldMetadata = Read-SensitiveFileBytes -Path $refreshPaths.MetadataPath
+                    Save-QiehaoRefreshedProfileBytes -Name $active -AuthBytes $original -ProfilesDirectory $ProfilesDirectory
+                    $refreshed = $true
+                }
+            } elseif (-not $originalContext.SupplementalContextKnown -or
+                (Test-IdentityByteArraysEqual $originalContext.AccountIdBytes $activeContext.AccountIdBytes)) {
+                throw 'ACTIVE_PROFILE_IDENTITY_MISMATCH'
+            }
+            # A confirmed different account proceeds to official OAuth without
+            # updating the old profile. ADD retains its original duplicate gate.
         }
         $client = Import-Module (Join-Path $PSScriptRoot '..\tools\AccountClient.psm1') -PassThru
         $loginStarted = $true
@@ -242,6 +326,9 @@ function Invoke-QiehaoManagedAdd {
             Invoke-QiehaoManagedLoginTransport -CodexHome $c -OwnedProcessRegistry $r -BrowserProvider $b `
                 -TestExecutablePath $exe -TestProcessArguments $argsText -LoginBudgetMilliseconds $budget -EventProvider $logger
         } $CodexHome $OwnedProcessRegistry $BrowserProvider $TestExecutablePath $TestProcessArguments $LoginBudgetMilliseconds $stageLogger
+        if ($null -ne $OwnedProcessRegistry -and $OwnedProcessRegistry.ContainsKey('LoginDiagnostics')) {
+            Write-QiehaoDiagnosticEvent -Event 'ACCOUNT_LOGIN_DIAGNOSTIC' -Result ([string]$login.FailureCode) -Data $OwnedProcessRegistry.LoginDiagnostics
+        }
         if (-not $login.CleanupSucceeded) { throw 'DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED' }
         if ($login.VerificationState -ceq 'Unsupported') {
             $operation.Code = 'ACCOUNT_LOGIN_MANUAL_FALLBACK_REQUIRED'
@@ -253,6 +340,10 @@ function Invoke-QiehaoManagedAdd {
                 'Timeout' { 'ACCOUNT_LOGIN_TIMEOUT' }
                 default { 'ACCOUNT_LOGIN_FAILED' }
             }
+            if ($login.FailureCode -in @('ACCOUNT_LOGIN_REJECTED','ACCOUNT_LOGIN_COMPLETION_INVALID',
+                'ACCOUNT_LOGIN_PROCESS_EXITED','ACCOUNT_LOGIN_CONNECTION_CLOSED','ACCOUNT_LOGIN_INITIALIZE_TIMEOUT',
+                'ACCOUNT_LOGIN_START_TIMEOUT','ACCOUNT_LOGIN_READ_TIMEOUT','ACCOUNT_LOGIN_COMPLETION_ID_MISMATCH',
+                'ACCOUNT_LOGIN_VERIFY_FAILED','ACCOUNT_TRANSIENT_FAILURE')) { $code = [string]$login.FailureCode }
             $operation.Code = $code
             $operation.FinalState = switch ($login.VerificationState) { 'Cancelled' {'CANCELLED'} 'Timeout' {'TIMEOUT'} default {'FAILED'} }
             return [pscustomobject]@{ Result = $code; VerificationState = $login.VerificationState }
@@ -326,12 +417,42 @@ function Invoke-QiehaoManagedAdd {
         }
         throw
     } finally {
-        # A failed/cancelled ceremony must not strand an existing active account.
+        # Undo only our optional profile refresh. OAuth owns current auth.json;
+        # failure/cancellation must never restore an old login or active state.
         try {
-            if ($loginStarted -and -not $saved -and -not [string]::IsNullOrWhiteSpace($active)) {
-                Restore-QiehaoSwitchAfterIdentityMismatch -Name $active -CodexHome $CodexHome `
-                    -ProfilesDirectory $ProfilesDirectory -StateDirectory $StateDirectory `
-                    -ProcessData $ProcessData -UseProvidedProcessData:$UseProvidedProcessData
+            if ($refreshed -and -not $saved) {
+                Write-AtomicByteFile -Path $refreshPaths.EncryptedPath -Bytes $oldEncrypted -Force
+                Write-AtomicByteFile -Path $refreshPaths.MetadataPath -Bytes $oldMetadata -Force
+                if (-not (Test-ByteArraysEqual $oldEncrypted ([IO.File]::ReadAllBytes($refreshPaths.EncryptedPath))) -or
+                    -not (Test-ByteArraysEqual $oldMetadata ([IO.File]::ReadAllBytes($refreshPaths.MetadataPath)))) { throw 'ROLLBACK_FAILED' }
+            }
+            if ($loginStarted -and -not $saved) {
+                $currentBytes = $null; $currentContext = $null; $warning = ''
+                try {
+                    $null = Assert-CodexFileCredentialSource -CodexHome $CodexHome
+                    $currentBytes = Read-SensitiveFileBytes -Path $authPath
+                    if ($null -eq $original -or -not (Test-ByteArraysEqual $original $currentBytes)) {
+                        if ($null -ne $OwnedProcessRegistry) { $OwnedProcessRegistry.LoginStateMayHaveChanged = $true }
+                        $warning = 'ACCOUNT_LOGIN_STATE_CHANGED_NOT_SAVED'
+                    }
+                    $null = Test-CodexAuthBytes -Bytes $currentBytes
+                    $currentContext = Get-CodexAuthIdentityContext -Bytes $currentBytes
+                    if ($currentContext.WorkspaceClaimStatus -cne 'Confirmed') { $warning = 'ACCOUNT_LOGIN_IDENTITY_MISMATCH' }
+                    elseif (-not [string]::IsNullOrWhiteSpace($active)) {
+                        $comparison = Compare-CodexAuthToProfileIdentity -Name $active -AuthBytes $currentBytes -ProfilesDirectory $ProfilesDirectory
+                        if (-not $comparison.Matches -and -not $warning) { $warning = 'ACTIVE_PROFILE_OUT_OF_SYNC' }
+                    }
+                } catch {
+                    $warning = 'ACCOUNT_LOGIN_IDENTITY_MISMATCH'
+                } finally {
+                    if ($null -ne $currentBytes) { [Array]::Clear($currentBytes,0,$currentBytes.Length) }
+                    Clear-CodexAuthIdentityContext $currentContext
+                }
+                if ($null -ne $OwnedProcessRegistry -and $OwnedProcessRegistry.ContainsKey('LoginStateMayHaveChanged') -and $OwnedProcessRegistry.LoginStateMayHaveChanged) { $warning = 'ACCOUNT_LOGIN_STATE_CHANGED_NOT_SAVED' }
+                if ($warning) {
+                    if ($null -ne $OwnedProcessRegistry) { $OwnedProcessRegistry.AddIdentityWarning = $warning }
+                    Write-QiehaoDiagnosticEvent -Event 'CURRENT_IDENTITY_RESULT' -Result $warning -Data @{ ActiveProfile = $active }
+                }
             }
         } catch {
             $operation.FinalState = 'MANUAL_RECOVERY_REQUIRED'
@@ -339,8 +460,10 @@ function Invoke-QiehaoManagedAdd {
             throw (New-SafeException -Code $operation.Code)
         } finally {
             if ($operation.Code -ceq 'DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED') { $operation.FinalState = 'MANUAL_RECOVERY_REQUIRED' }
-            foreach ($b in @($original,$candidate)) { if ($null -ne $b) { [Array]::Clear($b,0,$b.Length) } }
+            foreach ($b in @($original,$candidate,$activeBytes,$oldEncrypted,$oldMetadata)) { if ($null -ne $b) { [Array]::Clear($b,0,$b.Length) } }
             Clear-CodexAuthIdentityContext $context
+            Clear-CodexAuthIdentityContext $originalContext
+            Clear-CodexAuthIdentityContext $activeContext
             Complete-QiehaoAccountLoginOperation -Operation $operation -Registry $OwnedProcessRegistry
         }
     }
@@ -415,6 +538,147 @@ function Add-CodexVerifiedLocalProfile {
         Invoke-QiehaoVerifiedLocalAdd -Name $n -OwnedProcessRegistry $r -CodexHome (Get-CodexHome) `
             -ProfilesDirectory $script:ProfilesDirectory -StateDirectory $script:StateDirectory
     } -ArgumentList @($Name,$OwnedProcessRegistry)
+}
+
+# OAuth completion may be rejected after Desktop changed auth.json. Inspect the
+# current identity without refreshing tokens or changing any saved state.
+function Invoke-QiehaoInspectOAuthFallback {
+    param([string]$CodexHome,[string]$ProfilesDirectory,
+        [hashtable]$OwnedProcessRegistry,[object[]]$ProcessData,
+        [switch]$UseProvidedProcessData,[string]$TestExecutablePath,
+        [string]$TestProcessArguments)
+    $before = $null; $after = $null; $identity = $null; $context = $null
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        Assert-CodexNotRunning -ProcessData $ProcessData -UseProvidedProcessData:$UseProvidedProcessData
+        $null = Assert-CodexFileCredentialSource -CodexHome $CodexHome
+        $authPath = Join-Path $CodexHome 'auth.json'
+        $before = Read-SensitiveFileBytes -Path $authPath
+        $null = Test-CodexAuthBytes -Bytes $before
+        $context = Get-CodexAuthIdentityContext -Bytes $before
+        if (-not $context.SupplementalContextKnown -or
+            (Get-QiehaoTokenNeedsRefresh $before)) {
+            return [pscustomobject]@{ Result = 'ACCOUNT_FALLBACK_IDENTITY_UNVERIFIED' }
+        }
+        $identity = Get-CodexAuthIdentityBytes -Bytes $before
+        if ((Test-ProfileIdentityExists -IdentityBytes $identity -AuthBytes $before `
+                -ProfilesDirectory $ProfilesDirectory).Exists) {
+            return [pscustomobject]@{ Result = 'ACCOUNT_FALLBACK_IDENTITY_ALREADY_SAVED' }
+        }
+        $client = Import-Module (Join-Path $PSScriptRoot '..\tools\AccountClient.psm1') -PassThru
+        $verification = & $client {
+            param($c,$r,$exe,$argsText)
+            Invoke-QiehaoAccountTransport -CodexHome $c -OwnedProcessRegistry $r `
+                -NeedsRefresh $false -NoRefresh -TestExecutablePath $exe `
+                -TestProcessArguments $argsText
+        } $CodexHome $OwnedProcessRegistry $TestExecutablePath $TestProcessArguments
+        if (-not $verification.CleanupSucceeded) { throw 'DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED' }
+        $after = Read-SensitiveFileBytes -Path $authPath
+        if (-not (Test-ByteArraysEqual $before $after)) {
+            throw 'DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED'
+        }
+        $serverWorkspace = Get-CodexWorkspaceClass -PlanType ([string]$verification.PlanType)
+        if ($verification.VerificationState -cne 'Verified' -or
+            $serverWorkspace -ceq 'Unknown' -or
+            $serverWorkspace -cne $context.WorkspaceClass) {
+            return [pscustomobject]@{ Result = 'ACCOUNT_FALLBACK_IDENTITY_UNVERIFIED' }
+        }
+        return [pscustomobject]@{
+            Result = 'ACCOUNT_FALLBACK_IDENTITY_VERIFIED'
+            Consent = [pscustomobject]@{
+                AuthHash = [Convert]::ToBase64String($sha.ComputeHash($before))
+                CheckedUtc = [DateTime]::UtcNow.ToString('o')
+            }
+        }
+    } catch {
+        if ($_.Exception.Message -ceq 'DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED') { throw }
+        return [pscustomobject]@{ Result = 'ACCOUNT_FALLBACK_IDENTITY_UNVERIFIED' }
+    } finally {
+        foreach ($b in @($before,$after,$identity)) {
+            if ($null -ne $b) { [Array]::Clear($b,0,$b.Length) }
+        }
+        Clear-CodexAuthIdentityContext $context
+        $sha.Dispose()
+    }
+}
+
+function Get-QiehaoOAuthFallbackIdentity {
+    [CmdletBinding()]
+    param([hashtable]$OwnedProcessRegistry)
+    return Invoke-WithCodexWriteLock -Operation {
+        param($r)
+        Invoke-QiehaoInspectOAuthFallback -CodexHome (Get-CodexHome) `
+            -ProfilesDirectory $script:ProfilesDirectory -OwnedProcessRegistry $r
+    } -ArgumentList @($OwnedProcessRegistry)
+}
+
+function Invoke-QiehaoSaveCheckedFallback {
+    param([string]$Name,[object]$Consent,[string]$CodexHome,
+        [string]$ProfilesDirectory,[string]$StateDirectory,
+        [object[]]$ProcessData,[switch]$UseProvidedProcessData)
+    if ($null -eq $Consent -or
+        [string]$Consent.AuthHash -notmatch '^[A-Za-z0-9+/]{43}=$') {
+        throw 'ACCOUNT_FALLBACK_CHECK_EXPIRED'
+    }
+    $checkedUtc = [DateTime]::MinValue
+    if (-not [DateTime]::TryParse([string]$Consent.CheckedUtc,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind,[ref]$checkedUtc) -or
+        $checkedUtc.Kind -cne [DateTimeKind]::Utc -or
+        [DateTime]::UtcNow -lt $checkedUtc -or
+        [DateTime]::UtcNow -gt $checkedUtc.AddMinutes(2)) {
+        throw 'ACCOUNT_FALLBACK_CHECK_EXPIRED'
+    }
+    $authStream = $null; $bytes = $null; $identity = $null; $context = $null
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        Assert-CodexNotRunning -ProcessData $ProcessData -UseProvidedProcessData:$UseProvidedProcessData
+        $null = Assert-CodexFileCredentialSource -CodexHome $CodexHome
+        $safeName = ConvertTo-SafeProfileName -Name $Name
+        $paths = Get-StrictProfileArtifactPaths -Name $safeName -ProfilesDirectory $ProfilesDirectory
+        if (Test-AnyProfileArtifactExists -Paths $paths) { throw 'PROFILE_NAME_ALREADY_EXISTS' }
+        $authStream = [IO.FileStream]::new((Join-Path $CodexHome 'auth.json'),
+            [IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        $bytes = Read-SensitiveFileBytes -Path (Join-Path $CodexHome 'auth.json')
+        if ([Convert]::ToBase64String($sha.ComputeHash($bytes)) -cne [string]$Consent.AuthHash) {
+            throw 'ACCOUNT_FALLBACK_STATE_CHANGED'
+        }
+        $null = Test-CodexAuthBytes -Bytes $bytes
+        $context = Get-CodexAuthIdentityContext -Bytes $bytes
+        if (-not $context.SupplementalContextKnown -or
+            (Get-QiehaoTokenNeedsRefresh $bytes)) { throw 'ACCOUNT_FALLBACK_IDENTITY_UNVERIFIED' }
+        $identity = Get-CodexAuthIdentityBytes -Bytes $bytes
+        if ((Test-ProfileIdentityExists -IdentityBytes $identity -AuthBytes $bytes `
+                -ProfilesDirectory $ProfilesDirectory).Exists) {
+            throw 'PROFILE_IDENTITY_ALREADY_EXISTS'
+        }
+        $added = Invoke-AddCodexProfile -Name $safeName -CodexHome $CodexHome `
+            -ProfilesDirectory $ProfilesDirectory -StateDirectory $StateDirectory `
+            -ProcessData $ProcessData -UseProvidedProcessData:$UseProvidedProcessData
+        return [pscustomobject]@{
+            Result = 'ADD_VERIFIED_SUCCESS'; Profile = $added.Profile
+            VerificationState = 'Verified'
+        }
+    } finally {
+        if ($null -ne $authStream) { $authStream.Dispose() }
+        foreach ($b in @($bytes,$identity)) {
+            if ($null -ne $b) { [Array]::Clear($b,0,$b.Length) }
+        }
+        Clear-CodexAuthIdentityContext $context
+        $sha.Dispose()
+    }
+}
+
+function Add-CodexCheckedFallbackProfile {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][object]$Consent)
+    return Invoke-WithCodexWriteLock -Operation {
+        param($n,$approval)
+        Invoke-QiehaoSaveCheckedFallback -Name $n -Consent $approval `
+            -CodexHome (Get-CodexHome) -ProfilesDirectory $script:ProfilesDirectory `
+            -StateDirectory $script:StateDirectory
+    } -ArgumentList @($Name,$Consent)
 }
 
 function Invoke-QiehaoLayeredVerify {

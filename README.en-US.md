@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | [English](README.en-US.md)
 
-Qiehao is a local account switcher for Codex Desktop on Windows. It provides a bilingual WPF interface and treats two rules as hard safety boundaries: every switch is initiated by the user, and authentication state is not changed until Codex has completely exited.
+Qiehao is a local multi-account manager for Codex Desktop on Windows. Your local project files remain available as you switch accounts, and the convenience is clearer when managing three or more accounts. Every switch is initiated by the user, and authentication state changes only after Codex has completely exited.
 
 > [!IMPORTANT]
 > Qiehao is an unofficial community tool. It is not an official OpenAI product. It manages only local Codex Desktop authentication state and does not modify ChatGPT Web, browser, or PWA sessions.

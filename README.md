@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | [English](README.en-US.md)
 
-Qiehao 是一个面向 Windows Codex Desktop 的本地账号切换工具，提供中文/英文 WPF 图形界面，并以“用户手动触发、Codex 完全退出后再切换”为核心安全边界。
+Qiehao 是面向 Windows Codex Desktop 的本地多账号管理工具。切换账号后，原有本地项目文件仍可继续使用；管理三个及以上账号时，减少反复登录和切换操作的优势更明显。账号切换由用户手动触发，并须等待 Codex 完全退出。
 
 > [!IMPORTANT]
 > Qiehao 是非官方社区工具，不是 OpenAI 官方产品。它只管理 Codex Desktop 的本地认证状态，不修改 ChatGPT Web、浏览器或 PWA（渐进式网页应用）的登录状态。

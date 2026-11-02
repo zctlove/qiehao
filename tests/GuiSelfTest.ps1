@@ -1,7 +1,8 @@
 ﻿[CmdletBinding()]
 param(
     [switch]$XamlOnly,
-    [switch]$ModalLifecycleOnly
+    [switch]$ModalLifecycleOnly,
+    [switch]$SafeMessageOnly
 )
 
 Set-StrictMode -Version 2.0
@@ -125,6 +126,80 @@ function Invoke-TestDispatcherFor {
         $stopTimer.Remove_Tick($stopHandler)
         $stopTimer.Stop()
     }
+}
+
+if ($SafeMessageOnly) {
+    Add-Type -AssemblyName System.Windows.Forms
+    Import-Module $localizationModulePath -Force
+    $window = Read-TestWindow
+    $tokens=$null; $errors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile($guiScriptPath,[ref]$tokens,[ref]$errors)
+    if ($errors.Count) { throw 'GUI_PARSE_FAILED' }
+    foreach ($name in @('Show-QiehaoSafeMessage','Set-QiehaoDialogContent','Copy-QiehaoDialogVisualResources')) {
+        $fn=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name}.GetNewClosure(),$true)
+        . ([scriptblock]::Create($fn.Extent.Text))
+    }
+    function Get-QiehaoGuiText {param($Key,$Fallback) Get-QiehaoLocalizedString -Key $Key -Language $script:testLanguage}
+    $window.ShowActivated=$false; $window.ShowInTaskbar=$false; $window.Opacity=0
+    $window.Show()
+    $checks=0
+    try {
+        foreach ($screen in [Windows.Forms.Screen]::AllScreens) {
+            $scale=[Windows.PresentationSource]::FromVisual($window).CompositionTarget.TransformFromDevice
+            $area=$screen.WorkingArea
+            $window.Left=$area.Left*$scale.M11+10
+            $window.Top=$area.Top*$scale.M22+10
+            foreach ($fontSize in @(11,16)) {
+                $window.FontSize=$fontSize
+                foreach ($dismiss in @('Click','Enter','Esc')) {
+                    $script:testLanguage=if ($dismiss -ceq 'Enter') {'en-US'} else {'zh-CN'}
+                    $severity=if ($dismiss -ceq 'Esc') {'Critical'} elseif ($dismiss -ceq 'Enter') {'Warning'} else {'Information'}
+                    $message=if ($script:testLanguage -ceq 'en-US') {'A test message. No account operation was called.'} else {'模拟提示：未执行任何账号操作。'}
+                    $observed=@{Error='';Closed=$false;Inspected=$false}
+                    $watch=[Diagnostics.Stopwatch]::StartNew()
+                    $timer=New-Object Windows.Threading.DispatcherTimer
+                    $timer.Interval=[TimeSpan]::FromMilliseconds(60)
+                    $tick=[EventHandler]({
+                        $dialog=@($window.OwnedWindows | Where-Object IsVisible | Select-Object -First 1)
+                        if ($dialog.Count -eq 0) { return }
+                        $dialog=$dialog[0]; $dialog.Opacity=0
+                        try {
+                            if ($watch.ElapsedMilliseconds -gt 2000) { throw ('MESSAGE_DISMISS_TIMEOUT '+$dismiss) }
+                            if ($observed.Inspected) { return }
+                            $observed.Inspected=$true
+                            $dx=[Math]::Abs(($dialog.Left+$dialog.ActualWidth/2)-($window.Left+$window.ActualWidth/2))
+                            $dy=[Math]::Abs(($dialog.Top+$dialog.ActualHeight/2)-($window.Top+$window.ActualHeight/2))
+                            if ($dx -gt 4 -or $dy -gt 4 -or $dialog.ActualWidth -gt $window.ActualWidth -or $dialog.ActualHeight -gt $window.ActualHeight) { throw ('MESSAGE_NOT_CENTRED '+$dx+','+$dy) }
+                            $root=$dialog.Content.Children[0].Child
+                            $button=$root.Children[1]
+                            if ($dialog.Owner -ne $window -or $dialog.WindowStartupLocation -ne 'CenterOwner' -or
+                                -not $button.IsDefault -or -not $button.IsCancel -or $root.Children[0].Content.Text -cne $message -or
+                                [string]$button.Content -cne (Get-QiehaoLocalizedString -Key Button.Confirm -Language $script:testLanguage)) { throw 'MESSAGE_OWNER_TEXT_OR_KEYS_CHANGED' }
+                            $observed.Closed=$true
+                            if ($dismiss -ceq 'Click') { $button.RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Button]::ClickEvent))) }
+                            else {
+                                $key=if ($dismiss -ceq 'Enter') { [Windows.Input.Key]::Enter } else { [Windows.Input.Key]::Escape }
+                                $keyEvent=New-Object Windows.Input.KeyEventArgs([Windows.Input.Keyboard]::PrimaryDevice,[Windows.PresentationSource]::FromVisual($dialog),[Environment]::TickCount,$key)
+                                $keyEvent.RoutedEvent=[Windows.Input.Keyboard]::KeyDownEvent
+                                $null=[Windows.Input.InputManager]::Current.ProcessInput($keyEvent)
+                            }
+                        } catch { $observed.Error=$_.Exception.Message; $dialog.Close() }
+                    }.GetNewClosure())
+                    $timer.Add_Tick($tick)
+                    try { $timer.Start(); Show-QiehaoSafeMessage -Message $message -Severity $severity }
+                    finally { $timer.Stop(); $timer.Remove_Tick($tick) }
+                    if ($observed.Error -or -not $observed.Closed) { throw ('SAFE_MESSAGE_TEST_FAILED '+$observed.Error) }
+                    $checks++
+                }
+            }
+        }
+        Write-Output ('SafeMessageCases='+$checks)
+        Write-Output ('ActualMonitorsTested='+[Windows.Forms.Screen]::AllScreens.Count)
+        Write-Output ('ActualDpiScale='+[Windows.PresentationSource]::FromVisual($window).CompositionTarget.TransformToDevice.M11)
+        Write-Output 'SAFE_MESSAGE_CENTRE_OWNER_MODAL_KEYS_PASS'
+        Write-Output 'RealAccountOperations=False'
+    } finally { $window.Close() }
+    return
 }
 
 if ($XamlOnly) {

@@ -16,6 +16,7 @@ $script:guiActiveProfileKnown=$true;$script:guiCurrentActiveProfile='A';$script:
 $script:guiAllProfileRows=@(ConvertTo-QiehaoGuiProfileRows -ProfileData @([pscustomobject]@{Profile='A'},[pscustomobject]@{Profile='B'}) -ActiveProfile A -ActiveProfileKnown)
 $script:guiVerificationStates=@{};$script:guiVerificationStateCodes=@{};$script:guiQuotaModulesAvailable=$false
 $script:guiQuotaJustUpdatedProfile='';$script:guiLanguage='en-US'
+$script:guiQuotaLastQueryFailed=$false
 $profilesGrid=New-Object Windows.Controls.DataGrid
 $profilesGrid.ItemsSource=$script:guiAllProfileRows
 $activeProfileText=New-Object Windows.Controls.TextBlock;$activeProfileText.Text='A'
@@ -74,6 +75,10 @@ try {
     $ok=Invoke-QiehaoReadOnlyRefresh -PassThru
     Assert-Refresh (-not $ok -and [object]::ReferenceEquals($original,$profilesGrid.ItemsSource)) 'LateSnapshotDropped'
     $script:late=$false;$script:listMode='Empty';$script:activeMode='Empty'
+    $script:guiQuotaLastQueryFailed=$true;$script:statusKey='Quota.NoDisplayableWindows'
+    $ok=Invoke-QiehaoReadOnlyRefresh -PassThru
+    Assert-Refresh ($ok -and $script:statusKey -ceq 'Quota.NoDisplayableWindows') 'ListRefreshPreservesQuotaFailureAndDoesNotClaimQuotaUpdate'
+    $script:guiQuotaLastQueryFailed=$false
     $ok=Invoke-QiehaoReadOnlyRefresh -PassThru
     Assert-Refresh ($ok -and @($profilesGrid.ItemsSource).Count -eq 0) 'SuccessfulConfirmedEmptyClearsRows'
     $log=@(Get-Content -LiteralPath (Join-Path $root 'qiehao.log') | ForEach-Object {$_ | ConvertFrom-Json})

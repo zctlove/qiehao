@@ -16,8 +16,10 @@ $script:QuotaUiStrings = [ordered]@{
     CacheUnavailable = '额度缓存不可用；不影响账号管理。'
     NoSnapshot = '尚无额度快照'
     NoWindows = '未返回额度窗口'
+    WindowUnavailable = '不可用'
     JustQueried = '刚查询'
-    CachedPrefix = '缓存'
+    CachedPrefix = '历史缓存'
+    IdentityUnverified = '旧额度缓存归属未验证'
     UsageAvailable = '包含额度：可用'
     UsageUnavailable = '当前包含额度不可用'
     UsageUnknown = '包含额度状态未知'
@@ -38,7 +40,9 @@ $script:QuotaLocalizationKeys = [ordered]@{
     UpdateFailedCached = 'Quota.UpdateFailedCached'; UpdateFailedNoCache = 'Quota.UpdateFailedNoCache'
     CacheUnavailable = 'Quota.CacheUnavailable'; NoSnapshot = 'Quota.NoSnapshot'
     NoWindows = 'Quota.NoWindows'; JustQueried = 'Quota.JustQueried'
+    WindowUnavailable = 'Quota.WindowUnavailable'
     CachedPrefix = 'Quota.CachedPrefix'; UsageAvailable = 'Quota.UsageAvailable'
+    IdentityUnverified = 'Quota.IdentityUnverified'
     UsageUnavailable = 'Quota.UsageUnavailable'; UsageUnknown = 'Quota.UsageUnknown'
     CurrentTooltip = 'Quota.CurrentTooltip'; CurrentNoSnapshotTooltip = 'Quota.CurrentNoSnapshotTooltip'
     InactiveTooltip = 'Quota.InactiveTooltip'; InactiveNoSnapshotTooltip = 'Quota.InactiveNoSnapshotTooltip'
@@ -161,6 +165,45 @@ function ConvertTo-QiehaoNullableInt64Value {
     catch { throw 'QUOTA_CACHE_SCHEMA_INVALID' }
 }
 
+function ConvertTo-QiehaoDisplayablePercent {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value -or $Value -isnot [ValueType] -or
+        $Value -is [bool] -or $Value -is [char]) { return $null }
+    try { $number = [Convert]::ToDouble($Value, [Globalization.CultureInfo]::InvariantCulture) }
+    catch { return $null }
+    if ([double]::IsNaN($number) -or [double]::IsInfinity($number) -or
+        $number -lt 0 -or $number -gt 100) { return $null }
+    return $number
+}
+
+function Write-QiehaoQuotaCacheDiagnostic {
+    param([ValidateSet('QUOTA_CACHE_BINDING_VALID','QUOTA_CACHE_LEGACY_UNVERIFIED',
+        'QUOTA_CACHE_BINDING_UNVERIFIED','QUOTA_CACHE_NO_SNAPSHOT',
+        'QUOTA_CACHE_SAVE_SUCCESS','QUOTA_CACHE_SAVE_REJECTED')][string]$Code)
+    try {
+        if (Get-Command Write-QiehaoDiagnosticEvent -ErrorAction SilentlyContinue) {
+            Write-QiehaoDiagnosticEvent -Event REFRESH_RESULT -Result $Code -Data @{Purpose='Quota';Role='Cache'}
+        }
+    } catch { } # Diagnostics must not change cache or query results.
+}
+
+function Get-QiehaoQuotaCacheBindingState {
+    param([AllowNull()][object]$Entry,[string]$ProfileName,[string]$ProfilesDirectory)
+    if ($null -eq $Entry -or @($Entry.windows | Where-Object {$null -ne $_.remaining_percent}).Count -eq 0) { return 'QUOTA_CACHE_NO_SNAPSHOT' }
+    $binding=$Entry.PSObject.Properties['identity_binding']
+    # Old ciphertext hashes cannot establish a stable identity after re-encryption.
+    # Keep the old snapshot and time, but never invent or silently upgrade a binding.
+    if ($null -eq $binding -or [string]$binding.Value -cnotmatch '^identity-v2:[A-F0-9]{64}$') { return 'QUOTA_CACHE_LEGACY_UNVERIFIED' }
+    try {
+        if (-not (Get-Command Get-QiehaoQuotaSavedIdentityBinding -ErrorAction SilentlyContinue)) {
+            Import-Module (Join-Path $PSScriptRoot '..\tools\QuotaClient.psm1') -ErrorAction Stop
+        }
+        $saved=Get-QiehaoQuotaSavedIdentityBinding -ProfileName $ProfileName -ProfilesDirectory $ProfilesDirectory
+        if ($saved -ceq [string]$binding.Value) { return 'QUOTA_CACHE_BINDING_VALID' }
+    } catch { }
+    return 'QUOTA_CACHE_BINDING_UNVERIFIED'
+}
+
 function ConvertTo-QiehaoQuotaCacheEntry {
     param(
         [Parameter(Mandatory = $true)][object]$Snapshot,
@@ -174,21 +217,8 @@ function ConvertTo-QiehaoQuotaCacheEntry {
     foreach ($window in @($windowsProperty.Value)) {
         if ($null -eq $window) { continue }
         $remainingProperty = $window.PSObject.Properties['RemainingPercent']
-        if ($null -eq $remainingProperty -or $null -eq $remainingProperty.Value) {
-            throw 'QUOTA_SNAPSHOT_INVALID'
-        }
-        try {
-            $remaining = [Convert]::ToDouble(
-                $remainingProperty.Value,
-                [Globalization.CultureInfo]::InvariantCulture
-            )
-        }
-        catch { throw 'QUOTA_SNAPSHOT_INVALID' }
-        if ([double]::IsNaN($remaining) -or
-            [double]::IsInfinity($remaining) -or
-            $remaining -lt 0 -or $remaining -gt 100) {
-            throw 'QUOTA_SNAPSHOT_INVALID'
-        }
+        $remaining = ConvertTo-QiehaoDisplayablePercent -Value $(
+            if ($null -eq $remainingProperty) { $null } else { $remainingProperty.Value })
         $durationProperty = $window.PSObject.Properties['DurationMinutes']
         $duration = if ($null -eq $durationProperty) { $null } else {
             ConvertTo-QiehaoNullableInt64Value -Value $durationProperty.Value
@@ -228,6 +258,11 @@ function ConvertTo-QiehaoValidatedCacheEntry {
         'plan_type', 'ordinary_usage_allowed', 'queried_at', 'windows'
     )
     $keys = @($Entry.PSObject.Properties | ForEach-Object { $_.Name })
+    $binding = $Entry.PSObject.Properties['identity_binding']
+    if ($null -ne $binding) {
+        if ([string]$binding.Value -cnotmatch '^(identity-v2:)?[A-F0-9]{64}$') { throw 'QUOTA_CACHE_SCHEMA_INVALID' }
+        $required += 'identity_binding'
+    }
     if ($keys.Count -ne $required.Count) {
         throw 'QUOTA_CACHE_SCHEMA_INVALID'
     }
@@ -242,8 +277,13 @@ function ConvertTo-QiehaoValidatedCacheEntry {
         throw 'QUOTA_CACHE_SCHEMA_INVALID'
     }
     try {
+        # PowerShell 7 may deserialize ISO timestamps as DateTime. Casting them
+        # to string loses the offset and fractions; preserve their roundtrip form.
+        $timestamp = if ($Entry.queried_at -is [DateTime] -or $Entry.queried_at -is [DateTimeOffset]) {
+            $Entry.queried_at.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+        } else { [string]$Entry.queried_at }
         $queriedAt = [DateTimeOffset]::Parse(
-            [string]$Entry.queried_at,
+            $timestamp,
             [Globalization.CultureInfo]::InvariantCulture,
             [Globalization.DateTimeStyles]::RoundtripKind
         )
@@ -277,18 +317,7 @@ function ConvertTo-QiehaoValidatedCacheEntry {
         }
         $duration = ConvertTo-QiehaoNullableInt64Value `
             -Value $window.duration_minutes
-        try {
-            $remaining = [Convert]::ToDouble(
-                $window.remaining_percent,
-                [Globalization.CultureInfo]::InvariantCulture
-            )
-        }
-        catch { throw 'QUOTA_CACHE_SCHEMA_INVALID' }
-        if ([double]::IsNaN($remaining) -or
-            [double]::IsInfinity($remaining) -or
-            $remaining -lt 0 -or $remaining -gt 100) {
-            throw 'QUOTA_CACHE_SCHEMA_INVALID'
-        }
+        $remaining = ConvertTo-QiehaoDisplayablePercent -Value $window.remaining_percent
         $resetsAt = ConvertTo-QiehaoNullableInt64Value -Value $window.resets_at
         $expectedLabel = Get-QiehaoQuotaDurationLabel -DurationMinutes $duration
         if ([string]$window.label -cne $expectedLabel) {
@@ -301,12 +330,14 @@ function ConvertTo-QiehaoValidatedCacheEntry {
             resets_at = $resetsAt
         })
     }
-    return [pscustomobject][ordered]@{
+    $validated = [pscustomobject][ordered]@{
         plan_type = $plan
         ordinary_usage_allowed = $ordinary
         queried_at = $queriedAt.ToUniversalTime().ToString('o')
         windows = $windows.ToArray()
     }
+    if ($null -ne $binding) { $validated | Add-Member -NotePropertyName identity_binding -NotePropertyValue ([string]$binding.Value) }
+    return $validated
 }
 
 function ConvertTo-QiehaoValidatedQuotaCache {
@@ -469,12 +500,19 @@ function Save-QiehaoQuotaSnapshot {
         [Parameter(Mandatory = $true)][object]$Cache,
         [Parameter(Mandatory = $true)][string]$ProfileName,
         [Parameter(Mandatory = $true)][object]$Snapshot,
+        [AllowNull()][object]$IdentityProof,
         [DateTimeOffset]$QueriedAt = [DateTimeOffset]::Now
     )
     try {
         $next = Copy-QiehaoQuotaCache -Cache $Cache
         $entry = ConvertTo-QiehaoQuotaCacheEntry `
             -Snapshot $Snapshot -QueriedAt $QueriedAt
+        if (@($entry.windows | Where-Object { $null -ne $_.remaining_percent }).Count -eq 0) {
+            throw 'QUOTA_NO_DISPLAYABLE_WINDOWS'
+        }
+        if ($null -eq $IdentityProof -or $IdentityProof.ProfileName -cne $ProfileName -or
+            [string]$IdentityProof.Binding -cnotmatch '^identity-v2:[A-F0-9]{64}$') { throw 'QUOTA_ACCOUNT_IDENTITY_MISMATCH' }
+        $entry | Add-Member -NotePropertyName identity_binding -NotePropertyValue ([string]$IdentityProof.Binding)
         $profiles = Get-QiehaoQuotaProfiles -Cache $next
         $actualKey = Get-QiehaoDictionaryActualKey `
             -Dictionary $profiles -Name $ProfileName
@@ -482,8 +520,14 @@ function Save-QiehaoQuotaSnapshot {
             $profiles.Remove($actualKey)
         }
         $profiles[$ProfileName] = $entry
-        $persisted = Write-QiehaoQuotaCache `
-            -StateDirectory $StateDirectory -Cache $next
+        if (-not (Get-Command Invoke-QiehaoQuotaIdentityBoundOperation -ErrorAction SilentlyContinue)) {
+            Import-Module (Join-Path $PSScriptRoot '..\tools\QuotaClient.psm1') -ErrorAction Stop
+        }
+        $persisted = Invoke-QiehaoQuotaIdentityBoundOperation -ProfileName $ProfileName -IdentityProof $IdentityProof -Operation {
+            param($directory,$nextCache)
+            Write-QiehaoQuotaCache -StateDirectory $directory -Cache $nextCache
+        } -ArgumentList @($StateDirectory,$next)
+        Write-QiehaoQuotaCacheDiagnostic -Code QUOTA_CACHE_SAVE_SUCCESS
         return [pscustomobject]@{
             Succeeded = $true
             Cache = $persisted
@@ -491,10 +535,13 @@ function Save-QiehaoQuotaSnapshot {
         }
     }
     catch {
+        Write-QiehaoQuotaCacheDiagnostic -Code QUOTA_CACHE_SAVE_REJECTED
         return [pscustomobject]@{
             Succeeded = $false
             Cache = $Cache
-            FailureCode = 'QUOTA_CACHE_WRITE_FAILED'
+            FailureCode = $(if ($_.Exception.Message -in @('QUOTA_NO_DISPLAYABLE_WINDOWS','QUOTA_ACCOUNT_IDENTITY_MISMATCH')) {
+                $_.Exception.Message
+            } else { 'QUOTA_CACHE_WRITE_FAILED' })
         }
     }
 }
@@ -630,7 +677,7 @@ function Invoke-QiehaoQuotaCacheRefresh {
         }
         $saved = Save-QiehaoQuotaSnapshot -StateDirectory $StateDirectory `
             -Cache $Cache -ProfileName $ActiveProfile `
-            -Snapshot $providerResult.Snapshot -QueriedAt $QueriedAt
+            -Snapshot $providerResult.Snapshot -QueriedAt $QueriedAt -IdentityProof $providerResult.IdentityProof
         return [pscustomobject]@{
             Succeeded = [bool]$saved.Succeeded
             ProviderCalled = $true
@@ -715,10 +762,14 @@ function Get-QiehaoQuotaSnapshotTooltip {
                 -DurationMinutes $window.duration_minutes
         }
         $null = $lines.Add($label)
-        $null = $lines.Add((Format-QiehaoLocalizedString `
-            -Key 'Quota.Remaining' -Language $Language -Arguments @(
-                (Format-QiehaoQuotaPercent -Value $window.remaining_percent)
-            )))
+        if ($null -eq $window.remaining_percent) {
+            $null = $lines.Add((Get-QiehaoQuotaUiText -Key 'WindowUnavailable' -Language $Language))
+        } else {
+            $null = $lines.Add((Format-QiehaoLocalizedString `
+                -Key 'Quota.Remaining' -Language $Language -Arguments @(
+                    (Format-QiehaoQuotaPercent -Value $window.remaining_percent)
+                )))
+        }
         $reset = Format-QiehaoQuotaReset `
             -ResetsAt $window.resets_at -Now $Now
         if (-not [string]::IsNullOrWhiteSpace($reset)) {
@@ -736,7 +787,7 @@ function Get-QiehaoQuotaSnapshotTooltip {
         [Globalization.CultureInfo]::InvariantCulture,
         [Globalization.DateTimeStyles]::RoundtripKind
     ).ToLocalTime()
-    $null = $lines.Add($queried.ToString('yyyy-MM-dd HH:mm'))
+    $null = $lines.Add($queried.ToString('yyyy-MM-dd HH:mm:ss'))
     if (-not $IsActive) {
         $null = $lines.Add('')
         $null = $lines.Add((Get-QiehaoLocalizedString `
@@ -753,7 +804,8 @@ function Update-QiehaoQuotaProfileRows {
         [AllowNull()][string]$ActiveProfile,
         [AllowNull()][string]$JustUpdatedProfile,
         [DateTimeOffset]$Now = [DateTimeOffset]::Now,
-        [string]$Language = 'zh-CN'
+        [string]$Language = 'zh-CN',
+        [string]$ProfilesDirectory = (Join-Path (Split-Path -Parent $PSScriptRoot) 'profiles')
     )
     foreach ($row in @($Rows)) {
         if ($null -eq $row) { continue }
@@ -763,6 +815,7 @@ function Update-QiehaoQuotaProfileRows {
             $name.Equals($ActiveProfile, [StringComparison]::OrdinalIgnoreCase)
         )
         $entry = Get-QiehaoQuotaCacheSnapshot -Cache $Cache -ProfileName $name
+        if ($null -ne $entry -and @($entry.windows | Where-Object { $null -ne $_.remaining_percent }).Count -eq 0) { $entry = $null }
         $summary = Get-QiehaoQuotaUiText -Key 'NoSnapshot' -Language $Language
         $freshness = ''
         $availability = ''
@@ -774,8 +827,9 @@ function Update-QiehaoQuotaProfileRows {
                 if ($windowIndex -ge 3) { break }
                 $compact = Get-QiehaoQuotaCompactLabel `
                     -Duration $window.duration_minutes -Label ([string]$window.label)
-                $part = $compact + ' ' + (Format-QiehaoQuotaPercent `
-                    -Value $window.remaining_percent) + '%'
+                $part = $compact + ' ' + $(if ($null -eq $window.remaining_percent) {
+                    Get-QiehaoQuotaUiText -Key 'WindowUnavailable' -Language $Language
+                } else { (Format-QiehaoQuotaPercent -Value $window.remaining_percent) + '%' })
                 $null = $summaryParts.Add($part)
                 $windowIndex++
             }
@@ -796,7 +850,7 @@ function Update-QiehaoQuotaProfileRows {
                 $availability = Get-QiehaoQuotaUiText -Key 'UsageUnknown' `
                     -Language $Language
             }
-            if (-not [string]::IsNullOrWhiteSpace($JustUpdatedProfile) -and
+            if ($isActive -and -not [string]::IsNullOrWhiteSpace($JustUpdatedProfile) -and
                 $name.Equals(
                     $JustUpdatedProfile,
                     [StringComparison]::OrdinalIgnoreCase
@@ -810,9 +864,7 @@ function Update-QiehaoQuotaProfileRows {
                     [Globalization.CultureInfo]::InvariantCulture,
                     [Globalization.DateTimeStyles]::RoundtripKind
                 ).ToLocalTime()
-                $stamp = if ($queried.Date -eq $Now.ToLocalTime().Date) {
-                    $queried.ToString('HH:mm')
-                } else { $queried.ToString('yyyy-MM-dd HH:mm') }
+                $stamp = $queried.ToString('yyyy-MM-dd HH:mm:ss')
                 $freshness = (Get-QiehaoQuotaUiText -Key 'CachedPrefix' `
                     -Language $Language) +
                     ' · ' + $stamp
@@ -830,6 +882,22 @@ function Update-QiehaoQuotaProfileRows {
         else {
             Get-QiehaoQuotaUiText -Key 'InactiveNoSnapshotTooltip' `
                 -Language $Language
+        }
+        $bindingState=Get-QiehaoQuotaCacheBindingState -Entry $entry -ProfileName $name -ProfilesDirectory $ProfilesDirectory
+        # Emit only fixed state transitions, without names, identity hashes or values.
+        if (-not (Get-Variable -Name QuotaBindingStates -Scope Script -ErrorAction SilentlyContinue)) { $script:QuotaBindingStates=@{} }
+        $diagnosticKey=$ProfilesDirectory + '|' + $name
+        if ($script:QuotaBindingStates[$diagnosticKey] -cne $bindingState) {
+            Write-QiehaoQuotaCacheDiagnostic -Code $bindingState
+            $script:QuotaBindingStates[$diagnosticKey]=$bindingState
+        }
+        if ($null -ne $entry) {
+            if ($bindingState -cne 'QUOTA_CACHE_BINDING_VALID') {
+                $summary = Get-QiehaoQuotaUiText -Key IdentityUnverified -Language $Language
+                $freshness = (Get-QiehaoQuotaUiText -Key CachedPrefix -Language $Language) + ' · ' + ([DateTimeOffset]::Parse($entry.queried_at)).ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss')
+                $availability = ''
+                $tooltip = $summary + ' · ' + $freshness
+            }
         }
         $row | Add-Member -NotePropertyName QuotaSummary `
             -NotePropertyValue $summary -Force

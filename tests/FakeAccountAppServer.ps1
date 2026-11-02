@@ -39,6 +39,9 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     if ($method -eq 'account/read') {
         if ($Scenario -ceq 'LoginReadTimeout') { continue }
         $refresh = $null -ne $m.params.PSObject.Properties['refreshToken'] -and $m.params.refreshToken
+        if ($Scenario -ceq 'SlowFirstRead' -and -not $refresh) { Start-Sleep -Milliseconds 3000 }
+        if ($Scenario -ceq 'FirstReadOverBudget' -and -not $refresh) { Start-Sleep -Milliseconds 4500 }
+        if ($Scenario -ceq 'RefreshOverBudget' -and $refresh) { Start-Sleep -Milliseconds 9000 }
         if (($Scenario -eq 'Permanent' -and $refresh) -or $Scenario -eq 'PermanentRead') {
             Emit @{id=$m.id;error=@{code=-32000;message='refresh_token_expired';data=@{code='refresh_token_expired'}}}; continue
         }

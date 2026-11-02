@@ -70,7 +70,8 @@ function ConvertTo-QiehaoRemainingPercent {
         [object]$UsedPercent
     )
 
-    if ($null -eq $UsedPercent) {
+    if ($null -eq $UsedPercent -or $UsedPercent -isnot [ValueType] -or
+        $UsedPercent -is [bool] -or $UsedPercent -is [char]) {
         return $null
     }
 
@@ -84,18 +85,12 @@ function ConvertTo-QiehaoRemainingPercent {
         return $null
     }
 
-    if ([double]::IsNaN($used) -or [double]::IsInfinity($used)) {
+    if ([double]::IsNaN($used) -or [double]::IsInfinity($used) -or
+        $used -lt 0 -or $used -gt 100) {
         return $null
     }
 
-    $remaining = 100.0 - $used
-    if ($remaining -lt 0.0) {
-        $remaining = 0.0
-    }
-    elseif ($remaining -gt 100.0) {
-        $remaining = 100.0
-    }
-    return $remaining
+    return (100.0 - $used)
 }
 
 function ConvertTo-QiehaoResetLocal {
@@ -129,9 +124,6 @@ function ConvertTo-QiehaoUsageWindow {
     }
 
     $usedProperty = Get-QiehaoObjectProperty -InputObject $Window -Name 'usedPercent'
-    if ($null -eq $usedProperty) {
-        return $null
-    }
 
     $durationProperty = Get-QiehaoObjectProperty `
         -InputObject $Window -Name 'windowDurationMins'
@@ -151,7 +143,7 @@ function ConvertTo-QiehaoUsageWindow {
         DurationMinutes = $durationMinutes
         Label = Get-QiehaoDurationLabel -DurationMinutes $durationMinutes
         RemainingPercent = ConvertTo-QiehaoRemainingPercent `
-            -UsedPercent $usedProperty.Value
+            -UsedPercent $(if ($null -eq $usedProperty) { $null } else { $usedProperty.Value })
         ResetsAt = ConvertTo-QiehaoNullableInt64 -Value $resetValue
         ResetLocal = ConvertTo-QiehaoResetLocal -ResetsAt $resetValue
     }

@@ -17,8 +17,8 @@ function Request-QiehaoLifecycleCancellation {
 }
 
 function Invoke-QiehaoResponsiveLifecycle {
-    param([ValidateSet('Switch','Verify','Login','ManualAdd','DeleteSafety','Delete')][string]$Action,[string]$Name,
-        [scriptblock]$TestWorker)
+    param([ValidateSet('Switch','Verify','Login','ManualAdd','InspectFallback','ConfirmFallbackAdd','DeleteSafety','Delete')][string]$Action,[string]$Name,
+        [scriptblock]$TestWorker,[object]$IdentityRecoveryConsent,[object]$FallbackConsent)
     if ($null -ne $TestWorker -and -not $SelfTest) { throw 'LIFECYCLE_FAKE_REQUIRES_SELFTEST' }
     if ($script:guiLifecycleWorkerRunning -or $script:guiLifecycleRegistry.IsActive) { throw 'OPERATION_BUSY' }
     $script:guiRefreshEpoch.Generation++
@@ -43,14 +43,16 @@ function Invoke-QiehaoResponsiveLifecycle {
     $textProvider = { param($Key) Get-QiehaoGuiText -Key $Key }
     $nameProvider = { Show-QiehaoNameDialog -Title (Get-QiehaoGuiText -Key 'Dialog.Add.Title') -Prompt (Get-QiehaoGuiText -Key 'Dialog.Name.Local') -LifecycleRegistry $registry }.GetNewClosure()
     $worker = {
-        param($ModulePath,$Action,$Name,$Registry)
+        param($ModulePath,$Action,$Name,$Registry,$Consent,$CheckedConsent)
         try {
             Import-Module $ModulePath -Force -ErrorAction Stop
             switch ($Action) {
-                'Switch' { Switch-CodexAccountProfile -Name $Name -OwnedProcessRegistry $Registry }
+                'Switch' { Switch-CodexAccountProfile -Name $Name -OwnedProcessRegistry $Registry -IdentityRecoveryConsent $Consent }
                 'Verify' { Test-CodexProfile -Name $Name -OwnedProcessRegistry $Registry }
                 'Login' { Add-CodexManagedProfile -Name '__pending__' -OwnedProcessRegistry $Registry }
                 'ManualAdd' { Add-CodexVerifiedLocalProfile -Name $Name -OwnedProcessRegistry $Registry }
+                'InspectFallback' { Get-QiehaoOAuthFallbackIdentity -OwnedProcessRegistry $Registry }
+                'ConfirmFallbackAdd' { Add-CodexCheckedFallbackProfile -Name $Name -Consent $CheckedConsent }
                 'DeleteSafety' { Get-CodexProfileDeleteSafety -Name $Name }
                 'Delete' { Remove-CodexProfile -Name $Name -ConfirmDelete }
             }
@@ -61,7 +63,7 @@ function Invoke-QiehaoResponsiveLifecycle {
         }
     }
     if ($null -ne $TestWorker) { $worker = $TestWorker }
-    $null = $ps.AddScript($worker.ToString()).AddArgument($coreModulePath).AddArgument($Action).AddArgument($Name).AddArgument($registry)
+    $null = $ps.AddScript($worker.ToString()).AddArgument($coreModulePath).AddArgument($Action).AddArgument($Name).AddArgument($registry).AddArgument($IdentityRecoveryConsent).AddArgument($FallbackConsent)
     $handler = [EventHandler]({
         param($sender,$eventArgs)
         if ($state.Async.IsCompleted) { $frame.Continue = $false; return }
@@ -96,7 +98,7 @@ function Invoke-QiehaoResponsiveLifecycle {
         $output = @($ps.EndInvoke($state.Async))
         if ($output.Count -ne 1) { throw 'ACCOUNT_OPERATION_FAILED' }
         $script:guiLifecycleFinalCode = [string]$output[0].Result
-        if ($script:guiLifecycleFinalCode -ceq 'DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED') {
+        if ($script:guiLifecycleFinalCode -in @('DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED','SWITCH_RECOVERY_LOCAL_COMMITTED_MANUAL_CHECK_REQUIRED')) {
             $script:guiManualRecoveryRequired = $true
         }
         return $output[0]

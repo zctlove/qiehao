@@ -23,6 +23,95 @@ if ($null -eq $script:QuotaAuthModule -or
     throw 'QUOTA_AUTH_MODULE_REFERENCE_INVALID'
 }
 
+function Get-QiehaoQuotaSavedIdentityBinding {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$ProfileName,[string]$ProfilesDirectory)
+    # Offline only: validate the saved credential against its own trusted marker.
+    # DPAPI ciphertext and token bytes are intentionally excluded from the binding.
+    return & $script:QuotaAuthModule {
+        param($name,$directory)
+        if (-not $directory) { $directory=$script:ProfilesDirectory }
+        $bytes=$null; $context=$null; $material=$null; $stream=$null; $writer=$null; $sha=$null
+        try {
+            $null=Get-StrictProfileArtifactPaths -Name $name -ProfilesDirectory $directory
+            if (-not (Get-ProfileMetadataState -Name $name -ProfilesDirectory $directory).IsValid) { throw 'QUOTA_CACHE_IDENTITY_UNVERIFIED' }
+            $bytes=Read-CodexAccountSlotBytes -Name $name -ProfilesDirectory $directory
+            $null=Test-CodexAuthBytes -Bytes $bytes
+            $comparison=Compare-CodexAuthToProfileIdentity -Name $name -AuthBytes $bytes -ProfilesDirectory $directory
+            if (-not $comparison.Matches -or $comparison.WorkspaceContextStatus -cne 'Confirmed') { throw 'QUOTA_CACHE_IDENTITY_UNVERIFIED' }
+            $context=Get-CodexAuthIdentityContext -Bytes $bytes
+            $stream=New-Object IO.MemoryStream
+            $writer=New-Object IO.BinaryWriter($stream)
+            $writer.Write('QIEHAO_QUOTA_IDENTITY_V2')
+            $writer.Write([string]$context.WorkspaceClass)
+            foreach($part in @($context.AccountIdBytes,$context.UserIdBytes,$context.WorkspaceAccountIdBytes)) {
+                $writer.Write([int]$part.Length)
+                $writer.Write([byte[]]$part)
+            }
+            $writer.Flush()
+            $material=$stream.ToArray()
+            $sha=[Security.Cryptography.SHA256]::Create()
+            return 'identity-v2:' + ([BitConverter]::ToString($sha.ComputeHash($material))).Replace('-','')
+        } finally {
+            foreach($buffer in @($bytes,$material)) { if($null -ne $buffer){[Array]::Clear($buffer,0,$buffer.Length)} }
+            Clear-CodexAuthIdentityContext -Context $context
+            if($null -ne $stream){$buffer=$stream.GetBuffer(); [Array]::Clear($buffer,0,$buffer.Length)}
+            if($null -ne $writer){$writer.Dispose()}
+            if($null -ne $stream){$stream.Dispose()}
+            if($null -ne $sha){$sha.Dispose()}
+        }
+    } $ProfileName $ProfilesDirectory
+}
+
+function Get-QiehaoQuotaIdentityProof {
+    [CmdletBinding()]
+    param([string]$ProfileName)
+    try {
+        $proof = & $script:QuotaAuthModule {
+            param($name)
+            $bytes = $null; $sha = $null
+            try {
+                $active = [string](Read-ActiveProfileState -StateDirectory $script:StateDirectory).ActiveProfile
+                if ($name -and $name -cne $active) { throw 'QUOTA_ACCOUNT_IDENTITY_MISMATCH' }
+                $codexRoot = Get-CodexHome
+                $null = Assert-CodexFileCredentialSource -CodexHome $codexRoot
+                if (-not (Get-ProfileMetadataState -Name $active -ProfilesDirectory $script:ProfilesDirectory).IsValid) { throw 'QUOTA_ACCOUNT_IDENTITY_MISMATCH' }
+                $bytes = Read-SensitiveFileBytes -Path (Join-Path $codexRoot 'auth.json')
+                $null = Test-CodexAuthBytes -Bytes $bytes
+                $comparison = Compare-CodexAuthToProfileIdentity -Name $active -AuthBytes $bytes -ProfilesDirectory $script:ProfilesDirectory
+                if (-not $comparison.Matches -or $comparison.WorkspaceContextStatus -cne 'Confirmed') { throw 'QUOTA_ACCOUNT_IDENTITY_MISMATCH' }
+                $sha = [Security.Cryptography.SHA256]::Create()
+                return [pscustomobject]@{
+                    ProfileName = $active
+                    Binding = $null
+                    AuthStamp = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','')
+                    WorkspaceClass = $comparison.CurrentWorkspaceClass
+                }
+            } finally {
+                if ($null -ne $bytes) { [Array]::Clear($bytes,0,$bytes.Length) }
+                if ($null -ne $sha) { $sha.Dispose() }
+            }
+        } $ProfileName
+        $proof.Binding = Get-QiehaoQuotaSavedIdentityBinding -ProfileName $proof.ProfileName
+        return $proof
+    } catch { throw 'QUOTA_ACCOUNT_IDENTITY_MISMATCH' }
+}
+
+function Invoke-QiehaoQuotaIdentityBoundOperation {
+    param([string]$ProfileName,[object]$IdentityProof,[scriptblock]$Operation,[object[]]$ArgumentList)
+    $guarded = {
+        param($name,$proof,$action,$arguments)
+        if ($null -eq $proof -or $proof.ProfileName -cne $name) { throw 'QUOTA_ACCOUNT_IDENTITY_MISMATCH' }
+        $current = Get-QiehaoQuotaIdentityProof -ProfileName $name
+        if ($current.Binding -cne $proof.Binding -or $current.AuthStamp -cne $proof.AuthStamp) { throw 'QUOTA_ACCOUNT_IDENTITY_MISMATCH' }
+        & $action @arguments
+    }
+    & $script:QuotaAuthModule {
+        param($action,$arguments)
+        Invoke-WithCodexWriteLock -Operation $action -ArgumentList $arguments
+    } $guarded @($ProfileName,$IdentityProof,$Operation,$ArgumentList)
+}
+
 function Write-QiehaoQuotaJsonLine {
     param(
         [Parameter(Mandatory = $true)]
@@ -357,6 +446,7 @@ function Get-QiehaoQuotaSafeFailureCode {
         'QUOTA_BACKGROUND_WORKER_FAILED',
         'QUOTA_RESULT_MISSING',
         'QUOTA_QUERY_FAILED',
+        'QUOTA_ACCOUNT_IDENTITY_MISMATCH',
         'OPERATION_BUSY'
     )
     if ($allowed -ccontains $candidate) { return $candidate }
@@ -759,20 +849,39 @@ function Get-QiehaoCurrentQuotaSnapshot {
         [ValidateRange(1, 60)]
         [int]$TimeoutSeconds = 30,
 
-        [AllowNull()][hashtable]$OwnedProcessRegistry
+        [AllowNull()][hashtable]$OwnedProcessRegistry,
+        [string]$ExpectedProfileName
     )
 
     $operation = {
-        param($DeadlineSeconds, $ProcessRegistry)
-        Invoke-QiehaoQuotaTransport -TimeoutSeconds $DeadlineSeconds `
+        param($DeadlineSeconds, $ProcessRegistry, $ExpectedName)
+        $before = Get-QiehaoQuotaIdentityProof -ProfileName $ExpectedName
+        $result = Invoke-QiehaoQuotaTransport -TimeoutSeconds $DeadlineSeconds `
             -OwnedProcessRegistry $ProcessRegistry
+        try {
+          $after = Get-QiehaoQuotaIdentityProof -ProfileName $before.ProfileName
+          # An official token refresh may change bytes without changing identity.
+          # Both proofs independently match the same complete saved identity.
+          if ($before.Binding -cne $after.Binding) { throw 'QUOTA_ACCOUNT_IDENTITY_MISMATCH' }
+          if ($result.Succeeded) {
+            $planClass = & $script:QuotaAuthModule { param($plan) Get-CodexWorkspaceClass -PlanType $plan } ([string]$result.Snapshot.Plan)
+            if ($planClass -cne 'Unknown' -and $planClass -cne $after.WorkspaceClass) { throw 'QUOTA_ACCOUNT_IDENTITY_MISMATCH' }
+            $result | Add-Member -NotePropertyName IdentityProof -NotePropertyValue $after
+          }
+        } catch {
+            # Keep the transport's cleanup evidence even when identity changed.
+            foreach ($pair in @(@('Succeeded',$false),@('Snapshot',$null),@('FailureCode','QUOTA_ACCOUNT_IDENTITY_MISMATCH'),@('PrimarySucceeded',$false),@('PrimaryFailureCode','QUOTA_ACCOUNT_IDENTITY_MISMATCH'))) {
+                $result | Add-Member -NotePropertyName $pair[0] -NotePropertyValue $pair[1] -Force
+            }
+        }
+        return $result
     }
     try {
         $result = & $script:QuotaAuthModule {
             param($LockedOperation, $Arguments)
             Invoke-WithCodexWriteLock -Operation $LockedOperation `
                 -ArgumentList $Arguments
-        } $operation @($TimeoutSeconds, $OwnedProcessRegistry)
+        } $operation @($TimeoutSeconds, $OwnedProcessRegistry, $ExpectedProfileName)
         if ($null -eq $result) { throw 'QUOTA_RESULT_MISSING' }
         $result.Diagnostics.AccountStabilityLockAcquired = $true
         $result.AccountStabilityLockCleanup = 'Released'
@@ -953,7 +1062,8 @@ function Invoke-QiehaoQuotaBackgroundWorker {
         [ValidateRange(1, 60)][int]$TimeoutSeconds = 30,
         [AllowNull()][scriptblock]$QuotaProvider,
         [AllowNull()][object]$QuotaProviderArgument,
-        [AllowNull()][hashtable]$OwnedProcessRegistry
+        [AllowNull()][hashtable]$OwnedProcessRegistry,
+        [string]$ExpectedProfileName
     )
 
     $clientCommandAvailable = $null -ne (Get-Command `
@@ -984,7 +1094,7 @@ function Invoke-QiehaoQuotaBackgroundWorker {
         if ($null -eq $QuotaProvider) {
             $providerOutput = @(Get-QiehaoCurrentQuotaSnapshot `
                 -TimeoutSeconds $TimeoutSeconds `
-                -OwnedProcessRegistry $OwnedProcessRegistry)
+                -OwnedProcessRegistry $OwnedProcessRegistry -ExpectedProfileName $ExpectedProfileName)
         }
         else {
             $providerOutput = @(
@@ -1070,6 +1180,7 @@ function Invoke-QiehaoQuotaBackgroundWorker {
 
         return [pscustomobject]@{
             Succeeded = $succeeded
+            IdentityProof = Get-QiehaoQuotaPropertyValue -InputObject $providerResult -Name 'IdentityProof'
             FailureCode = if ($succeeded) { $null } else { $failureCode }
             Snapshot = if ($succeeded) { $snapshot } else { $null }
             PrimarySucceeded = $primarySucceeded
@@ -1137,6 +1248,9 @@ function Invoke-QiehaoQuotaBackgroundWorker {
 }
 
 Export-ModuleMember -Function @(
+    'Get-QiehaoQuotaSavedIdentityBinding',
+    'Get-QiehaoQuotaIdentityProof',
+    'Invoke-QiehaoQuotaIdentityBoundOperation',
     'Get-QiehaoCurrentQuotaSnapshot',
     'Invoke-QiehaoQuotaBackgroundWorker'
 )

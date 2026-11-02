@@ -3,6 +3,7 @@ param()
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $modulePath = Join-Path -Path $projectRoot -ChildPath 'gui\QuotaHelpers.psm1'
@@ -87,11 +88,35 @@ $testRoot = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath (
     'qiehao-quota-selftest-' + [Guid]::NewGuid().ToString('N')
 )
 [System.IO.Directory]::CreateDirectory($testRoot) | Out-Null
+$fakeQuotaProfiles=Join-Path $testRoot 'fake-profiles'
+$null=[IO.Directory]::CreateDirectory($fakeQuotaProfiles)
+function New-FakeQuotaProof([string]$Name) {
+    $path=Join-Path $fakeQuotaProfiles ($Name+'.identity.dpapi')
+    if (-not [IO.File]::Exists($path)) { [IO.File]::WriteAllBytes($path,[Text.Encoding]::UTF8.GetBytes('FAKE-MARKER-'+$Name)) }
+    [pscustomobject]@{ProfileName=$Name;Binding=('identity-v2:'+(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash);AuthStamp=('A'*64)}
+}
+$fakeProofFactory=${function:New-FakeQuotaProof}.GetNewClosure()
+$helperModule=Get-Module QuotaHelpers
+& $helperModule {
+    # Cache/display tests inject only this boundary. AccountVerificationSelfTest
+    # separately exercises the real identity guard against fake DPAPI profiles.
+    function script:Invoke-QiehaoQuotaIdentityBoundOperation {
+        param($ProfileName,$IdentityProof,$Operation,$ArgumentList)
+        if ($script:fakeIdentityMismatch) { throw 'QUOTA_ACCOUNT_IDENTITY_MISMATCH' }
+        & $Operation @ArgumentList
+    }
+    $script:fakeIdentityMismatch=$false
+    function script:Get-QiehaoQuotaSavedIdentityBinding {
+        param($ProfileName,$ProfilesDirectory)
+        return 'identity-v2:'+(Get-FileHash -LiteralPath (Join-Path $ProfilesDirectory ($ProfileName+'.identity.dpapi')) -Algorithm SHA256).Hash
+    }
+}
 
 try {
     # Regression guard for 4ae0e77: importing QuotaClient must not remove the
     # core commands that the GUI Loaded handler invokes.
     Import-Module -Name $corePath -Force -ErrorAction Stop
+    & (Get-Module CodexAuth) {param($directory) $script:LogsDirectory=$directory} (Join-Path $testRoot 'logs')
     $coreCommandNames = @(
         'Get-CodexAccountSlot',
         'Get-CodexActiveProfile',
@@ -129,7 +154,7 @@ try {
     [System.IO.Directory]::CreateDirectory($noCacheDirectory) | Out-Null
     $noCache = Read-QiehaoQuotaCache -StateDirectory $noCacheDirectory
     $noCacheRows = @((New-FakeStartupCoreSnapshot).Profiles)
-    $noCacheDecorated = @(Update-QiehaoQuotaProfileRows -Rows $noCacheRows `
+    $noCacheDecorated = @(Update-QiehaoQuotaProfileRows -ProfilesDirectory $fakeQuotaProfiles -Rows $noCacheRows `
         -Cache $noCache.Cache -ActiveProfile 'Team')
     Assert-QuotaTest (
         $noCache.UsedEmpty -and $noCacheDecorated.Count -eq 2 -and
@@ -198,11 +223,11 @@ try {
     # Cache keys can decorate known rows but can never define population.
     $ghostDirectory = Join-Path $startupRoot 'ghost'
     [System.IO.Directory]::CreateDirectory($ghostDirectory) | Out-Null
-    $ghostSave = Save-QiehaoQuotaSnapshot -StateDirectory $ghostDirectory `
+    $ghostSave = Save-QiehaoQuotaSnapshot -IdentityProof (New-FakeQuotaProof 'Ghost') -StateDirectory $ghostDirectory `
         -Cache (New-QiehaoEmptyQuotaCache) -ProfileName 'Ghost' `
         -Snapshot (New-FakeQuotaSnapshot -Durations @(60) -Remaining @(50))
     $ghostRows = @((New-FakeStartupCoreSnapshot).Profiles)
-    $ghostDecorated = @(Update-QiehaoQuotaProfileRows -Rows $ghostRows `
+    $ghostDecorated = @(Update-QiehaoQuotaProfileRows -ProfilesDirectory $fakeQuotaProfiles -Rows $ghostRows `
         -Cache $ghostSave.Cache -ActiveProfile 'Team')
     Assert-QuotaTest (
         $ghostSave.Succeeded -and $ghostDecorated.Count -eq 2 -and
@@ -243,6 +268,7 @@ try {
             $null = $calls.Add($Profile)
             [pscustomobject]@{
                 Succeeded = $true
+                IdentityProof = & $fakeProofFactory $Profile
                 FailureCode = $null
                 Snapshot = $openSnapshot
             }
@@ -285,6 +311,83 @@ try {
     Assert-QuotaTest (-not $failedUpdate.Succeeded -and
         $beforeFailure -ceq $afterFailure) 'QUOTA_FAILURE_OVERWROTE_CACHE'
 
+    # Exercise the real GUI completion/start functions with fake worker output.
+    # These runspaces never invoke OAuth, account operations or a real quota RPC.
+    Add-Type -AssemblyName WindowsBase
+    $tokens=$null; $errors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile($guiScriptPath,[ref]$tokens,[ref]$errors)
+    foreach ($name in @('Get-QiehaoSafeQuotaFailureCode','Complete-QiehaoQuotaAsync','Start-QiehaoQuotaAsync','Stop-QiehaoQuotaCompletionTimer')) {
+        $fn=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name}.GetNewClosure(),$true)
+        . ([scriptblock]::Create($fn.Extent.Text))
+    }
+    function Set-QiehaoLocalizedStatus {param($Key,$Arguments,$Fallback) $script:quotaStatusKey=$Key}
+    function Update-QiehaoActionButtons {}
+    function Update-QiehaoQuotaRows {
+        $script:quotaRows=@(Update-QiehaoQuotaProfileRows -ProfilesDirectory $fakeQuotaProfiles -Rows @([pscustomobject]@{Name='Plus'}) `
+            -Cache $script:guiQuotaCache -ActiveProfile Plus -JustUpdatedProfile $script:guiQuotaJustUpdatedProfile)
+    }
+    function Complete-FakeQuota([object]$Snapshot,[bool]$Succeeded=$true,[switch]$HardTimeout) {
+        $worker=[PowerShell]::Create()
+        $fake=[pscustomobject]@{Succeeded=$Succeeded;Snapshot=$Snapshot;FailureCode='QUOTA_RATE_LIMITS_TIMEOUT';IdentityProof=(New-FakeQuotaProof Plus)}
+        $null=$worker.AddScript('param($fake) $fake').AddArgument($fake)
+        $script:guiQuotaAsyncPowerShell=$worker
+        $script:guiQuotaAsyncResult=$worker.BeginInvoke()
+        if (-not $script:guiQuotaAsyncResult.AsyncWaitHandle.WaitOne(5000)) { $worker.Stop(); $worker.Dispose(); throw 'FAKE_WORKER_TIMEOUT' }
+        $script:guiQuotaRequestedProfile='Plus'; $script:guiQuotaAsyncReason='Manual'
+        $script:guiQuotaJustUpdatedProfile='Plus'
+        Complete-QiehaoQuotaAsync -HardTimeout:$HardTimeout
+    }
+    $stateDirectory=Join-Path $testRoot 'completion'
+    $script:guiQuotaCoordinator=New-QiehaoQuotaCoordinatorState
+    $script:guiQuotaCurrentProfile='Plus'; $script:guiCurrentActiveProfile='Plus'
+    $script:guiManualSwitchWaitInProgress=$false; $script:guiPendingAction=''
+    $script:guiQuotaCompletionTimer=$null; $script:guiQuotaCompletionTickHandler=$null
+    $script:guiQuotaCache=New-QiehaoEmptyQuotaCache
+    Complete-FakeQuota (New-FakeQuotaSnapshot -Durations @(300) -Remaining @(61))
+    Assert-QuotaTest ($script:quotaStatusKey -ceq 'Quota.Updated' -and $script:guiQuotaJustUpdatedProfile -ceq 'Plus' -and
+        $script:quotaRows[0].QuotaSummary -ceq '5h 61%') 'GUI_COMPLETION_ONE_VALID_WINDOW_AND_PERSISTED_SUCCESS'
+    $completionCachePath=Join-Path $stateDirectory 'quota-cache.json'
+    $completionBefore=[IO.File]::ReadAllText($completionCachePath)
+    $queryTime=(Get-QiehaoQuotaCacheSnapshot -Cache $script:guiQuotaCache -ProfileName Plus).queried_at
+    & $helperModule {$script:fakeIdentityMismatch=$true}
+    Complete-FakeQuota (New-FakeQuotaSnapshot -Durations @(300) -Remaining @(99))
+    Assert-QuotaTest ($script:quotaStatusKey -ceq 'Quota.IdentityMismatch' -and $null -eq $script:guiQuotaJustUpdatedProfile -and [IO.File]::ReadAllText($completionCachePath) -ceq $completionBefore) 'GUI_IDENTITY_MISMATCH_CANNOT_COMMIT_OR_REPORT_SUCCESS'
+    & $helperModule {$script:fakeIdentityMismatch=$false}
+    foreach ($scenario in @('Empty','RpcFailure','HardTimeout','Invalid')) {
+        $fakeSnapshot=New-FakeQuotaSnapshot -Durations @(300) -Remaining @(70)
+        if ($scenario -ceq 'Empty') { $fakeSnapshot.Windows=@() }
+        if ($scenario -ceq 'Invalid') { $fakeSnapshot.Windows[0].RemainingPercent=[double]::NaN }
+        Complete-FakeQuota $fakeSnapshot ($scenario -cne 'RpcFailure') -HardTimeout:($scenario -ceq 'HardTimeout')
+        Assert-QuotaTest ($script:guiQuotaLastQueryFailed -and $null -eq $script:guiQuotaJustUpdatedProfile -and
+            $script:quotaStatusKey -cne 'Quota.Updated' -and $script:quotaRows[0].QuotaFreshness -like '历史缓存*' -and
+            $script:quotaRows[0].QuotaSummary -ceq '5h 61%' -and [IO.File]::ReadAllText($completionCachePath) -ceq $completionBefore -and
+            (Get-QiehaoQuotaCacheSnapshot -Cache $script:guiQuotaCache -ProfileName Plus).queried_at -ceq $queryTime) ('GUI_'+$scenario+'_PRESERVES_OLD_VALUE_TIME_AND_CLEARS_JUST_QUERIED')
+        if ($scenario -in @('Empty','Invalid')) { Assert-QuotaTest ($script:quotaStatusKey -ceq 'Quota.NoDisplayableWindows') 'GUI_RESPONSE_WITHOUT_DISPLAYABLE_WINDOWS_IS_NOT_SUCCESS' }
+    }
+    $goodCompletionCache=$script:guiQuotaCache
+    $script:guiQuotaCache=New-QiehaoEmptyQuotaCache
+    Complete-FakeQuota $null $false
+    Assert-QuotaTest ($script:quotaStatusKey -ceq 'Quota.UpdateFailedNoCache' -and $script:quotaRows[0].QuotaSummary -ceq '尚无额度快照') 'GUI_FAILURE_WITHOUT_CACHE_HAS_NO_SYNTHETIC_PERCENT'
+    $script:guiQuotaCache=$goodCompletionCache
+    $SelfTest=$true; $quotaClientModulePath=$clientPath
+    $script:guiQuotaModulesAvailable=$true; $script:guiIsClosing=$false
+    $script:guiLifecycleWorkerRunning=$false; $script:guiLifecycleRegistry=@{IsActive=$false}
+    $script:guiManualRecoveryRequired=$false
+    $script:guiQuotaSelfTestScenario='Failure'; $script:guiQuotaSelfTestHardCeilingMilliseconds=3000; $script:guiQuotaSelfTestQueryCount=0
+    $script:guiQuotaOwnedProcessRegistry=[hashtable]::Synchronized(@{IsActive=$false;CancelRequested=$false})
+    $script:guiQuotaJustUpdatedProfile='Plus'
+    Assert-QuotaTest (Start-QiehaoQuotaAsync -Reason Manual) 'GUI_FAKE_QUERY_DID_NOT_START'
+    Assert-QuotaTest ($null -eq $script:guiQuotaJustUpdatedProfile -and $script:quotaRows[0].QuotaFreshness -like '历史缓存*') 'GUI_NEW_QUERY_CLEARS_OLD_JUST_QUERIED_BEFORE_COMPLETION'
+    if (-not $script:guiQuotaAsyncResult.AsyncWaitHandle.WaitOne(5000)) { throw 'FAKE_START_WORKER_TIMEOUT' }
+    Complete-QiehaoQuotaAsync
+    Assert-QuotaTest ($script:guiQuotaLastQueryFailed -and $script:guiQuotaLastFailureCode -ceq 'QUOTA_RATE_LIMITS_TIMEOUT' -and
+        $null -eq $script:guiQuotaJustUpdatedProfile -and [IO.File]::ReadAllText($completionCachePath) -ceq $completionBefore) 'GUI_TIMEOUT_COMPLETION_PRESERVES_CACHE_AND_CLEARS_MARKER'
+    Write-Output 'GUI_QUOTA_COMPLETION_VALID_EMPTY_FAILURE_TIMEOUT_MARKERS_PASS'
+    $SelfTest=$false
+    function Get-QiehaoQuotaIdentityProof {param($ProfileName) throw 'QUOTA_ACCOUNT_IDENTITY_MISMATCH'}
+    Assert-QuotaTest (-not (Start-QiehaoQuotaAsync -Reason Manual) -and $script:guiQuotaLastFailureCode -ceq 'QUOTA_ACCOUNT_IDENTITY_MISMATCH' -and $script:quotaStatusKey -ceq 'Quota.IdentityMismatch' -and $null -eq $script:guiQuotaAsyncPowerShell) 'GUI_DIVERGENT_IDENTITY_BLOCKED_BEFORE_WORKER_START'
+    $SelfTest=$true
+
     $manualCalls = New-Object 'System.Collections.Generic.List[string]'
     $manualResult = Invoke-QiehaoQuotaCacheRefresh -Reason Manual `
         -Coordinator $coordinator -StateDirectory $testRoot `
@@ -294,6 +397,7 @@ try {
             $null = $manualCalls.Add($Profile)
             [pscustomobject]@{
                 Succeeded = $true
+                IdentityProof = & $fakeProofFactory $Profile
                 FailureCode = $null
                 Snapshot = $openSnapshot
             }
@@ -315,7 +419,7 @@ try {
 
     $dynamicSnapshot = New-FakeQuotaSnapshot `
         -Durations @(60, 120, 180) -Remaining @(90, 80, 70)
-    $dynamicSave = Save-QiehaoQuotaSnapshot -StateDirectory $testRoot `
+    $dynamicSave = Save-QiehaoQuotaSnapshot -IdentityProof (New-FakeQuotaProof 'Team') -StateDirectory $testRoot `
         -Cache $manualResult.Cache -ProfileName 'Team' `
         -Snapshot $dynamicSnapshot `
         -QueriedAt ([DateTimeOffset]::Parse('2030-01-02T00:00:00Z'))
@@ -324,7 +428,7 @@ try {
         [pscustomobject]@{ Name = 'Plus'; Active = '是' },
         [pscustomobject]@{ Name = 'Team'; Active = '否' }
     )
-    $rows = @(Update-QiehaoQuotaProfileRows -Rows $rows `
+    $rows = @(Update-QiehaoQuotaProfileRows -ProfilesDirectory $fakeQuotaProfiles -Rows $rows `
         -Cache $dynamicSave.Cache -ActiveProfile 'Plus' `
         -Now ([DateTimeOffset]::Parse('2030-01-02T01:00:00Z')))
     $plusRow = @($rows | Where-Object { $_.Name -ceq 'Plus' })[0]
@@ -356,37 +460,62 @@ try {
     ) `
         'QUOTA_INACTIVE_TOOLTIP_MISSING'
 
-    $singleSave = Save-QiehaoQuotaSnapshot -StateDirectory $testRoot `
+    $singleSave = Save-QiehaoQuotaSnapshot -IdentityProof (New-FakeQuotaProof 'Single') -StateDirectory $testRoot `
         -Cache $dynamicSave.Cache -ProfileName 'Single' `
         -Snapshot (New-FakeQuotaSnapshot -Durations @(43200) -Remaining @(55))
-    $emptySave = Save-QiehaoQuotaSnapshot -StateDirectory $testRoot `
+    $emptySave = Save-QiehaoQuotaSnapshot -IdentityProof (New-FakeQuotaProof 'Empty') -StateDirectory $testRoot `
         -Cache $singleSave.Cache -ProfileName 'Empty' `
         -Snapshot (New-FakeQuotaSnapshot -Durations @() -Remaining @())
     Assert-QuotaTest (
+        -not $emptySave.Succeeded -and $emptySave.FailureCode -ceq 'QUOTA_NO_DISPLAYABLE_WINDOWS' -and
         @((Get-QiehaoQuotaCacheSnapshot -Cache $emptySave.Cache `
             -ProfileName 'Single').windows).Count -eq 1 -and
-        @((Get-QiehaoQuotaCacheSnapshot -Cache $emptySave.Cache `
-            -ProfileName 'Empty').windows).Count -eq 0
+        $null -eq (Get-QiehaoQuotaCacheSnapshot -Cache $emptySave.Cache -ProfileName 'Empty')
     ) 'QUOTA_SINGLE_OR_EMPTY_WINDOWS_FAILED'
     $singleRows = @(
         [pscustomobject]@{ Name = 'Single'; Active = '是' },
         [pscustomobject]@{ Name = 'Empty'; Active = '否' }
     )
-    $singleRows = @(Update-QiehaoQuotaProfileRows -Rows $singleRows `
+    $singleRows = @(Update-QiehaoQuotaProfileRows -ProfilesDirectory $fakeQuotaProfiles -Rows $singleRows `
         -Cache $emptySave.Cache -ActiveProfile 'Single')
     Assert-QuotaTest (
         [string]$singleRows[0].QuotaSummary -ceq '30d 55%' -and
         [string]$singleRows[0].QuotaSummary -notmatch '[\r\n]' -and
-        [string]$singleRows[1].QuotaSummary -ceq '未返回额度窗口' -and
+        [string]$singleRows[1].QuotaSummary -ceq '尚无额度快照' -and
         [string]$singleRows[1].QuotaSummary -notmatch '[\r\n]'
     ) 'QUOTA_ONE_OR_ZERO_WINDOW_NOT_COMPACT'
 
-    $fourSave = Save-QiehaoQuotaSnapshot -StateDirectory $testRoot `
+    $cachePath = Join-Path $testRoot 'quota-cache.json'
+    $beforeInvalid = [IO.File]::ReadAllText($cachePath)
+    foreach ($invalid in @($null,'missing','55',$true,[double]::NaN,[double]::PositiveInfinity,-1,101)) {
+        $bad = New-FakeQuotaSnapshot -Durations @(300) -Remaining @(50)
+        $bad.Windows[0].RemainingPercent = $invalid
+        $rejected = Save-QiehaoQuotaSnapshot -IdentityProof (New-FakeQuotaProof Single) -StateDirectory $testRoot -Cache $singleSave.Cache -ProfileName Single -Snapshot $bad
+        Assert-QuotaTest (-not $rejected.Succeeded -and $rejected.FailureCode -ceq 'QUOTA_NO_DISPLAYABLE_WINDOWS' -and
+            [IO.File]::ReadAllText($cachePath) -ceq $beforeInvalid) 'INVALID_QUOTA_PRESERVES_CACHE_AND_QUERY_TIME'
+    }
+    $partial = New-FakeQuotaSnapshot -Durations @(300,10080) -Remaining @(73,50)
+    $partial.Windows[1].RemainingPercent = $null
+    $partialSaved = Save-QiehaoQuotaSnapshot -IdentityProof (New-FakeQuotaProof Single) -StateDirectory $testRoot -Cache $singleSave.Cache -ProfileName Single -Snapshot $partial
+    $partialRows = @(Update-QiehaoQuotaProfileRows -ProfilesDirectory $fakeQuotaProfiles -Rows @([pscustomobject]@{Name='Single'}) -Cache $partialSaved.Cache -ActiveProfile Single)
+    Assert-QuotaTest ($partialSaved.Succeeded -and $partialRows[0].QuotaSummary -ceq '5h 73% · Week 不可用' -and
+        $partialRows[0].QuotaToolTip -notmatch '剩余：0%|剩余：100%') 'ONE_VALID_WINDOW_SUCCEEDS_AND_INVALID_WINDOW_UNAVAILABLE'
+    $quotaModule = Get-Module QuotaHelpers
+    $writerBody = & $quotaModule { (Get-Command Write-QiehaoQuotaCache).ScriptBlock }
+    try {
+        & $quotaModule { function script:Write-QiehaoQuotaCache {param($StateDirectory,$Cache) throw 'FAKE_DISK_WRITE_FAILURE'} }
+        $writeFailure = Save-QiehaoQuotaSnapshot -IdentityProof (New-FakeQuotaProof Single) -StateDirectory $testRoot -Cache $partialSaved.Cache -ProfileName Single -Snapshot $partial
+        Assert-QuotaTest (-not $writeFailure.Succeeded -and [object]::ReferenceEquals($writeFailure.Cache,$partialSaved.Cache) -and
+            (Get-QiehaoQuotaCacheSnapshot -Cache $writeFailure.Cache -ProfileName Single).queried_at -ceq
+            (Get-QiehaoQuotaCacheSnapshot -Cache $partialSaved.Cache -ProfileName Single).queried_at) 'CACHE_WRITE_FAILURE_PRESERVES_PREVIOUS_SNAPSHOT'
+    } finally { & $quotaModule {param($body) Set-Item -LiteralPath Function:Write-QiehaoQuotaCache -Value $body} $writerBody }
+
+    $fourSave = Save-QiehaoQuotaSnapshot -IdentityProof (New-FakeQuotaProof 'Four') -StateDirectory $testRoot `
         -Cache $emptySave.Cache -ProfileName 'Four' `
         -Snapshot (New-FakeQuotaSnapshot `
             -Durations @(60, 120, 180, 240) `
             -Remaining @(90, 80, 70, 60))
-    $fourRows = @(Update-QiehaoQuotaProfileRows `
+    $fourRows = @(Update-QiehaoQuotaProfileRows -ProfilesDirectory $fakeQuotaProfiles `
         -Rows @([pscustomobject]@{ Name = 'Four'; Active = '是' }) `
         -Cache $fourSave.Cache -ActiveProfile 'Four')
     Assert-QuotaTest (
@@ -406,6 +535,7 @@ try {
             $null = $order.Add('Quota:' + $Profile)
             [pscustomobject]@{
                 Succeeded = $true
+                IdentityProof = & $fakeProofFactory $Profile
                 FailureCode = $null
                 Snapshot = $openSnapshot
             }
@@ -442,6 +572,7 @@ try {
             $null = $postCalls.Add($Profile)
             [pscustomobject]@{
                 Succeeded = $true
+                IdentityProof = & $fakeProofFactory $Profile
                 FailureCode = $null
                 Snapshot = $dynamicSnapshot
             }

@@ -251,6 +251,8 @@ function Get-QiehaoSafeQuotaFailureCode {
         'QUOTA_BACKGROUND_WORKER_FAILED',
         'QUOTA_RESULT_MISSING',
         'QUOTA_QUERY_FAILED',
+            'QUOTA_NO_DISPLAYABLE_WINDOWS',
+            'QUOTA_ACCOUNT_IDENTITY_MISMATCH',
         'QUOTA_CACHE_WRITE_FAILED',
         'OPERATION_BUSY'
     )
@@ -811,25 +813,51 @@ try {
             [ValidateSet('Information', 'Warning', 'Critical')]
             [string]$Severity = 'Information'
         )
-        $icon = [System.Windows.MessageBoxImage]::Information
         $title = Get-QiehaoGuiText -Key 'App.Title' `
             -Fallback 'Codex 账号管理器'
-        if ($Severity -ceq 'Warning') {
-            $icon = [System.Windows.MessageBoxImage]::Warning
-        }
-        elseif ($Severity -ceq 'Critical') {
-            $icon = [System.Windows.MessageBoxImage]::Error
+        if ($Severity -ceq 'Critical') {
             $title = Get-QiehaoGuiText -Key 'App.CriticalTitle' `
                 -Fallback '严重安全错误 - Codex 账号管理器'
         }
-        [void][System.Windows.MessageBox]::Show(
-            $window, $Message, $title,
-            [System.Windows.MessageBoxButton]::OK, $icon
-        )
+        # Use the same WPF owner, logical coordinates and visual resources as
+        # the existing dialogs. Native MessageBox placement is not owner-centred.
+        $dialog = New-Object System.Windows.Window
+        $dialog.Title = $title
+        $dialog.Owner = $window
+        $dialog.WindowStartupLocation = 'CenterOwner'
+        $dialog.Width = [Math]::Min(520, [Math]::Max(240, $window.ActualWidth - 40))
+        $dialog.SizeToContent = 'Height'
+        $dialog.MaxHeight = [Math]::Max(160, $window.ActualHeight - 40)
+        $dialog.ResizeMode = 'NoResize'
+        $dialog.ShowInTaskbar = $false
+        $dialog.FontFamily = $window.FontFamily
+        $dialog.FontSize = $window.FontSize
+        $root = New-Object System.Windows.Controls.StackPanel
+        $messageText = New-Object System.Windows.Controls.TextBlock
+        $messageText.Text = $Message
+        $messageText.TextWrapping = 'Wrap'
+        $scroll = New-Object System.Windows.Controls.ScrollViewer
+        $scroll.VerticalScrollBarVisibility = 'Auto'
+        $scroll.MaxHeight = [Math]::Max(60, $window.ActualHeight - 200)
+        $scroll.Content = $messageText
+        $null = $root.Children.Add($scroll)
+        $ok = New-Object System.Windows.Controls.Button
+        $ok.Content = Get-QiehaoGuiText -Key 'Button.Confirm' -Fallback '确定'
+        $ok.MinWidth = 90
+        $ok.MinHeight = 34
+        $ok.Margin = '0,18,0,0'
+        $ok.HorizontalAlignment = 'Right'
+        $ok.Style = $window.Resources['PrimaryButtonStyle']
+        $ok.IsDefault = $true
+        $ok.IsCancel = $true
+        $ok.Add_Click({ $dialog.DialogResult = $true })
+        $null = $root.Children.Add($ok)
+        Set-QiehaoDialogContent -Dialog $dialog -Content $root
+        [void]$dialog.ShowDialog()
     }
 
     function Show-QiehaoOperationResult {
-        param([Parameter(Mandatory = $true)][object]$Result)
+        param([Parameter(Mandatory = $true)][object]$Result,[string]$WarningCode = '')
         $script:guiLifecycleFinalCode = [string]$Result.ResultCode
         Set-QiehaoLocalizedStatus -Key ('Operation.' + $Result.ResultCode) -Fallback $Result.Message
         if ($Result.ResultCode -ceq 'DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED') {
@@ -840,6 +868,12 @@ try {
             $message = Get-QiehaoGuiText `
                 -Key ('Operation.' + [string]$Result.ResultCode) `
                 -Fallback ([string]$Result.Message)
+            if ($WarningCode) {
+                $warning = ConvertTo-QiehaoOperationResult -ResultCode $WarningCode
+                $message += [Environment]::NewLine + [Environment]::NewLine + (Get-QiehaoGuiText `
+                    -Key ('Operation.' + $WarningCode) -Fallback $warning.Message)
+                if ($Result.Severity -ceq 'Information') { $Result.Severity = 'Warning' }
+            }
             Show-QiehaoSafeMessage -Message $message `
                 -Severity ([string]$Result.Severity)
         }
@@ -852,7 +886,8 @@ try {
             [Parameter(Mandatory = $true)][string]$ConfirmText,
             [string]$CancelText = '',
             [ValidateSet('Primary', 'Positive', 'Danger')]
-            [string]$ConfirmStyle = 'Primary'
+            [string]$ConfirmStyle = 'Primary',
+            [switch]$DefaultCancel
         )
         if ([string]::IsNullOrWhiteSpace($CancelText)) {
             $CancelText = Get-QiehaoGuiText -Key 'Button.Cancel' `
@@ -892,12 +927,13 @@ try {
         $confirmButton.MinWidth = 130
         $confirmButton.MinHeight = 34
         $confirmButton.Margin = '0,0,8,0'
-        $confirmButton.IsDefault = $true
+        $confirmButton.IsDefault = -not $DefaultCancel
         $cancelButton = New-Object System.Windows.Controls.Button
         $cancelButton.Content = $CancelText
         $cancelButton.MinWidth = 90
         $cancelButton.MinHeight = 34
         $cancelButton.IsCancel = $true
+        $cancelButton.IsDefault = [bool]$DefaultCancel
         $confirmButton.Style = $window.Resources[$ConfirmStyle + 'ButtonStyle']
         $cancelButton.Style = $window.Resources['SecondaryButtonStyle']
         $confirmButton.Add_Click({ $dialog.Tag = $true; $dialog.DialogResult = $true })
@@ -1373,11 +1409,12 @@ try {
             Set-QiehaoQuotaUnavailableRows -Rows $script:guiAllProfileRows
             Disable-QiehaoQuotaFeature
         }
-        if (@($Snapshot.ReadOnlyErrors).Count -eq 0) {
+        # A list refresh does not retry quota or supersede its last failure.
+        if (-not $script:guiQuotaLastQueryFailed -and @($Snapshot.ReadOnlyErrors).Count -eq 0) {
             Set-QiehaoLocalizedStatus -Key 'Status.Refreshed' `
                 -Fallback '状态已刷新'
         }
-        else {
+        elseif (-not $script:guiQuotaLastQueryFailed) {
             Set-QiehaoLocalizedStatus -Key 'Status.PartialReadOnly' `
                 -Fallback '部分只读状态暂不可用'
         }
@@ -1482,8 +1519,10 @@ try {
                 if ($PassThru) { return $false }
                 return
             }
-            Set-QiehaoLocalizedStatus -Key 'Status.RefreshFailed' `
-                -Fallback '只读刷新失败'
+            if (-not $script:guiQuotaLastQueryFailed) {
+                Set-QiehaoLocalizedStatus -Key 'Status.RefreshFailed' `
+                    -Fallback '只读刷新失败'
+            }
             $script:guiCurrentCodexStatus = '未知'
             $script:guiCurrentCodexState = 'Unknown'
             $script:guiCurrentIdentityState = 'Unavailable'
@@ -1675,6 +1714,7 @@ try {
             )
         )
         $updated = $false
+        $script:guiQuotaJustUpdatedProfile = $null
         try {
             if (-not $HardTimeout -and $stillCurrent -and
                 $null -ne $providerResult -and
@@ -1683,7 +1723,7 @@ try {
                     -StateDirectory $stateDirectory `
                     -Cache $script:guiQuotaCache `
                     -ProfileName $requestedProfile `
-                    -Snapshot $providerResult.Snapshot
+                    -Snapshot $providerResult.Snapshot -IdentityProof $providerResult.IdentityProof
                 if ($saved.Succeeded) {
                     $script:guiQuotaCache = $saved.Cache
                     $script:guiQuotaJustUpdatedProfile = $requestedProfile
@@ -1733,13 +1773,20 @@ try {
             }
             $script:guiQuotaLastFailureCode =
                 Get-QiehaoSafeQuotaFailureCode -Value $completionFailureCode
-            if ($reason -ceq 'SwitchBefore') {
+            if ($script:guiQuotaLastFailureCode -ceq 'QUOTA_ACCOUNT_IDENTITY_MISMATCH') {
+                Set-QiehaoLocalizedStatus -Key 'Quota.IdentityMismatch' -Fallback '当前登录与活动档案不一致，已暂停额度查询'
+            }
+            elseif ($reason -ceq 'SwitchBefore') {
                 Set-QiehaoSwitchQuotaStatus -Text (
                     Format-QiehaoGuiText `
                         -Key 'Quota.SwitchBeforeFallback' `
                         -Arguments @($requestedProfile) `
                         -Fallback "本次未能更新 '{0}' 的额度快照。已保留上次缓存，正在继续切换……"
                 )
+            }
+            elseif ($script:guiQuotaLastFailureCode -ceq 'QUOTA_NO_DISPLAYABLE_WINDOWS') {
+                Set-QiehaoLocalizedStatus -Key 'Quota.NoDisplayableWindows' `
+                    -Fallback '接口已响应，但未取得可显示额度。'
             }
             elseif ($reason -ceq 'SwitchAfter') {
                 Set-QiehaoLocalizedStatus `
@@ -1748,9 +1795,9 @@ try {
                     -Fallback '额度获取失败，可点击刷新额度重新获取。'
             }
             else {
+                $cached = Get-QiehaoQuotaCacheSnapshot -Cache $script:guiQuotaCache -ProfileName $requestedProfile
                 Set-QiehaoLocalizedStatus `
-                    -Key 'Quota.UpdateFailedRetryWithCode' `
-                    -Arguments @($script:guiQuotaLastFailureCode) `
+                    -Key $(if ($null -ne $cached -and @($cached.windows | Where-Object { $null -ne $_.remaining_percent }).Count -gt 0) { 'Quota.UpdateFailedCached' } else { 'Quota.UpdateFailedNoCache' }) `
                     -Fallback '额度获取失败，可点击刷新额度重新获取。'
             }
         }
@@ -1792,6 +1839,17 @@ try {
             return $false
         }
 
+        $script:guiQuotaJustUpdatedProfile = $null
+        Update-QiehaoQuotaRows
+        if (-not $SelfTest) {
+            try { $null = Get-QiehaoQuotaIdentityProof -ProfileName $activeProfile }
+            catch {
+                $script:guiQuotaLastQueryFailed = $true
+                $script:guiQuotaLastFailureCode = 'QUOTA_ACCOUNT_IDENTITY_MISMATCH'
+                Set-QiehaoLocalizedStatus -Key 'Quota.IdentityMismatch' -Fallback '当前登录与活动档案不一致，已暂停额度查询'
+                return $false
+            }
+        }
         $script:guiQuotaCoordinator.QueryInProgress = $true
         $script:guiQuotaLastQueryFailed = $false
         $script:guiQuotaLastFailureCode = $null
@@ -1834,7 +1892,8 @@ try {
                     $ClientModulePath,
                     $Scenario,
                     $TimeoutSeconds,
-                    $OwnedProcessRegistry
+                    $OwnedProcessRegistry,
+                    $ExpectedProfileName
                 )
                 $ErrorActionPreference = 'Stop'
                 $clientModule = @(Import-Module -Name $ClientModulePath `
@@ -1969,7 +2028,7 @@ try {
 
                 Invoke-QiehaoQuotaBackgroundWorker `
                     -TimeoutSeconds $TimeoutSeconds `
-                    -OwnedProcessRegistry $OwnedProcessRegistry
+                    -OwnedProcessRegistry $OwnedProcessRegistry -ExpectedProfileName $ExpectedProfileName
             }
             $workerScenario = if ($SelfTest) {
                 [string]$script:guiQuotaSelfTestScenario
@@ -1979,7 +2038,8 @@ try {
                 AddArgument($quotaClientModulePath).
                 AddArgument($workerScenario).
                 AddArgument($quotaTimeoutSeconds).
-                AddArgument($script:guiQuotaOwnedProcessRegistry)
+                AddArgument($script:guiQuotaOwnedProcessRegistry).
+                AddArgument($activeProfile)
             $script:guiQuotaAsyncPowerShell = $powerShell
             $script:guiQuotaAsyncResult = $powerShell.BeginInvoke()
             if ($SelfTest -and -not [string]::IsNullOrWhiteSpace(
@@ -2026,6 +2086,7 @@ try {
                 catch {
                     Stop-QiehaoQuotaAsync
                     $script:guiQuotaLastQueryFailed = $true
+                    $script:guiQuotaJustUpdatedProfile = $null
                     $script:guiQuotaLastFailureCode =
                         'QUOTA_BACKGROUND_WORKER_FAILED'
                     Set-QiehaoLocalizedStatus `
@@ -2045,12 +2106,14 @@ try {
         catch {
             Stop-QiehaoQuotaAsync
             $script:guiQuotaLastQueryFailed = $true
+            $script:guiQuotaJustUpdatedProfile = $null
             $script:guiQuotaLastFailureCode =
                 'QUOTA_BACKGROUND_WORKER_FAILED'
             Set-QiehaoLocalizedStatus `
                 -Key 'Quota.UpdateFailedRetryWithCode' `
                 -Arguments @($script:guiQuotaLastFailureCode) `
                 -Fallback '额度获取失败，可点击刷新额度重新获取。'
+            Update-QiehaoQuotaRows
             return $false
         }
     }
@@ -3119,6 +3182,10 @@ try {
             [Parameter(Mandatory = $true)][object]$Presentation,
             [Parameter(Mandatory = $true)][string]$TargetProfile
         )
+        if ($Result.ResultCode -ceq 'ACTIVE_PROFILE_OUT_OF_SYNC') {
+            Show-QiehaoSwitchResult -Result $Result -TargetProfile $TargetProfile
+            return
+        }
         switch ([string]$Presentation.State) {
             'SwitchSucceeded' {
                 Show-QiehaoSafeMessage `
@@ -3146,6 +3213,29 @@ try {
         )
         if ([string]$Result.ResultCode -ceq
                 'ACTIVE_PROFILE_OUT_OF_SYNC') {
+            $consent = $null
+            try { $consent = Get-CodexIdentityRecoveryConsent -Name $TargetProfile }
+            catch {
+                if ($_.Exception.Message -cne 'IDENTITY_RECOVERY_NOT_APPLICABLE') {
+                    Show-QiehaoOperationResult -Result (ConvertTo-QiehaoOperationResult -ResultCode 'IDENTITY_RECOVERY_VALIDATION_FAILED')
+                    return
+                }
+            }
+            if ($null -ne $consent) {
+                $confirmed = Show-QiehaoChoiceDialog -Title (Get-QiehaoGuiText -Key 'Dialog.Recovery.Title') `
+                    -Message (Format-QiehaoGuiText -Key 'Dialog.Recovery.Message' -Arguments @($TargetProfile)) `
+                    -ConfirmText (Get-QiehaoGuiText -Key 'Dialog.Recovery.Confirm') -ConfirmStyle Danger
+                if (-not $confirmed) { return }
+                Set-QiehaoWriteBusy -Value $true
+                try {
+                    $recovery = Invoke-QiehaoOperationProvider -Operation SWITCH -Provider {
+                        param($n,$approval)
+                        Invoke-QiehaoResponsiveLifecycle -Action Switch -Name $n -IdentityRecoveryConsent $approval
+                    } -ArgumentList @($TargetProfile,$consent)
+                    Show-QiehaoSwitchResult -Result $recovery -TargetProfile $TargetProfile
+                } finally { Set-QiehaoWriteBusy -Value $false }
+                return
+            }
             $confirmed = Show-QiehaoChoiceDialog `
                 -Title (Get-QiehaoGuiText `
                     -Key 'Dialog.SyncActive.Title' `
@@ -3170,7 +3260,7 @@ try {
             }
             return
         }
-        if ([string]$Result.ResultCode -in @('SWITCH_AUTH_UNVERIFIED_TRANSIENT','SWITCH_REAUTH_REQUIRED','SWITCH_POST_VERIFY_IDENTITY_MISMATCH')) {
+        if ([string]$Result.ResultCode -in @('SWITCH_AUTH_UNVERIFIED_TRANSIENT','SWITCH_REAUTH_REQUIRED','SWITCH_POST_VERIFY_IDENTITY_MISMATCH','SWITCH_RECOVERY_LOCAL_COMMITTED_UNVERIFIED')) {
             Set-QiehaoWriteBusy -Value $false
             Show-QiehaoOperationResult -Result $Result
             return
@@ -3552,6 +3642,55 @@ try {
         finally { Set-QiehaoWriteBusy -Value $false }
     }
 
+    function Start-QiehaoRejectedLoginRecovery {
+        $checkRequested = Show-QiehaoChoiceDialog `
+            -Title (Get-QiehaoGuiText -Key 'Account.FallbackCheckTitle') `
+            -Message (Get-QiehaoGuiText -Key 'Account.FallbackCheckMessage') `
+            -ConfirmText (Get-QiehaoGuiText -Key 'Account.FallbackCheckAction') `
+            -DefaultCancel
+        if (-not $checkRequested) { return }
+        if (-not (Stop-QiehaoQuotaForLifecycle)) { return }
+        $liveStatus = Get-QiehaoLiveCodexStatus
+        if ($liveStatus -cne '已退出') {
+            $exitKey = if ($liveStatus -ceq '运行中') { 'Account.AddQuitBeforeCapture' } else { 'Account.AddExitUnknown' }
+            Show-QiehaoSafeMessage -Message (Get-QiehaoGuiText -Key $exitKey) -Severity Warning
+            return
+        }
+        try {
+            Set-QiehaoWriteBusy -Value $true -StatusText (Get-QiehaoGuiText -Key 'Account.FallbackChecking')
+            $inspection = Invoke-QiehaoResponsiveLifecycle -Action InspectFallback
+            if ($inspection.Result -ceq 'ACCOUNT_FALLBACK_IDENTITY_ALREADY_SAVED') {
+                Show-QiehaoSafeMessage -Message (Get-QiehaoGuiText -Key 'Account.FallbackAlreadySaved') -Severity Information
+                return
+            }
+            if ($inspection.Result -ceq 'DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED') {
+                Show-QiehaoOperationResult -Result (ConvertTo-QiehaoOperationResult -ResultCode $inspection.Result)
+                return
+            }
+            if ($inspection.Result -cne 'ACCOUNT_FALLBACK_IDENTITY_VERIFIED' -or $null -eq $inspection.Consent) {
+                Show-QiehaoSafeMessage -Message (Get-QiehaoGuiText -Key 'Account.FallbackUnverified') -Severity Warning
+                return
+            }
+            $profileName = Show-QiehaoNameDialog `
+                -Title (Get-QiehaoGuiText -Key 'Dialog.Add.Title') `
+                -Prompt (Get-QiehaoGuiText -Key 'Dialog.Name.Local')
+            if ([string]::IsNullOrWhiteSpace($profileName)) { return }
+            $saveRequested = Show-QiehaoChoiceDialog `
+                -Title (Get-QiehaoGuiText -Key 'Dialog.Add.Title') `
+                -Message (Get-QiehaoGuiText -Key 'Account.FallbackSaveMessage') `
+                -ConfirmText (Get-QiehaoGuiText -Key 'Account.FallbackSaveAction') `
+                -ConfirmStyle Positive -DefaultCancel
+            if (-not $saveRequested) { return }
+            $result = Invoke-QiehaoOperationProvider -Operation ADD `
+                -Provider {
+                    param($Name,$Consent)
+                    Invoke-QiehaoResponsiveLifecycle -Action ConfirmFallbackAdd -Name $Name -FallbackConsent $Consent
+                } -ArgumentList @($profileName,$inspection.Consent)
+            Show-QiehaoOperationResult -Result $result
+        }
+        finally { Set-QiehaoWriteBusy -Value $false }
+    }
+
     function Invoke-QiehaoAddAccount {
         if ($script:guiIsWriteOperationBusy) { return }
         if (-not (Stop-QiehaoQuotaForLifecycle)) { return }
@@ -3578,13 +3717,19 @@ try {
         }
         try {
             $refreshStatusText.Text = Get-QiehaoGuiText -Key 'Account.LoginStarting'
+            $script:guiLifecycleRegistry.AddIdentityWarning = ''
+            $script:guiLifecycleRegistry.LoginStateMayHaveChanged = $false
             $result = Invoke-QiehaoOperationProvider -Operation ADD -Provider {
                 Invoke-QiehaoResponsiveLifecycle -Action Login
             }
-            if (-not $script:guiLifecycleClosingRequested) { Show-QiehaoOperationResult -Result $result }
-            if (-not $script:guiLifecycleClosingRequested -and $result.ResultCode -ceq 'ACCOUNT_LOGIN_MANUAL_FALLBACK_REQUIRED') {
-                # Explicit user confirmation in the original wizard; never
-                # silently capture the previous account after a protocol error.
+            if (-not $script:guiLifecycleClosingRequested) {
+                Show-QiehaoOperationResult -Result $result -WarningCode $script:guiLifecycleRegistry.AddIdentityWarning
+            }
+            if (-not $script:guiLifecycleClosingRequested -and
+                ($result.ResultCode -ceq 'ACCOUNT_LOGIN_REJECTED' -or $script:guiLifecycleRegistry.LoginStateMayHaveChanged)) {
+                Start-QiehaoRejectedLoginRecovery
+            }
+            elseif (-not $script:guiLifecycleClosingRequested -and $result.ResultCode -ceq 'ACCOUNT_LOGIN_MANUAL_FALLBACK_REQUIRED') {
                 Start-QiehaoAddWizard
             }
         }

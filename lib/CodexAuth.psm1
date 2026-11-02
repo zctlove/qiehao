@@ -3523,6 +3523,8 @@ function ConvertTo-QiehaoDiagnosticSafeValue {
         'SafeToSave',
         'ReasonCode', 'BlockingCount', 'UncertainCount', 'ResultCode',
         'ProfileIntegrity', 'CurrentWorkspaceType', 'SavedWorkspaceType',
+        'LoginPhase', 'FailureCode', 'MismatchedCompletionCount', 'AccountUpdateCount',
+        'OtherNotificationCount', 'CompletionRejected',
         'Decision', 'Version', 'PowerShellVersion', 'WindowsVersion',
         'CodexHomeExists', 'ProfileCount', 'WaitMilliseconds',
         'RecheckIntervalMilliseconds', 'RecheckCount',
@@ -3659,6 +3661,7 @@ function Write-QiehaoDiagnosticEvent {
             'ACCOUNT_REFRESH_START', 'ACCOUNT_REFRESH_RESULT',
             'AUTH_REFRESH_DETECTED', 'ACTIVE_PROFILE_AUTH_REFRESHED',
             'ACCOUNT_LOGIN_START', 'ACCOUNT_LOGIN_URL_READY',
+            'ACCOUNT_LOGIN_DIAGNOSTIC',
             'ACCOUNT_LOGIN_COMPLETED', 'ACCOUNT_LOGIN_CANCELLED', 'ACCOUNT_LOGIN_FAILED',
             'ACCOUNT_LOGIN_SUCCEEDED', 'ACCOUNT_LOGIN_TIMEOUT',
             'ACCOUNT_LOGIN_MANUAL_RECOVERY_REQUIRED', 'ACCOUNT_LOGIN_FINISH',
@@ -4146,7 +4149,8 @@ function Invoke-CodexAccountSwitch {
 
         [switch]$UseProvidedProcessData,
 
-        [switch]$SimulatePostReplaceVerificationFailure
+        [switch]$SimulatePostReplaceVerificationFailure,
+        [object]$IdentityRecoveryConsent
     )
 
     $currentAuthBytes = $null
@@ -4155,6 +4159,7 @@ function Invoke-CodexAccountSwitch {
     $rollbackAuthBytes = $null
     $rollbackWrittenBytes = $null
     $authWasReplaced = $false
+    $identityRecovery = $false
     $stateWasCommitted = $false
     $activeName = $null
     $targetName = ConvertTo-SafeProfileName -Name $Name
@@ -4193,14 +4198,18 @@ function Invoke-CodexAccountSwitch {
             catch [System.InvalidOperationException] {
                 if ($_.Exception.Message -ceq
                         'ACTIVE_PROFILE_IDENTITY_MISMATCH') {
-                    throw (New-SafeException `
-                        -Code 'ACTIVE_PROFILE_OUT_OF_SYNC')
+                    if ($null -eq $IdentityRecoveryConsent) { throw (New-SafeException -Code 'ACTIVE_PROFILE_OUT_OF_SYNC') }
+                    $consent = Get-QiehaoRecoveryConsent -Name $targetName -CodexHome $CodexHome -ProfilesDirectory $ProfilesDirectory -StateDirectory $StateDirectory
+                    if ($IdentityRecoveryConsent.Profile -cne $targetName -or $IdentityRecoveryConsent.Stamp -cne $consent.Stamp) { throw 'IDENTITY_RECOVERY_STATE_CHANGED' }
+                    $identityRecovery = $true
                 }
-                throw
+                else { throw }
             }
-            throw (New-SafeException -Code 'ALREADY_ACTIVE')
+            if (-not $identityRecovery) { throw (New-SafeException -Code 'ALREADY_ACTIVE') }
         }
+        elseif ($null -ne $IdentityRecoveryConsent) { throw 'IDENTITY_RECOVERY_NOT_APPLICABLE' }
 
+        if (-not $identityRecovery) {
         # Preserve the freshest current credentials before attempting to use
         # the target slot; Codex may have refreshed OAuth data while running.
         $currentAuthBytes = Read-SensitiveFileBytes -Path $authPath
@@ -4223,6 +4232,7 @@ function Invoke-CodexAccountSwitch {
             -AuthBytes $currentAuthBytes -ProfilesDirectory $ProfilesDirectory
         $null = Write-CodexAccountSlotBytes -Name $activeName `
             -AuthBytes $currentAuthBytes -ProfilesDirectory $ProfilesDirectory -Force
+        }
 
         # Fully decrypt and validate the target before changing auth.json.
         $targetAuthBytes = Read-CodexAccountSlotBytes -Name $targetName `
@@ -4241,6 +4251,11 @@ function Invoke-CodexAccountSwitch {
                 ParseResult = [string]$targetContext.WorkspaceClaimStatus
             }
 
+        if ($identityRecovery) {
+            Assert-CodexNotRunning -ProcessData $ProcessData -UseProvidedProcessData:$UseProvidedProcessData
+            $rechecked = Get-QiehaoRecoveryConsent -Name $targetName -CodexHome $CodexHome -ProfilesDirectory $ProfilesDirectory -StateDirectory $StateDirectory
+            if ($rechecked.Stamp -cne $IdentityRecoveryConsent.Stamp) { throw 'IDENTITY_RECOVERY_STATE_CHANGED' }
+        }
         Write-CodexAuthFileBytes -AuthPath $authPath -AuthBytes $targetAuthBytes
         $authWasReplaced = $true
         Write-QiehaoDiagnosticEvent -Event 'AUTH_REPLACE' `
@@ -4284,6 +4299,11 @@ function Invoke-CodexAccountSwitch {
         }
     }
     catch {
+        if ($identityRecovery -and $authWasReplaced -and -not $stateWasCommitted) {
+            # The divergent Plus login was never a trusted active-slot backup.
+            # Leave the actual file for inspection; do not restore either slot.
+            throw (New-SafeException -Code 'DO_NOT_START_CODEX_MANUAL_RECOVERY_REQUIRED')
+        }
         if ($authWasReplaced -and -not $stateWasCommitted) {
             $rollbackSucceeded = $false
             try {
@@ -4479,13 +4499,13 @@ function Sync-CodexActiveProfile {
 function Switch-CodexAccountProfile {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true, Position = 0)][string]$Name,
-        [hashtable]$OwnedProcessRegistry)
+        [hashtable]$OwnedProcessRegistry,[object]$IdentityRecoveryConsent)
     return Invoke-WithCodexWriteLock -Operation {
-        param($LockedName, $Registry)
+        param($LockedName, $Registry, $Consent)
         Invoke-QiehaoVerifiedSwitch -Name $LockedName -CodexHome (Get-CodexHome) `
             -ProfilesDirectory $script:ProfilesDirectory -StateDirectory $script:StateDirectory `
-            -OwnedProcessRegistry $Registry
-    } -ArgumentList @($Name, $OwnedProcessRegistry)
+            -OwnedProcessRegistry $Registry -IdentityRecoveryConsent $Consent
+    } -ArgumentList @($Name, $OwnedProcessRegistry, $IdentityRecoveryConsent)
 }
 
 function Remove-NewProfileArtifactsBestEffort {
@@ -6084,8 +6104,11 @@ function Get-CodexAccountSlot {
 . (Join-Path $PSScriptRoot 'AccountLifecycle.ps1')
 
 Export-ModuleMember -Function @(
+    'Get-CodexIdentityRecoveryConsent',
     'Add-CodexManagedProfile',
     'Add-CodexVerifiedLocalProfile',
+    'Get-QiehaoOAuthFallbackIdentity',
+    'Add-CodexCheckedFallbackProfile',
     'Initialize-QiehaoRuntimeDirectories',
     'Write-QiehaoAppStartDiagnostic',
     'Write-QiehaoDiagnosticEvent',
