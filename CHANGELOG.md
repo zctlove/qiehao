@@ -84,7 +84,7 @@ These fixes were implemented in test2-test4. Test5 only adds launcher/package/do
 - Same-user in-place upgrade guidance and synthetic compatibility tests（同用户原目录升级说明与合成数据兼容测试）。
 - Immediately refresh committed Active Profile on the GUI dispatcher, preserve recovery uncertainty, and reject stale refreshes（GUI 主线程立即刷新已提交当前账号，保留人工恢复的不确定状态，丢弃过期刷新）。
 
-Official recommended version remains v1.0.3（正式推荐版本仍为 v1.0.3）；no v1.0.4 release is published by this task（本轮不发布 v1.0.4）。
+At the time this historical candidate was recorded, v1.0.3 was the recommended release; v1.0.4 test3 was not published（记录该历史候选时，正式推荐版本为 v1.0.3；v1.0.4 test3 未公开发布）。 The current latest published release is v1.1.0（当前最新正式发布版本为 v1.1.0，见上文）。
 
 ## v1
 
