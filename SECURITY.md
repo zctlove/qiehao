@@ -6,7 +6,7 @@
 
 | Version（版本） | Supported（支持） |
 | --- | --- |
-| v1 | Yes |
+| v1.1.1 | Yes (current supported release) |
 
 ## Reporting a Vulnerability（报告安全问题）
 

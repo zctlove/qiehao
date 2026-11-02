@@ -206,13 +206,15 @@ Regular users should download the latest Qiehao Release ZIP from GitHub Releases
 1. Download the latest Release ZIP.
 2. Fully extract the ZIP to a local directory where your Windows user has write access.
 3. Do not run Qiehao directly inside the ZIP archive.
-4. Double-click this file in the repository or fully extracted ZIP root directory:
+4. Regular users should double-click this file only from the root of the fully extracted official Windows Release ZIP:
 
 ~~~text
 Qiehao.exe
 ~~~
 
 The recommended entry is `Qiehao.exe`, a Windows GUI launcher that normally does not display a console window. This thin launcher invokes system Windows PowerShell 5.1; scripts and modules remain separate.
+
+**Regular users must not launch `Qiehao.exe` from the source-code repository or treat GitHub's `Code → Download ZIP` snapshot as a runnable package.** The source repository is for development and version control only. Qiehao may create local `profiles/`, `state/`, `logs/`, and `backup/` directories beside the application. `.gitignore` keeps these files out of Git tracking; it does not prevent them from being written to disk.
 
 If the EXE cannot start, use `Start-Qiehao.cmd` as the compatibility/troubleshooting entry. Both entries ultimately run the same Qiehao program logic.
 

@@ -36,6 +36,10 @@
 
 面向普通用户的 ZIP 不包含 `.git/`、`tests/`、`docs/`、`launcher/`、`evidence/`、`obj/`、`bin/`、`.codex/`、`node_modules/`、PDB、开发工作区或本机运行数据。用户应完整解压 ZIP，推荐双击 `Qiehao.exe`；`Start-Qiehao.cmd` 保留为兼容／排障入口，启动同一套程序逻辑。不要直接在 ZIP 内运行。
 
+**源码仓库仅供开发和版本管理，不是普通用户的运行目录。** 普通用户必须从完整解压的正式 Release ZIP 启动，不要从源码仓库或 GitHub `Code → Download ZIP` 源码快照启动。Qiehao 可能在程序所在目录旁创建 `profiles/`、`state/`、`logs/`、`backup/` 等本机运行数据；`.gitignore` 只阻止 Git 跟踪，不会阻止这些文件写入磁盘。
+
+The source repository is for development and version control, not normal application use. Regular users must launch from a fully extracted official Release ZIP, never from the source repository or GitHub's `Code → Download ZIP` source snapshot. Qiehao may create local `profiles/`, `state/`, `logs/`, and `backup/` directories beside the application. `.gitignore` prevents Git tracking; it does not prevent those files from being written to disk.
+
 ## 源码提交与 Release ZIP 绝对禁止包含
 
 - profiles/

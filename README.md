@@ -209,13 +209,15 @@ PowerShell 7 只用于兼容性测试和开发测试，普通用户不需要为�
 1. 下载最新 Release ZIP。
 2. 将 ZIP 完整解压到本地普通用户具有读写权限的目录。
 3. 不要直接在 ZIP 压缩包内运行程序。
-4. 普通用户推荐双击仓库或已完整解压 ZIP 根目录中的：
+4. 普通用户只应双击从 GitHub Releases 下载并完整解压的正式 Windows ZIP 根目录中的：
 
 ~~~text
 Qiehao.exe
 ~~~
 
 推荐双击 `Qiehao.exe`。它是 Windows GUI Launcher（图形界面启动器），正常情况下不会显示命令行黑框。启动器只调用系统 Windows PowerShell 5.1，脚本和模块仍独立保留。
+
+**普通用户不要从 Git 源码仓库目录启动 `Qiehao.exe`，也不要把 GitHub 的 `Code → Download ZIP` 源码快照当作运行目录。** 源码仓库仅用于开发和版本管理。Qiehao 可能在程序所在目录旁创建 `profiles/`、`state/`、`logs/`、`backup/` 等本机运行数据；`.gitignore` 只阻止 Git 跟踪这些文件，不会阻止它们写入磁盘。
 
 如果 EXE 无法启动，使用 `Start-Qiehao.cmd` 作为兼容／排障入口。两个入口最终启动同一套 Qiehao 程序逻辑。
 
